@@ -5,6 +5,7 @@ import json
 import uuid
 import Queue
 import shutil
+import socket
 import logging
 import os.path
 import argparse
@@ -48,13 +49,21 @@ def check_output(cmd, log=True):
         return True, out[0] + out[1]
 
 
+# This variable is updated from main function
 SSH_OPTS = "-o LogLevel=quiet -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
-SSH_OPTS += "-o ConnectTimeout=20"
-# add timeouts
+SSH_OPTS += "-o ConnectTimeout={0}"
 
-def check_output_ssh(host, opts, cmd):
+
+def check_output_ssh(host, opts, cmd, no_retry=False, max_retry=3):
     logger.debug("SSH:%s: %r", host, cmd)
-    return check_output("ssh {2} {0} {1}".format(host, cmd, SSH_OPTS), False)
+    while True:
+        ok, res = check_output("ssh {0} {1} {2}".format(SSH_OPTS, host, cmd), False)
+        if no_retry or res != "" or max_retry == 1:
+            return ok, res
+
+        max_retry -= 1
+        time.sleep(1)
+        logger.warning("Retry SSH:%s: %r", host, cmd)
 
 
 def get_device_for_file(host, opts, fname):
@@ -174,8 +183,7 @@ class CephDataCollector(Collector):
                 ("pg dump skipped, as num_pg ({0}) > max_pg_dump_count ({1})." +
                  " Use --max-pg-dump-count NUM option to change the limit").format(
                     json.loads(status)['pgmap']['num_pgs'],
-                    self.opts.max_pg_dump_count
-                 ))
+                    self.opts.max_pg_dump_count))
         else:
             cmds.append('pg dump')
 
@@ -239,13 +247,13 @@ class CephDataCollector(Collector):
                 break
         else:
             osd_running = False
+            logger.warning("osd-{0} in node {1} is down.".format(osd_id, host) +
+                           " No config available, will use default data and journal path")
 
         self.emit(path + "osd_daemons", 'txt', ok, out)
         self.ssh2emit(host, path + "log", 'txt',
                       "tail -n {0} /var/log/ceph/ceph-osd.{1}.log".format(
-                        self.opts.ceph_log_max_lines,
-                        osd_id
-                      ))
+                          self.opts.ceph_log_max_lines, osd_id))
 
         if osd_running:
             osd_cfg_cmd = "sudo ceph -f json --admin-daemon /var/run/ceph/ceph-osd.{0}.asok config show"
@@ -269,10 +277,6 @@ class CephDataCollector(Collector):
             data_dev = None
             jdev = None
 
-        if not osd_running:
-            logger.warning("osd-{0} in node {1} is down.".format(osd_id, host) +
-                           " No config available, will use default data and journal path")
-
         if data_dev is None:
             data_dev = "/var/lib/ceph/osd/ceph-{0}".format(osd_id)
 
@@ -292,19 +296,13 @@ class CephDataCollector(Collector):
         self.ssh2emit(host, path + "mon_daemons", 'txt', "ps aux | grep ceph-mon")
         self.ssh2emit(host, path + "mon_log", 'txt',
                       "tail -n {0} /var/log/ceph/ceph-mon.{1}.log".format(
-                        self.opts.ceph_log_max_lines,
-                        name
-                      ))
+                          self.opts.ceph_log_max_lines, name))
         self.ssh2emit(host, path + "ceph_log", 'txt',
                       "tail -n {0} /var/log/ceph/ceph.log".format(
-                        self.opts.ceph_log_max_lines,
-                        name
-                      ))
+                          self.opts.ceph_log_max_lines, name))
         self.ssh2emit(host, path + "ceph_audit", 'txt',
                       "tail -n {0} /var/log/ceph/ceph.audit.log".format(
-                        self.opts.ceph_log_max_lines,
-                        name
-                      ))
+                          self.opts.ceph_log_max_lines, name))
 
 
 class NodeCollector(Collector):
@@ -313,21 +311,21 @@ class NodeCollector(Collector):
     run_alone = False
 
     node_commands = [
-        ("lshw",      "xml", "lshw -xml"),
-        ("lsblk",     "txt", "lsblk -a"),
+        ("lshw", "xml", "lshw -xml"),
+        ("lsblk", "txt", "lsblk -a"),
         ("diskstats", "txt", "cat /proc/diskstats"),
-        ("uname",     "txt", "uname -a"),
+        ("uname", "txt", "uname -a"),
         ("dmidecode", "txt", "dmidecode"),
-        ("meminfo",   "txt", "cat /proc/meminfo"),
-        ("loadavg",   "txt", "cat /proc/loadavg"),
-        ("cpuinfo",   "txt", "cat /proc/cpuinfo"),
-        ("mount",     "txt", "mount"),
-        ("ipa",       "txt", "ip -o -4 a"),
-        ("netdev",    "txt", "cat /proc/net/dev"),
+        ("meminfo", "txt", "cat /proc/meminfo"),
+        ("loadavg", "txt", "cat /proc/loadavg"),
+        ("cpuinfo", "txt", "cat /proc/cpuinfo"),
+        ("mount", "txt", "mount"),
+        ("ipa", "txt", "ip -o -4 a"),
+        ("netdev", "txt", "cat /proc/net/dev"),
         ("ceph_conf", "txt", "cat /etc/ceph/ceph.conf"),
-        ("uptime",    "txt", "cat /proc/uptime"),
-        ("dmesg",     "txt", "cat /var/log/dmesg"),
-        ("netstat",   "txt", "netstat -nap")
+        ("uptime", "txt", "cat /proc/uptime"),
+        ("dmesg", "txt", "cat /var/log/dmesg"),
+        ("netstat", "txt", "netstat -nap")
     ]
 
     def collect_node(self, path, host):
@@ -484,7 +482,7 @@ class CephPerformanceCollector(Collector):
             os.unlink(local_file)
 
         start_cmd = 'screen -S ceph_monitor -d -m bash ' + self.remote_file
-        check_output_ssh(host, self.opts, start_cmd)
+        check_output_ssh(host, self.opts, start_cmd, no_retry=True)
 
     def collect_performance_data(self, path, host):
         all_files = {'io': self.io_file,
@@ -548,12 +546,12 @@ def save_results_th_func(opts, res_q, out_folder):
                 if not opts.no_pretty_json:
                     try:
                         out = json.dumps(json.loads(out), indent=4, sort_keys=True)
-                    except:
+                    except Exception:
                         pass
                 open(fname, "w").write(out)
             else:
                 open(fname, "w").write(out)
-    except:
+    except Exception:
         logger.exception("In save_results_th_func thread")
 
 
@@ -580,7 +578,7 @@ def run_all(opts, run_q):
             try:
                 func, path, node, kwargs = val
                 func(path, node, **kwargs)
-            except:
+            except Exception:
                 logger.exception("In worker thread")
             val = run_q.get()
 
@@ -642,8 +640,12 @@ def parse_args(argv):
                    help="Colsole log level")
 
     p.add_argument("-p", "--pool-size",
-                   default=64, type=int,
+                   default=16, type=int,
                    help="Worker pool size")
+
+    p.add_argument("-t", "--ssh-conn-timeout",
+                   default=60, type=int,
+                   help="SSH connection timeout")
 
     p.add_argument("-s", "--performance-collect-seconds",
                    default=60, type=int, metavar="SEC",
@@ -722,12 +724,17 @@ def pmap(func, data, thcount):
 
 
 def get_sshable_hosts(hosts, thcount=32):
-    cmd = "ssh " + SSH_OPTS + " -o ConnectTimeout=5 -o ConnectionAttempts=1 "
+    cmd = "ssh -o LogLevel=quiet -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=60 -o ConnectionAttempts=2 "
 
     def check_host(host):
+        try:
+            socket.gethostbyname(host)
+        except socket.gaierror:
+            return None
         ok, out = check_output(cmd + host + ' pwd')
         if ok:
             return host
+        return None
 
     results = pmap(check_host, hosts, thcount=thcount)
     return [res for ok, res in results if ok and res is not None]
@@ -751,8 +758,12 @@ def main(argv):
 
     setup_loggers(getattr(logging, opts.log_level),
                   os.path.join(out_folder, "log.txt"))
+
     global logger_ready
     logger_ready = True
+
+    global SSH_OPTS
+    SSH_OPTS = SSH_OPTS.format(opts.ssh_conn_timeout)
 
     collector_settings = CollectSettings()
     map(collector_settings.disable, opts.disable)
@@ -878,7 +889,7 @@ def main(argv):
                 run_q.put((ceph_performance_collector.collect_performance_data,
                           "", node, {}))
             run_all(opts, run_q)
-    except:
+    except Exception:
         logger.exception("When collecting data:")
     finally:
         res_q.put(None)
@@ -894,11 +905,16 @@ def main(argv):
 
     check_output("cd {0} ; tar -zcvf {1} *".format(out_folder, out_file))
     logger.info("Result saved into %r", out_file)
+    if opts.log_level in ('WARNING', 'ERROR', "CRITICAL"):
+        print "Result saved into %r" % (out_file,)
 
     if not opts.dont_remove_unpacked:
         shutil.rmtree(out_folder)
     else:
         logger.info("Temporary folder %r", out_folder)
+        if opts.log_level in ('WARNING', 'ERROR', "CRITICAL"):
+            print "Temporary folder %r" % (out_folder,)
+
 
 if __name__ == "__main__":
     try:
