@@ -494,7 +494,8 @@ class CephPerformanceCollector(Collector):
                           "{0}/perf_monitoring/{1}/{2}".format(path, host, tp),
                           "txt", 'cat ' + fname)
         check_output_ssh(host, self.opts, "rm -f " +
-                         " ".join(all_files.values() + [self.remote_file]))
+                         " ".join(all_files.values() + [self.remote_file]),
+                         no_retry=True)
 
 
 class CephDiscovery(object):
@@ -856,7 +857,7 @@ def main(argv):
         if node_resource_collector is not None:
             dt = opts.usage_collect_interval - (time.time() - t1)
             if dt > 0:
-                logger.info("Will wait for {0} seconds for usage collection".format(int(dt)))
+                logger.info("Will wait for {0} seconds for usage data collection".format(int(dt)))
                 for i in range(int(dt / 0.1)):
                     time.sleep(0.1)
             logger.info("Start final usage collection")
@@ -880,7 +881,7 @@ def main(argv):
             run_all(opts, run_q)
 
             dt = opts.performance_collect_seconds
-            logger.info("Will wait for {0} seconds for performance collection".format(int(dt)))
+            logger.info("Will wait for {0} seconds for performance data collection".format(int(dt)))
             for i in range(int(dt / 0.1)):
                 time.sleep(0.1)
 
