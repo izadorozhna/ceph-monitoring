@@ -46,7 +46,7 @@ def check_output(cmd, log=True):
     if 0 == code:
         return True, out[0]
     else:
-        return True, out[0] + out[1]
+        return False, out[0] + out[1]
 
 
 # This variable is updated from main function
@@ -55,10 +55,14 @@ SSH_OPTS += "-o ConnectTimeout={0}"
 
 
 def check_output_ssh(host, opts, cmd, no_retry=False, max_retry=3):
+    if no_retry:
+        max_retry = 0
+
     logger.debug("SSH:%s: %r", host, cmd)
     while True:
         ok, res = check_output("ssh {0} {1} {2}".format(SSH_OPTS, host, cmd), False)
-        if no_retry or res != "" or max_retry == 1:
+
+        if ok or max_retry <= 0:
             return ok, res
 
         max_retry -= 1
@@ -81,7 +85,7 @@ def get_device_for_file(host, opts, fname):
     abs_path_cmd += ' path=$(readlink -f "$path") ; done ; echo $path\''
     ok, dev = check_output_ssh(host, opts, abs_path_cmd)
     assert ok
-
+    logger.info("dev = %s", dev)
     root_dev = dev = dev.strip()
     while root_dev[-1].isdigit():
         root_dev = root_dev[:-1]
@@ -242,6 +246,9 @@ class CephDataCollector(Collector):
         ok, out = check_output_ssh(host, self.opts, "ps aux | grep ceph-osd")
 
         for line in out.split("/n"):
+            if '--id ' + str(osd_id) in line and 'ceph-osd' in line:
+                osd_running = True
+                break
             if '-i ' + str(osd_id) in line and 'ceph-osd' in line:
                 osd_running = True
                 break

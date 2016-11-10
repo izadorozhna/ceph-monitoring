@@ -280,7 +280,10 @@ class CephCluster(object):
 
     def fill_io_devices_usage_stats(self):
         for osd in self.osds:
-            host = self.hosts[osd.host]
+            try:
+                host = self.hosts[osd.host]
+            except KeyError:
+                continue
 
             perf_m = host.perf_monitoring
             if perf_m is not None:
@@ -379,7 +382,19 @@ class CephCluster(object):
             cnode = self.osd_tree[cnode['parent']]
         return cnode
 
+    def set_osd_childs(self):
+        host_map = {}
+        for node in self.osd_tree.values():
+            if node['type'] == 'host':
+                for ch_id in node['children']:
+                    host_map[ch_id] = node['name']
+
+        for osd in self.osds:
+            osd.host = host_map[osd.id]
+
     def load_osds(self):
+        need_set_child = False
+
         for node in self.osd_tree.values():
             if node['type'] != 'osd':
                 continue
@@ -387,7 +402,11 @@ class CephCluster(object):
             osd = CephOSD()
             self.osds.append(osd)
             osd.__dict__.update(node)
-            osd.host = node['host']
+
+            try:
+                osd.host = node['host']
+            except KeyError:
+                need_set_child = True
 
             try:
                 osd_data = getattr(self.jstorage.osd, str(node['id']))
@@ -418,9 +437,14 @@ class CephCluster(object):
             else:
                 osd.pg_count = None
 
-            osd.config = self.jstorage.osd.get("{0}/config".format(osd.id))
+            try:
+                osd.config = self.jstorage.osd.get("{0}/config".format(osd.id))
+            except:
+                osd.config = None
 
         self.osds.sort(key=lambda x: x.id)
+        if need_set_child:
+            self.set_osd_childs()
 
     def load_pools(self):
         self.pools = {}

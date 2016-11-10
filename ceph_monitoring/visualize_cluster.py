@@ -378,6 +378,7 @@ def show_osd_info(report, cluster):
             avail_perc_str = HTML_UNKNOWN
             j_on_same_drive = HTML_UNKNOWN
             j_on_file = HTML_UNKNOWN
+            j_on_ssd = HTML_UNKNOWN
 
         if osd.status == 'up':
             status = html_ok("up")
