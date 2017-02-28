@@ -1,4 +1,9 @@
-How to collect data
+Ceph cluster data collect tool.
+-------------------------------
+
+
+How to collect data:
+--------------------
 
 * ssh to any node, which has ceph access (controller/compute/osd)
 * Run 'curl https://raw.githubusercontent.com/Mirantis/ceph-monitoring/master/ceph_monitoring/collect_info.py | python'

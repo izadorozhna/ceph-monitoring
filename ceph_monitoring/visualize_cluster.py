@@ -1,16 +1,14 @@
 import sys
 import json
 import shutil
-import pprint
 import bisect
 import os.path
 import warnings
 import argparse
-import itertools
 import subprocess
 import collections
 
-import html2
+import html
 
 from hw_info import b2ssize
 import ceph_report_template
@@ -18,7 +16,7 @@ from cluster import CephCluster
 from storage import RawResultStorage, JResultStorage
 
 
-H = html2.rtag
+H = html.rtag
 
 
 def CH3(text):
@@ -98,7 +96,7 @@ class Report(object):
         css_links = links[:len(self.style_links)]
         js_links = links[len(self.style_links):]
 
-        doc = html2.Doc()
+        doc = html.Doc()
         with doc.html:
             with doc.head:
                 doc.title("Ceph cluster report: " + self.cluster_name)
@@ -160,7 +158,7 @@ class Report(object):
 
 
 def show_summary(report, cluster):
-    t = html2.HTMLTable(["Setting", "Value"])
+    t = html.HTMLTable(["Setting", "Value"])
     t.add_cells("Collected at", cluster.report_collected_at_local)
     t.add_cells("Collected at GMT", cluster.report_collected_at_gmt)
     t.add_cells("Status", cluster.overall_status)
@@ -181,7 +179,7 @@ def show_summary(report, cluster):
     if cluster.settings is None:
         t = H.font("No live OSD found!", color="red")
     else:
-        t = html2.HTMLTable(["Setting", "Value"])
+        t = html.HTMLTable(["Setting", "Value"])
         t.add_cells("Count", osd_count)
         t.add_cells("PG per OSD", cluster.num_pgs / osd_count)
         t.add_cells("Cluster net", cluster.cluster_net)
@@ -195,13 +193,13 @@ def show_summary(report, cluster):
         t.add_cells("Filestorage sync", str(cluster.settings.filestore_max_sync_interval) + 's')
     report.add_block(3, "OSD:", t)
 
-    t = html2.HTMLTable(["Setting", "Value"])
+    t = html.HTMLTable(["Setting", "Value"])
     t.add_cells("Client IO Bps", b2ssize(cluster.write_bytes_sec, False))
     t.add_cells("Client IO IOPS", b2ssize(cluster.op_per_sec, False))
     report.add_block(2, "Activity:", t)
 
     if len(cluster.health_summary) != 0:
-        t = html2.Doc()
+        t = html.Doc()
         for msg in cluster.health_summary:
             if msg['severity'] == "HEALTH_WARN":
                 color = "orange"
@@ -217,7 +215,7 @@ def show_summary(report, cluster):
 
 
 def show_mons_info(report, cluster):
-    table = html2.HTMLTable(headers=["Name", "Node", "Role",
+    table = html.HTMLTable(headers=["Name", "Node", "Role",
                                      "Disk free<br>B (%)"])
 
     for mon in cluster.mons:
@@ -244,7 +242,7 @@ def show_pg_state(report, cluster):
             statuses[state_name] += pg_group["count"]
 
     npg = cluster.num_pgs
-    table = html2.HTMLTable(headers=["Status", "Count", "%"])
+    table = html.HTMLTable(headers=["Status", "Count", "%"])
     table.add_row(["any", str(npg), "100.00"])
     for status, count in sorted(statuses.items()):
         table.add_row([status, str(count), "%.2f" % (100.0 * count / npg)])
@@ -258,7 +256,7 @@ def show_osd_state(report, cluster):
     for osd in cluster.osds:
         statuses[osd.status].append("{0.host}:{0.id}".format(osd))
 
-    table = html2.HTMLTable(headers=["Status", "Count", "ID's"])
+    table = html.HTMLTable(headers=["Status", "Count", "ID's"])
     for status, osds in sorted(statuses.items()):
         table.add_row([status, len(osds),
                        "" if status == "up" else "<br>".join(osds)])
@@ -266,7 +264,7 @@ def show_osd_state(report, cluster):
 
 
 def show_pools_info(report, cluster):
-    table = html2.HTMLTable(headers=["Pool",
+    table = html.HTMLTable(headers=["Pool",
                                      "Id",
                                      "size",
                                      "min_size",
@@ -304,8 +302,11 @@ def show_pools_info(report, cluster):
             row = [osd_pg.get(pool.name, 0)
                    for osd_pg in cluster.osd_pool_pg_2d.values()]
             avg = float(sum(row)) / len(row)
-            dev = (sum((i - avg) ** 2.0 for i in row) / len(row)) ** 0.5
-            table.add_cell(str(int(dev * 100. / avg)))
+            dev = (sum((i - avg) ** 2.0 for i in row) / (len(row) - 1)) ** 0.5
+            if avg < 1E-5:
+                table.add_cell('--')
+            else:
+                table.add_cell(str(int(dev * 100. / avg)))
 
         table.next_row()
 
@@ -324,18 +325,18 @@ def html_fail(text):
 
 
 def show_osd_info(report, cluster):
-    table = html2.HTMLTable(headers=["OSD",
-                                     "node",
-                                     "status",
-                                     "daemon<br>run",
-                                     "weight<br>reweight",
-                                     "PG count",
-                                     "Storage<br>used",
-                                     "Storage<br>free",
-                                     "Storage<br>free %",
-                                     "Journal<br>on same<br>disk",
-                                     "Journal<br>on SSD",
-                                     "Journal<br>on file"])
+    table = html.HTMLTable(headers=["OSD",
+                                    "node",
+                                    "status",
+                                    "daemon<br>run",
+                                    "weight<br>reweight",
+                                    "PG count",
+                                    "Storage<br>used",
+                                    "Storage<br>free",
+                                    "Storage<br>free %",
+                                    "Journal<br>on same<br>disk",
+                                    "Journal<br>on SSD",
+                                    "Journal<br>on file"])
 
     for osd in cluster.osds:
         if osd.daemon_runs is None:
@@ -419,7 +420,7 @@ def show_osd_info(report, cluster):
 
 
 def show_osd_perf_info(report, cluster):
-    table = html2.HTMLTable(headers=["OSD",
+    table = html.HTMLTable(headers=["OSD",
                                      "node",
                                      "apply<br>lat, ms",
                                      "commit<br>lat, ms",
@@ -429,13 +430,13 @@ def show_osd_perf_info(report, cluster):
                                      "D read<br>OPS",
                                      "D write<br>OPS",
                                      "D IO<br>time %",
-                                     "J dev",
-                                     "J read<br>Bps",
-                                     "J write<br>Bps",
-                                     "J read<br>OPS",
-                                     "J write<br>OPS",
-                                     "J IO<br>time %",
-                                     ])
+                                    "J dev",
+                                    "J read<br>Bps",
+                                    "J write<br>Bps",
+                                    "J read<br>OPS",
+                                    "J write<br>OPS",
+                                    "J IO<br>time %",
+                                    ])
 
     for osd in cluster.osds:
         if osd.osd_perf is not None:
@@ -471,7 +472,7 @@ def show_osd_perf_info(report, cluster):
 
     report.add_block(8, "OSD's load uptime average:", table)
 
-    table = html2.HTMLTable(headers=["OSD",
+    table = html.HTMLTable(headers=["OSD",
                                      "node",
                                      "D dev",
                                      "D read<br>Bps",
@@ -481,13 +482,13 @@ def show_osd_perf_info(report, cluster):
                                      "D lat<br>ms",
                                      "D IO<br>time %",
                                      "J dev",
-                                     "J read<br>Bps",
-                                     "J write<br>Bps",
-                                     "J read<br>OPS",
-                                     "J write<br>OPS",
-                                     "J lat<br>ms",
-                                     "J IO<br>time %",
-                                     ])
+                                    "J read<br>Bps",
+                                    "J write<br>Bps",
+                                    "J read<br>OPS",
+                                    "J write<br>OPS",
+                                    "J lat<br>ms",
+                                    "J IO<br>time %",
+                                    ])
 
     have_any_data = False
     for osd in cluster.osds:
@@ -571,7 +572,7 @@ def show_host_network_load_in_color(report, cluster):
     for io, name in loads:
         max_len = max(len(set(data) - std_nets) for data in io.values())
 
-        table = html2.HTMLTable(
+        table = html.HTMLTable(
             ["host", "public<br>net", "cluster<br>net"] + ["hw adapter"] * max_len,
             zebra=False
         )
@@ -674,7 +675,7 @@ def show_host_io_load_in_color(report, cluster):
 
         max_len = max(map(len, target.values()))
 
-        table = html2.HTMLTable(['host'] + ['load'] * max_len, zebra=False)
+        table = html.HTMLTable(['host'] + ['load'] * max_len, zebra=False)
         for host_name, data in sorted(target.items()):
             table.add_cell(host_name)
             for dev, val in sorted(data.items()):
@@ -714,7 +715,7 @@ def show_hosts_info(report, cluster):
                   "RAM<br>free",
                   "Swap<br>used",
                   "Load avg<br>5m"]
-    table = html2.HTMLTable(headers=header_row)
+    table = html.HTMLTable(headers=header_row)
     for host in sorted(cluster.hosts.values(), key=lambda x: x.name):
         services = ["osd-{0}".format(osd.id) for osd in cluster.osds if osd.host == host.name]
         all_mons = [mon.name for mon in cluster.mons]
@@ -779,7 +780,7 @@ def show_hosts_resource_usage(report, cluster):
     header_row += ["Net"] * max_nets
     row_len = len(header_row)
 
-    table = html2.HTMLTable(headers=header_row)
+    table = html.HTMLTable(headers=header_row)
     for host in sorted(cluster.hosts.values(), key=lambda x: x.name):
         perf_info = [host.name]
 
@@ -987,7 +988,7 @@ def show_osd_pool_PG_distribution(report, cluster):
         return
 
     pools = sorted(cluster.sum_per_pool)
-    table = html2.HTMLTable(headers=["OSD/pool"] + list(pools) + ['sum'])
+    table = html.HTMLTable(headers=["OSD/pool"] + list(pools) + ['sum'])
 
     for osd_id, row in sorted(cluster.osd_pool_pg_2d.items()):
         data = [osd_id] + \
@@ -1192,7 +1193,7 @@ def main(argv):
         report.style_links.append("https://maxcdn.bootstrapcdn.com/bootstrap/3.3.4/css/bootstrap.min.css")
 
         if opts.simple:
-            dct = html2.HTMLTable.def_table_attrs
+            dct = html.HTMLTable.def_table_attrs
             dct['class'] = dct['class'].replace("sortable", "").replace("zebra-table", "")
         else:
             report.script_links.append("http://www.kryogenix.org/code/browser/sorttable/sorttable.js")

@@ -146,7 +146,12 @@ def load_performance_log_file(str_data, fields, skip=0, field_types=None):
     lines = iter(str_data.split("\n"))
 
     # Mon Sep  7 21:08:26 UTC 2015
-    sdate = datetime.datetime.strptime(next(lines), "%a %b %d %H:%M:%S UTC %Y")
+    tline = next(lines)
+    try:
+        sdate = datetime.datetime.strptime(tline, "%a %b %d %H:%M:%S UTC %Y")
+    except ValueError:
+        sdate = datetime.datetime.strptime(tline, "%a %b %d %H:%M:%S MSK %Y")
+
     timestamp = (sdate - datetime.datetime(1970, 1, 1)).total_seconds()
 
     per_dev = {}
@@ -272,6 +277,9 @@ class CephCluster(object):
                 else:
                     continue
 
+                if dtime < 1E-3:
+                    continue
+
                 net.perf_stats_curr = TabulaRasa()
                 net.perf_stats_curr.sbytes = (ed.sbytes - sd.sbytes) / dtime
                 net.perf_stats_curr.rbytes = (ed.rbytes - sd.rbytes) / dtime
@@ -310,6 +318,9 @@ class CephCluster(object):
                     sd = start_data[dev]
                     ed = end_data[dev]
                 else:
+                    continue
+
+                if dtime < 1E-3:
                     continue
 
                 dev_stat.read_bytes_curr = (ed.sectors_read - sd.sectors_read) * 512 / dtime
@@ -608,13 +619,20 @@ class CephCluster(object):
             collect_time, stat_type = stat_name.split("-")
 
             if stat_type == 'disk':
-                stat = parse_diskstats(host_stats.get(stat_name))
+                try:
+                    stat = parse_diskstats(host_stats.get(stat_name))
+                except:
+                    stat = None
             elif stat_type == 'net':
-                stat = parse_netdev(host_stats.get(stat_name))
+                try:
+                    stat = parse_netdev(host_stats.get(stat_name))
+                except:
+                    stat = None
             else:
                 raise ValueError("Unknown stat type - {!r}".format(stat_type))
 
-            stats[stat_type].append([int(collect_time), stat])
+            if stat is not None:
+                stats[stat_type].append([int(collect_time), stat])
 
         for stat_list in stats.values():
             stat_list.sort()

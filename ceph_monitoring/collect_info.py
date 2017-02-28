@@ -2,18 +2,25 @@ import re
 import sys
 import time
 import json
-import uuid
 import Queue
 import shutil
-import socket
 import logging
 import os.path
+import tempfile
 import argparse
 import warnings
 import datetime
 import threading
-import subprocess
+import functools
+import contextlib
 import collections
+
+
+from agent.agent import ConnectionClosed
+from cephlib.storage import make_storage
+from cephlib.common import setup_loggers, check_output, check_output_ssh, pmap, run
+from cephlib.rpc import init_node, rpc_run, rpc_run_ch
+from cephlib.discover import get_osds_nodes, get_mons_nodes
 
 
 logger = logging.getLogger('collect')
@@ -33,63 +40,44 @@ class CollectSettings(object):
         return True
 
 
-def check_output(cmd, log=True):
-    if log:
-        logger.debug("CMD: %r", cmd)
-
-    p = subprocess.Popen(cmd, shell=True,
-                         stdout=subprocess.PIPE,
-                         stderr=subprocess.PIPE)
-    out = p.communicate()
-    code = p.wait()
-
-    if 0 == code:
-        return True, out[0]
-    else:
-        return False, out[0] + out[1]
+class Node(object):
+    def __init__(self, ip, name):
+        self.ip = ip
+        self.name = name
+        self.rpc = None
+        self.daemon_pid = None
+        self.osds = []
+        self.mon = None
 
 
-# This variable is updated from main function
-SSH_OPTS = "-o LogLevel=quiet -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
-SSH_OPTS += "-o ConnectTimeout={0}"
+# CMD executors --------------------------------------------------------------------------------------------------------
 
 
-def check_output_ssh(host, opts, cmd, no_retry=False, max_retry=3):
-    if no_retry:
-        max_retry = 0
+def rpc_get_host_interfaces():
+    res = []
+    for line in open("/sys/class/net").read().strip().split("\n")[1:]:
+        if not line.startswith('l'):
+            continue
 
-    logger.debug("SSH:%s: %r", host, cmd)
-    while True:
-        ok, res = check_output("ssh {0} {1} {2}".format(SSH_OPTS, host, cmd), False)
+        params = line.split()
 
-        if ok or max_retry <= 0:
-            return ok, res
+        if len(params) < 11:
+            # logger.warning("Strange line in '/sys/class/net' node %s: %r", socket.gethostname(), line)
+            continue
 
-        max_retry -= 1
-        time.sleep(1)
-        logger.warning("Retry SSH:%s: %r", host, cmd)
+        res.append(('devices/pci' in params[10], params[8]))
+    return res
 
 
-def get_device_for_file(host, opts, fname):
-    ok, dev_str = check_output_ssh(host, opts, "df " + fname)
-    assert ok
+def get_device_for_file(node, fname):
+    dev = node.rpc.sensors.get_dev_for_file(fname)
 
-    dev_str = dev_str.strip()
-    dev_link = dev_str.strip().split("\n")[1].split()[0]
+    assert dev.startswith('/dev')
 
-    if dev_link == 'udev':
-        dev_link = fname
-
-    abs_path_cmd = '\'path="{0}" ;'.format(dev_link)
-    abs_path_cmd += 'while [ -h "$path" ] ; do path=$(readlink "$path") ;'
-    abs_path_cmd += ' path=$(readlink -f "$path") ; done ; echo $path\''
-    ok, dev = check_output_ssh(host, opts, abs_path_cmd)
-    assert ok
     logger.info("dev = %s", dev)
     root_dev = dev = dev.strip()
     while root_dev[-1].isdigit():
         root_dev = root_dev[:-1]
-
     return root_dev, dev
 
 
@@ -97,59 +85,71 @@ class Collector(object):
     name = None
     run_alone = False
 
-    def __init__(self, opts, collect_settings, res_q):
+    def __init__(self, collect_settings, storage, opts):
         self.collect_settings = collect_settings
+        self.storage = storage
         self.opts = opts
-        self.res_q = res_q
+        self.node = None
 
-    def run2emit(self, path, format, cmd, check=True):
+    @contextlib.contextmanager
+    def chdir(self, path):
+        saved = self.storage
+        self.storage = self.storage.substorage(path)
+        try:
+            yield
+        finally:
+            self.storage = saved
+
+    def save(self, path, format, code, data, check=True):
         if check:
             if not self.collect_settings.allowed(path):
                 return
-        ok, out = check_output(cmd)
-        if not ok:
-            logger.warning("Cmd {0} failed locally".format(cmd))
-        self.emit(path, format, ok, out, check=False)
 
-    def ssh2emit(self, host, path, format, cmd, check=True):
+        self.storage.put(path + "." + ("err" if code != 0 else format), data)
+        return data if code == 0 else None
+
+    def save_file(self, path, file_path, format='txt', check=True):
+        "Download and save file from node"
         if check:
             if not self.collect_settings.allowed(path):
                 return
-        ok, out = check_output_ssh(host, self.opts, cmd)
-        if not ok:
-            logger.warning("Cmd {0} failed on node {1}".format(cmd, host))
-        self.emit(path, format, ok, out, check=False)
 
-    def emit(self, path, format, ok, out, check=True):
+        try:
+            if self.node is None:
+                loc = 'local'
+                content = open(file_path, 'rb').read()
+            else:
+                loc = self.node.name
+                content = self.node.rpc.fs.get_file(file_path)
+            code = 0
+        except (IOError, RuntimeError) as exc:
+            logger.warning("Can't get file %r from node %s. %s", file_path, loc, exc)
+            content = str(exc)
+            code = 1
+
+        self.save(path, format, code, content)
+        return content if code == 0 else None
+
+    def save_output(self, path, cmd, format='txt', check=True):
         if check:
             if not self.collect_settings.allowed(path):
                 return
-        self.res_q.put((ok, path, (format if ok else 'err'), out))
 
-    # should provides set of on_XXX methods
-    # where XXX - node role role
-    # def collect_XXX(self, path, node, **params):
-    #    pass
+        if self.node is None:
+            res = check_output(cmd)
+            loc = "locally"
+        else:
+            res = rpc_run(self.node, cmd)
+            loc = "on node {0}".format(self.node.name)
 
-    # util functions, used in different classes
-    def get_host_interfaces(self, host):
-        ok, net_devs = check_output_ssh(host, self.opts, 'ls -l /sys/class/net')
-        if not ok:
-            logger.warning("'ls -l /sys/class/net' failed %s", net_devs)
-            return
+        if res.code != 0:
+            logger.warning("Cmd {0} failed {1} with code {2}".format(cmd, loc, res.code))
 
-        for line in net_devs.strip().split("\n")[1:]:
-            if not line.startswith('l'):
-                continue
+        self.save(path, format, res.code, res.out)
+        return res
 
-            params = line.split()
 
-            if len(params) < 11:
-                logger.warning("Strange line in 'ls -l /sys/class/net' node %s: %r",
-                               host, line)
-                continue
-
-            yield ('devices/pci' in params[10]), params[8]
+CEPH_DEFAULT_CMD = "ceph -c {0.conf} -k {0.key} --format json "
 
 
 class CephDataCollector(Collector):
@@ -159,157 +159,125 @@ class CephDataCollector(Collector):
 
     def __init__(self, *args, **kwargs):
         Collector.__init__(self, *args, **kwargs)
-        self.ceph_cmd = "ceph -c {0.conf} -k {0.key} --format json ".format(self.opts)
+        self.ceph_cmd = CEPH_DEFAULT_CMD.format(self.opts)
 
-        self.osd_devs = {}
-        self.osd_devs_lock = threading.Lock()
+    def collect_master(self):
+        with self.chdir("master"):
+            curr_data = "{0}\n{1}\n{2}".format(
+                datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
+                time.time())
 
-    def collect_master(self, path=None, node=None):
-        path = path + "/master/"
+            self.save("collected_at", 'txt', 0, curr_data)
+            res = self.save_output("status", self.ceph_cmd + "status", 'json')
+            assert res, "{!r} failed".format(self.ceph_cmd + "status")
 
-        curr_data = "{0}\n{1}\n{2}".format(
-            datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
-            time.time())
+            cmds = ['osd tree',
+                    'df',
+                    'auth list',
+                    'osd dump',
+                    'health',
+                    'mon_status',
+                    'osd lspools',
+                    'osd perf',
+                    'health detail',
+                    "tell 'osd.*' version"]
 
-        self.emit(path + "collected_at", 'txt', True, curr_data)
+            status = json.loads(res.out)
+            num_pgs = status['pgmap']['num_pgs']
+            if num_pgs > self.opts.max_pg_dump_count:
+                logger.warning(
+                    ("pg dump skipped, as num_pg ({0}) > max_pg_dump_count ({1})." +
+                     " Use --max-pg-dump-count NUM option to change the limit").format(
+                        num_pgs, self.opts.max_pg_dump_count))
+            else:
+                cmds.append('pg dump')
 
-        ok, status = check_output(self.ceph_cmd + "status")
-        self.emit(path + "status", 'json', ok, status)
-        assert ok
+            for cmd in cmds:
+                self.save_output(cmd.replace(" ", "_"), self.ceph_cmd + cmd, 'json')
 
-        cmds = ['osd tree', 'df', 'auth list', 'osd dump',
-                'health', 'mon_status', 'osd lspools',
-                'osd perf']
+            self.save_output("rados_df",
+                             "rados df -c {0.conf} -k {0.key} --format json".format(self.opts),
+                             'json')
 
-        if json.loads(status)['pgmap']['num_pgs'] > self.opts.max_pg_dump_count:
-            logger.warning(
-                ("pg dump skipped, as num_pg ({0}) > max_pg_dump_count ({1})." +
-                 " Use --max-pg-dump-count NUM option to change the limit").format(
-                    json.loads(status)['pgmap']['num_pgs'],
-                    self.opts.max_pg_dump_count))
-        else:
-            cmds.append('pg dump')
+            with tempfile.NamedTemporaryFile() as fd:
+                res = check_output(self.ceph_cmd + "osd getcrushmap -o " + fd.name)
+                data = res.out if res.code != 0 else open(fd.name, "rb").read()
+                self.save('crushmap', 'bin', res.code, data)
 
-        for cmd in cmds:
-            self.run2emit(path + cmd.replace(" ", "_"), 'json',
-                          self.ceph_cmd + cmd)
+            with tempfile.NamedTemporaryFile() as fd:
+                res = check_output(self.ceph_cmd + "osd getmap -o " + fd.name)
+                data = res.out if res.code != 0 else open(fd.name, "rb").read()
+                self.save('osdmap', 'bin', res.code, data)
 
-        self.run2emit(path + "rados_df", 'json',
-                      "rados df -c {0.conf} -k {0.key} --format json".format(self.opts))
-
-        ok, out = check_output(self.ceph_cmd + 'health detail')
-        if not ok:
-            self.emit(path + 'health_detail', 'err', ok, out)
-        else:
-            self.emit(path + 'health_detail', 'json', ok, out)
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            out_file = os.tempnam()
-
-        ok, out = check_output(self.ceph_cmd + "osd getcrushmap -o " + out_file)
-        if not ok:
-            self.emit(path + 'crushmap', 'err', ok, out)
-        else:
-            data = open(out_file, "rb").read()
-            os.unlink(out_file)
-            self.emit(path + 'crushmap', 'bin', ok, data)
-
-    def emit_device_info(self, host, path, device_file):
-        ok, dev_str = check_output_ssh(host, self.opts, "df " + device_file)
-        assert ok
+    def emit_device_info(self, device_file):
+        dev_str = rpc_run_ch(self.node, "df " + device_file)
         dev_data = dev_str.strip().split("\n")[1].split()
 
         used = int(dev_data[2]) * 1024
         avail = int(dev_data[3]) * 1024
 
-        root_dev, dev = get_device_for_file(host, self.opts, device_file)
+        try:
+            root_dev, dev = get_device_for_file(self.node, device_file)
+        except AssertionError:
+            logger.warning("Can't detect device for %r", device_file)
+            return None
 
-        cmd = "cat /sys/block/{0}/queue/rotational".format(os.path.basename(root_dev))
-        ok, is_ssd_str = check_output_ssh(host, self.opts, cmd)
-        assert ok
-        is_ssd = is_ssd_str.strip() == '0'
+        rot_info_path = "/sys/block/{0}/queue/rotational".format(os.path.basename(root_dev))
+        is_ssd = self.node.rpc.fs.get_file(rot_info_path).strip() == '0'
 
-        self.ssh2emit(host, path + '/hdparm', 'txt', "sudo hdparm -I " + root_dev)
-        self.ssh2emit(host, path + '/smartctl', 'txt', "sudo smartctl -a " + root_dev)
-        self.emit(path + '/stats', 'json', True,
-                  json.dumps({'dev': dev,
-                              'root_dev': root_dev,
-                              'used': used,
-                              'avail': avail,
-                              'is_ssd': is_ssd}))
+        self.save_output('hdparm', "sudo hdparm -I " + root_dev)
+        self.save_output('smartctl', "sudo smartctl -a " + root_dev)
+        val = {'dev': dev, 'root_dev': root_dev, 'used': used, 'avail': avail, 'is_ssd': is_ssd}
+        self.save('stats', 'json', 0, json.dumps(val))
+
         return root_dev
 
-    def collect_osd(self, path, host, osd_id):
-        path = "{0}/osd/{1}/".format(path, osd_id)
-        ok, out = check_output_ssh(host, self.opts, "ps aux | grep ceph-osd")
+    def collect_osd(self, osd_list):
+        # check OSD process status
+        out = rpc_run(self.node, "ps aux | grep ceph-osd")
+        osd_re = re.compile(r"ceph-osd[\t ]+.*(-i|--id)[\t ]+(\d+)")
+        running_osds = set(int(rr.group(2)) for rr in osd_re.finditer(out))
 
-        for line in out.split("/n"):
-            if '--id ' + str(osd_id) in line and 'ceph-osd' in line:
-                osd_running = True
-                break
-            if '-i ' + str(osd_id) in line and 'ceph-osd' in line:
-                osd_running = True
-                break
-        else:
-            osd_running = False
-            logger.warning("osd-{0} in node {1} is down.".format(osd_id, host) +
-                           " No config available, will use default data and journal path")
+        ids_from_ceph = set(osd.id for osd in osd_list)
+        expected_osds = running_osds.intersection(ids_from_ceph)
+        down_osds = ids_from_ceph - running_osds
+        unexpected_osds = running_osds.difference(ids_from_ceph)
 
-        self.emit(path + "osd_daemons", 'txt', ok, out)
-        self.ssh2emit(host, path + "log", 'txt',
-                      "tail -n {0} /var/log/ceph/ceph-osd.{1}.log".format(
-                          self.opts.ceph_log_max_lines, osd_id))
+        for osd_id in unexpected_osds:
+            logger.warning("Unexpected osd-{0} in node {1}.".format(osd_id, self.node.name))
 
-        if osd_running:
-            osd_cfg_cmd = "sudo ceph -f json --admin-daemon /var/run/ceph/ceph-osd.{0}.asok config show"
-            ok, data = check_output_ssh(host, self.opts, osd_cfg_cmd.format(osd_id))
+        for osd in osd_list:
+            with self.chdir('osd/{0}'.format(osd.id)):
+                cmd = "tail -n {0} /var/log/ceph/ceph-osd.{1}.log".format(self.opts.ceph_log_max_lines, osd.id)
+                self.save_output("log", cmd)
 
-            self.emit(path + "config", 'json', ok, data)
-            assert ok
+                if osd.id in running_osds:
+                    self.save_output("config", osd.config, 'json')
+                    self.save_output("storage_ls", "ls -1 " + os.path.join(osd.storage, 'current'))
 
-            osd_cfg = json.loads(data)
+                    with self.chdir("data"):
+                        self.emit_device_info(osd.storage)
 
-            data_dev = osd_cfg.get('osd_data')
-            jdev = osd_cfg.get('osd_journal')
+                    with self.chdir("journal"):
+                        self.emit_device_info(osd.journal)
+                else:
+                    logger.warning("osd-{0} in node {1} is down.".format(osd.id, self.node.name) +
+                                   " No config available, will use default data and journal path")
 
-            if data_dev is not None:
-                data_dev = str(data_dev)
+    def collect_monitor(self):
+        with self.chdir("mon/{0}".format(self.node.name)):
+            self.save_output("mon_daemons", "ps aux | grep ceph-mon")
+            tail_ln = "tail -n {}".format(self.opts.ceph_log_max_lines)
+            self.save_output("mon_log", tail_ln + "/var/log/ceph/ceph-mon.{}.log".format(self.node.params['mon_name']))
+            self.save_output("ceph_log", tail_ln + " /var/log/ceph/ceph.log")
+            self.save_output("ceph_audit", tail_ln + " /var/log/ceph/ceph.audit.log")
 
-            if jdev is not None:
-                jdev = str(jdev)
 
-        else:
-            data_dev = None
-            jdev = None
-
-        if data_dev is None:
-            data_dev = "/var/lib/ceph/osd/ceph-{0}".format(osd_id)
-
-        if jdev is None:
-            jdev = "/var/lib/ceph/osd/ceph-{0}/journal".format(osd_id)
-
-        self.ssh2emit(host, path + "storage_ls", 'txt',
-                      "ls -1 " + os.path.join(data_dev, 'current'))
-        data_root_dev = self.emit_device_info(host, path + "data", data_dev)
-        jroot_dev = self.emit_device_info(host, path + "journal", jdev)
-
-        with self.osd_devs_lock:
-            self.osd_devs[osd_id] = (host, data_root_dev, jroot_dev)
-
-    def collect_monitor(self, path, host, name):
-        path = "{0}/mon/{1}/".format(path, host)
-        self.ssh2emit(host, path + "mon_daemons", 'txt', "ps aux | grep ceph-mon")
-        self.ssh2emit(host, path + "mon_log", 'txt',
-                      "tail -n {0} /var/log/ceph/ceph-mon.{1}.log".format(
-                          self.opts.ceph_log_max_lines, name))
-        self.ssh2emit(host, path + "ceph_log", 'txt',
-                      "tail -n {0} /var/log/ceph/ceph.log".format(
-                          self.opts.ceph_log_max_lines, name))
-        self.ssh2emit(host, path + "ceph_audit", 'txt',
-                      "tail -n {0} /var/log/ceph/ceph.audit.log".format(
-                          self.opts.ceph_log_max_lines, name))
+class VirshCollector(Collector):
+    def collect_node(self, path, node):
+        # rpc_run("virsh list")
+        pass
 
 
 class NodeCollector(Collector):
@@ -320,30 +288,35 @@ class NodeCollector(Collector):
     node_commands = [
         ("lshw", "xml", "lshw -xml"),
         ("lsblk", "txt", "lsblk -a"),
-        ("diskstats", "txt", "cat /proc/diskstats"),
         ("uname", "txt", "uname -a"),
         ("dmidecode", "txt", "dmidecode"),
-        ("meminfo", "txt", "cat /proc/meminfo"),
-        ("loadavg", "txt", "cat /proc/loadavg"),
-        ("cpuinfo", "txt", "cat /proc/cpuinfo"),
         ("mount", "txt", "mount"),
         ("ipa", "txt", "ip -o -4 a"),
-        ("netdev", "txt", "cat /proc/net/dev"),
-        ("ceph_conf", "txt", "cat /etc/ceph/ceph.conf"),
-        ("uptime", "txt", "cat /proc/uptime"),
-        ("dmesg", "txt", "cat /var/log/dmesg"),
-        ("netstat", "txt", "netstat -nap")
+        ("netstat", "txt", "netstat -nap"),
+        ("sysctl", "txt", "sysctl -a")
     ]
 
-    def collect_node(self, path, host):
-        path = 'hosts/' + host + '/'
-        for path_off, frmt, cmd in self.node_commands:
-            self.ssh2emit(host, path + path_off, frmt, cmd)
-        self.collect_interfaces_info(path, host)
+    node_files = [
+        "/proc/diskstats", "/proc/meminfo", "/proc/loadavg", "/proc/cpuinfo", "/proc/uptime", "/var/log/dmesg",
+        "/proc/vmstat"
+    ]
 
-    def collect_interfaces_info(self, path, host):
+    node_renamed_files = [("netdev", "/proc/net/dev"), ("ceph_conf", "/etc/ceph/ceph.conf")]
+
+    def collect_node(self):
+        with self.chdir('hosts/' + self.node.name):
+            for path_offset, frmt, cmd in self.node_commands:
+                self.save_output(path_offset, cmd, format=frmt)
+
+            for fpath in self.node_files:
+                self.save_file(os.path.basename(fpath), fpath)
+
+            for name, fpath in self.node_renamed_files:
+                self.save_output(name, fpath)
+
+    def collect_interfaces_info(self):
         interfaces = {}
-        for is_phy, dev in self.get_host_interfaces(host):
+        for is_phy, dev in self.get_host_interfaces(self.node):
             interface = {'dev': dev, 'is_phy': is_phy}
             interfaces[dev] = interface
 
@@ -351,20 +324,23 @@ class NodeCollector(Collector):
                 continue
 
             speed = None
-            ok, data = check_output_ssh(host, self.opts, "ethtool " + dev)
-            if ok:
-                for line in data.split("\n"):
+            res = rpc_run(self.node, "ethtool " + dev)
+            if res.code == 0:
+                # TODO: move this to report code, only collect here
+                for line in res.out.split("\n"):
                     if 'Speed:' in line:
                         speed = line.split(":")[1].strip()
                     if 'Duplex:' in line:
                         interface['duplex'] = line.split(":")[1].strip() == 'Full'
 
-            ok, data = check_output_ssh(host, self.opts, "iwconfig " + dev)
-            if ok and 'Bit Rate=' in data:
-                br1 = data.split('Bit Rate=')[1]
+            res = rpc_run(self.node, "iwconfig " + dev)
+            # TODO: move this to report code, only collect here
+            if res.code == 0 and 'Bit Rate=' in res.out:
+                br1 = res.out.split('Bit Rate=')[1]
                 if 'Tx-Power=' in br1:
                     speed = br1.split('Tx-Power=')[0]
 
+            # TODO: move this to report code, only collect here
             if speed is not None:
                 mults = {
                     'Kb/s': 125,
@@ -377,206 +353,48 @@ class NodeCollector(Collector):
                         break
                 else:
                     logger.warning("Node %s - can't transform %s interface speed %r to Bps",
-                                   host, dev, speed)
+                                   self.node.name, dev, speed)
 
                 if isinstance(speed, int):
                     interface['speed'] = speed
                 else:
                     interface['speed_s'] = speed
 
-        self.emit(path + 'interfaces', 'json', True, json.dumps(interfaces))
+        self.save('interfaces', 'json', 0, json.dumps(interfaces))
 
 
-class NodeResourseUsageCollector(Collector):
-    name = 'resource'
-    run_alone = True
+class CephLoadCollector(Collector):
+    name = 'load'
 
-    def collect_node(self, path, host):
-        cpath = '{0}/rusage/{1}/{2}-disk'.format(path, host, int(time.time()))
-        self.ssh2emit(host, cpath, "txt", "cat /proc/diskstats")
+    def start_performance_monitoring(self, node):
+        node.rpc.ceph_mon.start_ceph_perf_collectors("cpu", "net", "blk")
 
-        cpath = '{0}/rusage/{1}/{2}-net'.format(path, host, int(time.time()))
-        self.ssh2emit(host, cpath, "txt", "cat /proc/net/dev")
-
-
-performance_monitor_code_templ = """#!/bin/bash
-function monitor_ceph_io() {
-    date
-    for i in $(seq __runtime__) ; do
-        grep -E '__devs_grep_pattern__' /proc/diskstats
-        sleep 1
-    done
-}
-
-function monitor_ceph_cpu() {
-    date
-    for i in $(seq __runtime__) ; do
-        ps -p __osd_pids__ -o pid,cputime | grep -v PID
-        sleep 1
-    done
-}
-
-function monitor_ceph_net() {
-    date
-    for i in $(seq __runtime__) ; do
-        grep -E '__net_grep_pattern__' /proc/net/dev | tr -d ':'
-        sleep 1
-    done
-}
-
-monitor_ceph_io > __io_file__ &
-monitor_ceph_cpu > __cpu_file__ &
-monitor_ceph_net > __net_file__
-
-wait
-"""
+    def collect_performance_data(self, path, node):
+        dt = list(node.rpc.ceph_mon.get_perf_data())
+        for tp, data in dt:
+            self.emit("{0}/perf_monitoring/{1}/{2}".format(path, node.name, tp), "txt", 0, data)
 
 
-class CephPerformanceCollector(Collector):
-    name = 'performance'
+def discover_ceph(opts):
+    extra_args = "-c {0.conf} -k {0.key}".format(opts)
 
-    def __init__(self, *args, **kwargs):
-        super(CephPerformanceCollector, self).__init__(*args, **kwargs)
-        self.run_uuid = str(uuid.uuid1())
-        self.io_file = "/tmp/io_{0}.txt".format(self.run_uuid)
-        self.cpu_file = "/tmp/cpu_{0}.txt".format(self.run_uuid)
-        self.net_file = "/tmp/net_{0}.txt".format(self.run_uuid)
-        self.remote_file = "/tmp/{0}.sh".format(self.run_uuid)
+    for mon_id, (ip, name) in get_mons_nodes(run, extra_args).items():
+        yield Node(ip, None, ['monitor'], mon_name=name)
 
-    def start_performance_monitoring(self, path, host, osd_devs):
-        local_file = "/tmp/{0}_{1}.sh".format(host, self.run_uuid)
-
-        osd_devs = map(os.path.basename, osd_devs)
-        uniq_devs = " ".join(set(osd_devs))
-        grep_re = "|".join(map("\\b{0}\\b".format, set(osd_devs)))
-
-        ok, osd_pids = check_output_ssh(host, self.opts, "ps aux")
-        assert ok
-        osd_pid_list = []
-        for process in osd_pids.strip().split("\n"):
-            vals = process.split()
-            if 'ceph-osd' in vals[10]:
-                osd_pid_list.append(vals[1])
-
-        all_devs = []
-        phy_devs = []
-
-        for is_phy, dev in self.get_host_interfaces(host):
-            all_devs.append(dev)
-            if is_phy:
-                phy_devs.append(dev)
-
-        all_devs_re = "|".join(map("\\b{0}\\b".format, all_devs))
-
-        performance_monitor_code = performance_monitor_code_templ \
-            .replace('__runtime__', str(self.opts.performance_collect_seconds)) \
-            .replace('__io_file__', self.io_file) \
-            .replace('__net_file__', self.net_file) \
-            .replace('__cpu_file__', self.cpu_file) \
-            .replace('__uniq_osd_devs__', uniq_devs) \
-            .replace('__devs_grep_pattern__', grep_re) \
-            .replace('__osd_pids__', ",".join(osd_pid_list)) \
-            .replace('__net_grep_pattern__', all_devs_re)
-
-        open(local_file, "w").write(performance_monitor_code)
-        try:
-            scp_cmd = "scp {0} {1} {2}:{3}".format(SSH_OPTS, local_file,
-                                                   host, self.remote_file)
-
-            ok, _ = check_output(scp_cmd)
-            assert ok
-        finally:
-            os.unlink(local_file)
-
-        start_cmd = 'screen -S ceph_monitor -d -m bash ' + self.remote_file
-        check_output_ssh(host, self.opts, start_cmd, no_retry=True)
-
-    def collect_performance_data(self, path, host):
-        all_files = {'io': self.io_file,
-                     'cpu': self.cpu_file,
-                     'net': self.net_file}
-
-        for tp, fname in all_files.items():
-            self.ssh2emit(host,
-                          "{0}/perf_monitoring/{1}/{2}".format(path, host, tp),
-                          "txt", 'cat ' + fname)
-        check_output_ssh(host, self.opts, "rm -f " +
-                         " ".join(all_files.values() + [self.remote_file]),
-                         no_retry=True)
-
-
-class CephDiscovery(object):
-    def __init__(self, opts):
-        self.opts = opts
-        self.ceph_cmd = "ceph -c {0.conf} -k {0.key} --format json ".format(self.opts)
-
-    def discover(self):
-        ok, res = check_output(self.ceph_cmd + "mon_status")
-        assert ok
-        for node in json.loads(res)['monmap']['mons']:
-            yield 'monitor', str(node['name']), {'name': node['name']}
-
-        ok, res = check_output(self.ceph_cmd + "osd tree")
-        assert ok
-        for node in json.loads(res)['nodes']:
-            if node['type'] == 'host':
-                for osd_id in node['children']:
-                    yield 'osd', str(node['name']), {'osd_id': osd_id}
-
-
-def save_results_th_func(opts, res_q, out_folder):
-    try:
-        while True:
-            val = res_q.get()
-            if val is None:
-                break
-
-            ok, path, frmt, out = val
-
-            while '//' in path:
-                path.replace('//', '/')
-
-            while path.startswith('/'):
-                path = path[1:]
-
-            while path.endswith('/'):
-                path = path[:-1]
-
-            fname = os.path.join(out_folder, path + '.' + frmt)
-            dr = os.path.dirname(fname)
-
-            if not os.path.exists(dr):
-                os.makedirs(dr)
-
-            if frmt == 'bin':
-                open(fname, "wb").write(out)
-            elif frmt == 'json':
-                if not opts.no_pretty_json:
-                    try:
-                        out = json.dumps(json.loads(out), indent=4, sort_keys=True)
-                    except Exception:
-                        pass
-                open(fname, "w").write(out)
-            else:
-                open(fname, "w").write(out)
-    except Exception:
-        logger.exception("In save_results_th_func thread")
+    for ip, osds in get_osds_nodes(run, extra_args).items():
+        for osd in osds:
+            yield Node(ip, None, ['osd'], osd_id=osd.id, osd_jdev=osd.journal, osd_ddev=osd.storage)
 
 
 def discover_nodes(opts):
-    discovers = [
-        CephDiscovery
-    ]
+    nodes = {}
+    for node in discover_ceph(opts):
+        if node.name in nodes:
+            nodes[node.name].merge(node)
+        else:
+            nodes[node.name] = node
 
-    nodes = collections.defaultdict(
-        lambda: collections.defaultdict(lambda: []))
-
-    for discover_cls in discovers:
-        discover = discover_cls(opts)
-        for role, node, args in discover.discover():
-            nodes[role][node].append(args)
-            nodes['node'][node] = [{}]
-    return nodes
+    return list(nodes.values())
 
 
 def run_all(opts, run_q):
@@ -584,8 +402,8 @@ def run_all(opts, run_q):
         val = run_q.get()
         while val is not None:
             try:
-                func, path, node, kwargs = val
-                func(path, node, **kwargs)
+                func, path, node = val
+                func(path, node)
             except Exception:
                 logger.exception("In worker thread")
             val = run_q.get()
@@ -604,32 +422,42 @@ def run_all(opts, run_q):
             break
 
 
-def setup_loggers(default_level=logging.INFO, log_fname=None):
-    logger.setLevel(logging.DEBUG)
-    sh = logging.StreamHandler()
-    sh.setLevel(default_level)
-
-    log_format = '%(asctime)s - %(levelname)s - %(message)s'
-    colored_formatter = logging.Formatter(log_format, datefmt="%H:%M:%S")
-
-    sh.setFormatter(colored_formatter)
-    logger.addHandler(sh)
-
-    if log_fname is not None:
-        fh = logging.FileHandler(log_fname)
-        log_format = '%(asctime)s - %(levelname)s - %(message)s'
-        formatter = logging.Formatter(log_format, datefmt="%H:%M:%S")
-        fh.setFormatter(formatter)
-        fh.setLevel(logging.DEBUG)
-        logger.addHandler(fh)
+Collectors = collections.namedtuple("Collectors", ["ceph", "node", "load", "vm"])
 
 
 ALL_COLLECTORS = [
     CephDataCollector,
     NodeCollector,
-    NodeResourseUsageCollector,
-    CephPerformanceCollector
+    CephLoadCollector,
+    VirshCollector,
 ]
+
+
+# need one separated collector per node
+def get_collectors(allowed_collectors, opts, collector_settings, storage):
+    collectors = []
+
+    if CephDataCollector.name in allowed_collectors:
+        ceph_collector = CephDataCollector(collector_settings, storage, opts)
+        collectors.append(ceph_collector)
+    else:
+        ceph_collector = None
+
+    if NodeCollector.name in allowed_collectors:
+        node_collector = NodeCollector(collector_settings, storage, opts)
+        collectors.append(node_collector)
+    else:
+        node_collector = None
+
+    ceph_load_collector = None
+    if CephLoadCollector.name in allowed_collectors:
+        if CephDataCollector.name not in allowed_collectors:
+            logger.error("Can't collect performance info without ceph info collected")
+            exit(1)
+        else:
+            ceph_load_collector = CephLoadCollector(collector_settings, storage, opts)
+
+    return Collectors(ceph_collector, node_collector, ceph_load_collector)
 
 
 def parse_args(argv):
@@ -655,22 +483,15 @@ def parse_args(argv):
                    default=60, type=int,
                    help="SSH connection timeout")
 
-    p.add_argument("-s", "--performance-collect-seconds",
+    p.add_argument("-s", "--load-collect-seconds",
                    default=60, type=int, metavar="SEC",
                    help="Collect performance stats for SEC seconds")
-
-    p.add_argument("-u", "--usage-collect-interval",
-                   default=60, type=int, metavar="SEC",
-                   help="Collect usage for at lease SEC seconds")
-
-    p.add_argument("-d", "--disable", default=[],
-                   nargs='*', help="Disable collect pattern")
 
     p.add_argument("--ceph-log-max-lines", default=1000,
                    type=int, help="Max lines from osd/mon log")
 
-    p.add_argument("--collectors", default="ceph,node,resource,performance",
-                   help="Coma separated list of collectors" +
+    p.add_argument("--collectors", default="ceph,node,load",
+                   help="Comma separated list of collectors" +
                    "select from : " +
                    ",".join(coll.name for coll in ALL_COLLECTORS))
 
@@ -684,6 +505,9 @@ def parse_args(argv):
                    action="store_true",
                    help="Keep unpacked data")
 
+    p.add_argument("-d", "--disable", default=[],
+                   nargs='*', help="Disable collect pattern")
+
     p.add_argument("-j", "--no-pretty-json", default=False,
                    action="store_true",
                    help="Don't prettify json data")
@@ -691,237 +515,128 @@ def parse_args(argv):
     return p.parse_args(argv[1:])
 
 
-logger_ready = False
-
-
-def prun(runs, thcount):
-    res_q = Queue.Queue()
-    input_q = Queue.Queue()
-    map(input_q.put, enumerate(runs))
-
-    def worker():
-        while True:
-            try:
-                pos, (func, args, kwargs) = input_q.get(False)
-            except Queue.Empty:
-                return
-
-            try:
-                res_q.put((pos, True, func(*args, **kwargs)))
-            except Exception as exc:
-                res_q.put((pos, False, exc))
-
-    ths = [threading.Thread(target=worker) for i in range(thcount)]
-
-    for th in ths:
-        th.daemon = True
-        th.start()
-
-    for th in ths:
-        th.join()
-
-    results = []
-    while not res_q.empty():
-        results.append(res_q.get())
-
-    return [(ok, val) for _, ok, val in sorted(results)]
-
-
-def pmap(func, data, thcount):
-    return prun([(func, [val], {}) for val in data], thcount)
-
-
-def get_sshable_hosts(hosts, thcount=32):
-    cmd = "ssh -o LogLevel=quiet -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=60 -o ConnectionAttempts=2 "
-
-    def check_host(host):
-        try:
-            socket.gethostbyname(host)
-        except socket.gaierror:
-            return None
-        ok, out = check_output(cmd + host + ' pwd')
-        if ok:
-            return host
-        return None
-
-    results = pmap(check_host, hosts, thcount=thcount)
-    return [res for ok, res in results if ok and res is not None]
-
-
 def main(argv):
-    if not check_output('which ceph')[0]:
-        logger.error("No 'ceph' command available. Run this script from node, which has ceph access")
-        return
-
-    # TODO: Logs from down OSD
     opts = parse_args(argv)
-    res_q = Queue.Queue()
+
     run_q = Queue.Queue()
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        out_folder = os.tempnam()
+    out_folder = tempfile.mkdtemp()
 
-    os.makedirs(out_folder)
-
-    setup_loggers(getattr(logging, opts.log_level),
+    setup_loggers([logger],
+                  getattr(logging, opts.log_level),
                   os.path.join(out_folder, "log.txt"))
-
     global logger_ready
     logger_ready = True
 
-    global SSH_OPTS
-    SSH_OPTS = SSH_OPTS.format(opts.ssh_conn_timeout)
+    if check_output('which ceph').code != 0:
+        logger.error("No 'ceph' command available. Run this script from node, which has ceph access")
+        return
+
+    # This variable is updated from main function
+    SSH_OPTS = "-o LogLevel=quiet -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+    SSH_OPTS += "-o ConnectTimeout={0} -o ConnectionAttempts=2".format(opts.ssh_conn_timeout)
 
     collector_settings = CollectSettings()
     map(collector_settings.disable, opts.disable)
-
     allowed_collectors = opts.collectors.split(',')
-    collectors = []
-
-    if CephDataCollector.name in allowed_collectors:
-        ceph_collector = CephDataCollector(opts, collector_settings, res_q)
-        collectors.append(ceph_collector)
-    else:
-        ceph_collector = None
-
-    if NodeCollector.name in allowed_collectors:
-        node_collector = NodeCollector(opts, collector_settings, res_q)
-        collectors.append(node_collector)
-    else:
-        node_collector = None
-
-    if NodeResourseUsageCollector.name in allowed_collectors:
-        node_resource_collector = NodeResourseUsageCollector(opts, collector_settings, res_q)
-    else:
-        node_resource_collector = None
-
-    if CephPerformanceCollector.name in allowed_collectors:
-        if CephDataCollector.name not in allowed_collectors:
-            logger.error("Can't collect performance info without ceph info collected")
-            exit(1)
-        else:
-            ceph_performance_collector = CephPerformanceCollector(opts, collector_settings, res_q)
-    else:
-        ceph_performance_collector = None
+    storage = make_storage(out_folder, existing=False, serializer='raw')
+    collectors = get_collectors(allowed_collectors, opts, collector_settings, storage)
 
     nodes = discover_nodes(opts)
-    nodes['master'][None] = [{}]
+    nodes = [nodes[0]]
 
-    for role, nodes_with_args in nodes.items():
-        if role == 'node':
-            continue
-        logger.info("Found %s hosts with role %s", len(nodes_with_args), role)
-        logger.info("Found %s services with role %s",
-                    sum(map(len, nodes_with_args.values())), role)
+    per_role = collections.defaultdict(list)
+    for node in nodes:
+        for role in node.roles:
+            per_role[role].append(node)
 
-    logger.info("Found %s hosts total", len(nodes['node']))
+    for role, role_nodes in per_role.items():
+        logger.info("Found %s hosts with role %r", len(role_nodes), role)
 
-    good_hosts = set(get_sshable_hosts(nodes['node'].keys()))
-    bad_hosts = set(nodes['node'].keys()) - good_hosts
+    logger.info("Found %s hosts in total", len(nodes))
+
+    good_hosts = set(get_sshable_hosts(nodes, SSH_OPTS))
+    bad_hosts = set(node.name for node in nodes) - good_hosts
+    res_q.put((True, "bad_hosts", 'json', json.dumps(list(bad_hosts))))
 
     if len(bad_hosts) != 0:
         logger.warning("Next hosts aren't awailable over ssh and would be skipped: %s",
                        ",".join(bad_hosts))
 
-    res_q.put((True, "bad_hosts", 'json', json.dumps(list(bad_hosts))))
+    logger.info("Initializing RPC connections")
+    nodes = [node for node in nodes if node.name in good_hosts]
 
-    new_nodes = collections.defaultdict(lambda: {})
-
-    for role, role_objs in nodes.items():
-        if role == 'master':
-            new_nodes[role] = role_objs
-        else:
-            for node, args in role_objs.items():
-                if node in good_hosts:
-                    new_nodes[role][node] = args
-
-    nodes = new_nodes
-
-    # collect data at the beginning
-    if node_resource_collector is not None:
-        for node, _ in nodes['node'].items():
-            run_q.put((node_resource_collector.collect_node, "", node, {}))
-
-    for role, nodes_with_args in nodes.items():
-        for collector in collectors:
-            if hasattr(collector, 'collect_' + role):
-                coll_func = getattr(collector, 'collect_' + role)
-                for node, kwargs_list in nodes_with_args.items():
-                    for kwargs in kwargs_list:
-                        run_q.put((coll_func, "", node, kwargs))
-
-    save_results_thread = threading.Thread(target=save_results_th_func,
-                                           args=(opts, res_q, out_folder))
-    save_results_thread.daemon = True
-    save_results_thread.start()
-
-    t1 = time.time()
     try:
-        run_all(opts, run_q)
+        pmap(functools.partial(init_node, ssh_opts=SSH_OPTS), nodes)
+        # collect data at the beginning
+        if collectors.load is not None:
+            for node in nodes:
+                collectors.load.start_performance_monitoring(node)
 
-        # collect data at the end
-        if node_resource_collector is not None:
-            dt = opts.usage_collect_interval - (time.time() - t1)
-            if dt > 0:
-                logger.info("Will wait for {0} seconds for usage data collection".format(int(dt)))
-                for i in range(int(dt / 0.1)):
-                    time.sleep(0.1)
-            logger.info("Start final usage collection")
-            for node, _ in nodes['node'].items():
-                run_q.put((node_resource_collector.collect_node, "", node, {}))
+        for node in nodes:
+            for collector in collectors:
+                for role in node.roles + ['node']:
+                    handler = 'collect_' + role
+                    if hasattr(collector, handler):
+                        coll_func = getattr(collector, handler)
+                        run_q.put((coll_func, "", node))
+
+        save_results_thread = threading.Thread(target=save_results_th_func,
+                                               args=(opts, res_q, out_folder))
+        save_results_thread.daemon = True
+        save_results_thread.start()
+
+        monitor_till = time.time() + opts.load_collect_seconds
+        try:
             run_all(opts, run_q)
 
-        if ceph_performance_collector is not None:
-            logger.info("Start performace monitoring.")
-            with ceph_collector.osd_devs_lock:
-                osd_devs = ceph_collector.osd_devs.copy()
+            # collect data at the end
+            if collectors.load is not None:
+                if monitor_till >= time.time():
+                    logger.info("Will wait for {0} seconds for usage data collection".format(int(dt)))
+                    while monitor_till >= time.time():
+                        time.sleep(0.1)
 
-            per_node = collections.defaultdict(lambda: [])
-            for node, data_dev, j_dev in osd_devs.values():
-                per_node[node].extend((data_dev, j_dev))
+                logger.info("Collect load information")
+                for node in nodes:
+                    collectors.load.collect_performance_data("", node)
 
-            # start monitoring
-            for node, data in per_node.items():
-                run_q.put((ceph_performance_collector.start_performance_monitoring,
-                          "", node, {'osd_devs': data}))
-            run_all(opts, run_q)
+        except Exception:
+            logger.exception("When collecting data:")
+        finally:
+            res_q.put(None)
+            # wait till all data collected
+            save_results_thread.join()
 
-            dt = opts.performance_collect_seconds
-            logger.info("Will wait for {0} seconds for performance data collection".format(int(dt)))
-            for i in range(int(dt / 0.1)):
-                time.sleep(0.1)
+        if opts.result is None:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                out_file = os.tempnam() + ".tar.gz"
+        else:
+            out_file = opts.result
 
-            # collect results
-            for node, data in per_node.items():
-                run_q.put((ceph_performance_collector.collect_performance_data,
-                          "", node, {}))
-            run_all(opts, run_q)
-    except Exception:
-        logger.exception("When collecting data:")
+        res = check_output("cd {0} ; tar -zcvf {1} *".format(out_folder, out_file))
+        if res.code != 0:
+            logger.error("Fail to archive results. Please found raw data at %r", out_folder)
+        else:
+            logger.info("Result saved into %r", out_file)
+            if opts.log_level in ('WARNING', 'ERROR', "CRITICAL"):
+                print "Result saved into %r" % (out_file,)
+
+            if not opts.dont_remove_unpacked:
+                shutil.rmtree(out_folder)
+            else:
+                logger.info("Temporary folder %r", out_folder)
+                if opts.log_level in ('WARNING', 'ERROR', "CRITICAL"):
+                    print "Temporary folder %r" % (out_folder,)
     finally:
-        res_q.put(None)
-        # wait till all data collected
-        save_results_thread.join()
-
-    if opts.result is None:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            out_file = os.tempnam() + ".tar.gz"
-    else:
-        out_file = opts.result
-
-    check_output("cd {0} ; tar -zcvf {1} *".format(out_folder, out_file))
-    logger.info("Result saved into %r", out_file)
-    if opts.log_level in ('WARNING', 'ERROR', "CRITICAL"):
-        print "Result saved into %r" % (out_file,)
-
-    if not opts.dont_remove_unpacked:
-        shutil.rmtree(out_folder)
-    else:
-        logger.info("Temporary folder %r", out_folder)
-        if opts.log_level in ('WARNING', 'ERROR', "CRITICAL"):
-            print "Temporary folder %r" % (out_folder,)
+        logger.info("Teardown RPC servers")
+        for node in nodes:
+            if node.rpc is not None:
+                try:
+                    node.rpc.server.stop()
+                except ConnectionClosed:
+                    node.rpc = None
 
 
 if __name__ == "__main__":
