@@ -1,10 +1,3 @@
-# body {
-#   font-family: "Helvetica Neue", Helvetica, sans-serif;
-#   margin: 30px auto;
-#   width: 1280px;
-#   position: relative;
-# }
-
 css = """
 header {
   padding: 6px 0;

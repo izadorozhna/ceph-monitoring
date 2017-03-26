@@ -34,6 +34,10 @@ RSMAP2 = [('K', 1000),
           ('T', 1000 ** 4)]
 
 
+def b2ssizei(size, add_i=True, base=1024):
+    return b2ssize(int(size), add_i=add_i, base=base)
+
+
 def b2ssize(size, add_i=True, base=1024):
     assert base in (1024, 1000)
     if size < base:

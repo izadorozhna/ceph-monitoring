@@ -107,7 +107,7 @@ class HTMLTable(object):
         self.table_attrs = table_attrs.copy()
 
         if not zebra:
-            self.table_attrs['class'].replace("zebra-table", "")
+            self.table_attrs['class'] = self.table_attrs['class'].replace("zebra-table", "")
 
         if header_attrs is None:
             header_attrs = {}

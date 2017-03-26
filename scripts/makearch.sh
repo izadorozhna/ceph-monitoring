@@ -22,6 +22,7 @@ gh_dep koder-ua/cephlib
 gh_dep koder-ua/agent
 
 cp "${cdir}/ceph_monitoring/collect_info.py" .
+cp "${cdir}/ceph_monitoring/logging.json" .
 tar -zcf "$archfile" ./*
 cat "${cdir}/scripts/unpack.sh" "$archfile" > "$output_file"
 chmod +x "$output_file"

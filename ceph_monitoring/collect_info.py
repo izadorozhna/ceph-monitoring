@@ -4,6 +4,8 @@ import sys
 import time
 import json
 import zlib
+import array
+import socket
 import shutil
 import logging
 import os.path
@@ -26,23 +28,37 @@ from cephlib.storage import make_storage
 from cephlib.common import check_output, prun_check, run, get_sshable_hosts, tmpnam, pmap, pmap_check
 from cephlib.rpc import init_node, rpc_run, rpc_run_ch
 from cephlib.discover import get_osds_nodes, get_mons_nodes
+from cephlib.sensors_rpc_plugin import unpack_rpc_updates
 
 
 logger = logging.getLogger('collect')
 
 
 class Node(object):
-    def __init__(self, ip):
+    def __init__(self, ip, hostname=None):
         self.ip = ip
-        self.hostname = None
+        self.hostname = hostname
         self.rpc = None
         self.daemon_pid = None
         self.osds = []
         self.mon = None
+        self.roles = set()
+        self.ssh_ok = False
+
+    def dct(self):
+        return {'ip': self.ip, 'name': self.hostname, 'roles': list(self.roles), 'ssh_ok': self.ssh_ok}
 
     @property
     def name(self):
         return self.ip if self.hostname is None else "{0.hostname}({0.ip})".format(self)
+
+    @property
+    def fs_name(self):
+        if self.hostname is not None:
+            return "{0.ip}-{0.hostname}".format(self)
+        else:
+            return self.ip
+
 
 
 # CMD executors --------------------------------------------------------------------------------------------------------
@@ -107,7 +123,15 @@ class Collector(object):
         if code == 0 and format == 'json':
             data = json.dumps(json.loads(data), indent=4, sort_keys=True)
 
-        self.storage.put_raw(data, path + "." + ("err" if code != 0 else format))
+        rpath = path + "." + ("err" if code != 0 else format)
+
+        if isinstance(data, (str, bytes)):
+            self.storage.put_raw(data, rpath)
+        elif isinstance(data, array.array):
+            self.storage.put_array_simple(data, rpath)
+        else:
+            raise TypeError("Can't save value of type {0!r} (to {1!r})".format(type(data), rpath))
+
         return data if code == 0 else None
 
     def save_file(self, path, file_path, format='txt', check=True):
@@ -159,6 +183,20 @@ class Collector(object):
 
 
 CEPH_HEALTH = collections.defaultdict(lambda: "-")
+
+
+def split_sockstat_file(fc):
+    res = {}
+    for ln in fc.split("\n"):
+        if ln.strip():
+            if ':' not in ln:
+                return None
+            name, params = ln.split(":", 1)
+            params_l = params.split()
+            if len(params_l) % 2 != 0:
+                return None
+            res[name] = dict(zip(params_l[:-1:2], params_l[1::2]))
+    return res
 
 
 class CephDataCollector(Collector):
@@ -235,6 +273,7 @@ class CephDataCollector(Collector):
             for cmd in cmds:
                 self.save_output(cmd.replace(" ", "_"), self.ceph_cmd + cmd, 'json')
 
+            self.save_output("default_config", self.ceph_cmd + "--show-config", 'txt')
             self.save_output("osd_versions", self.ceph_cmd + "tell 'osd.*' version", "txt")
             self.save_output("mon_versions", self.ceph_cmd + "tell 'mon.*' version", "txt")
             self.save_output("rados_df", self.rados_cmd + "df", 'json')
@@ -243,11 +282,16 @@ class CephDataCollector(Collector):
                 res = run(self.ceph_cmd + "osd getcrushmap -o " + fd.name)
                 data = res.out if res.code != 0 else open(fd.name, "rb").read()
                 self.save('crushmap', 'bin', res.code, data)
+                with tempfile.NamedTemporaryFile() as fd_txt:
+                    txt_res = run("crushtool -d {0} -o {1}".format(fd.name, fd_txt.name))
+                    data_txt = res.out if txt_res.code != 0 else open(fd_txt.name, "rb").read()
+                    self.save('crushmap', 'txt', txt_res.code, data_txt)
 
             with tempfile.NamedTemporaryFile() as fd:
                 res = run(self.ceph_cmd + "osd getmap -o " + fd.name)
                 data = res.out if res.code != 0 else open(fd.name, "rb").read()
                 self.save('osdmap', 'bin', res.code, data)
+                self.save_output('osdmap', "osdmaptool --print {0}".format(fd.name), "txt")
 
     def collect_dev_info(self, device_file):
         dev_str = rpc_run_ch(self.node.rpc, "df " + device_file, node_name=self.node.name)
@@ -301,7 +345,15 @@ class CephDataCollector(Collector):
 
                 if osd.id in running_osds:
                     self.save("config", "txt", 0, osd.config)
-                    self.save_output("storage_ls", "ls -1 " + os.path.join(osd.storage, 'current'))
+                    cmd = "ls -1 '{0}'".format(os.path.join(osd.storage, 'current'))
+                    res = run(cmd)
+                    if res.code == 0:
+                        pgs = [name.split("_")[0] for name in res.out.split() if "_head" in name]
+                        out = "\n".join(pgs)
+                    else:
+                        out = res.out
+
+                    self.save("pgs", "txt", res.code, out)
 
                     with self.chdir("data"):
                         self.collect_dev_info(osd.storage)
@@ -312,23 +364,55 @@ class CephDataCollector(Collector):
                     logger.warning("osd-{0} in node {1} is down.".format(osd.id, self.node.name) +
                                    " No config available, will use default data and journal path")
 
+        pids = self.node.rpc.sensors.find_pids_for_cmd('ceph-osd')
+        logger.debug("Found next pids for OSD's on node %s: %r", self.node.name, pids)
+        if pids:
+            for pid in pids:
+                cmdline = self.node.rpc.fs.get_file('/proc/{0}/cmdline'.format(pid), compress=False)
+                opts = cmdline.split("\x00")
+                for op, val in zip(opts[:-1], opts[1:]):
+                    if op in ('-i', '--id'):
+                        osd_id = val
+                        break
+                else:
+                    logger.warning("Can't get osd id for cmd line %r", cmdline.replace("\x00", ' '))
+                    continue
+
+                osd_proc_info = {}
+
+                with self.chdir('osd/{0}'.format(osd_id)):
+                    self.save("cmdline", "bin", 0, cmdline)
+                    osd_proc_info['fd_count'] = len(self.node.rpc.fs.listdir("/proc/{0}/fd".format(pid)))
+
+                    fpath = "/proc/{0}/net/sockstat".format(pid)
+                    ssv4 = split_sockstat_file(self.node.rpc.fs.get_file(fpath, compress=False))
+                    if not ssv4:
+                        logger.warning("Broken file {0!r} on node {1}".format(fpath, self.node.name))
+                    else:
+                        osd_proc_info['ipv4'] = ssv4
+
+                    fpath = "/proc/{0}/net/sockstat6".format(pid)
+                    ssv6 = split_sockstat_file(self.node.rpc.fs.get_file(fpath, compress=False))
+                    if not ssv6:
+                        logger.warning("Broken file {0!r} on node {1}".format(fpath, self.node.name))
+                    else:
+                        osd_proc_info['ipv6'] = ssv6
+
+                    proc_stat = self.node.rpc.fs.get_file("/proc/{0}/status".format(pid), compress=False)
+                    self.save("proc_status", "txt", 0, proc_stat)
+                    osd_proc_info['th_count'] = int(proc_stat.split('Threads:')[1].split()[0])
+
+                    self.save("procinfo", "json", 0, json.dumps(osd_proc_info))
+
     def collect_monitor(self):
-        with self.chdir("mon/{0}".format(self.node.name)):
+        with self.chdir("mon/{0}".format(self.node.mon)):
             self.save_output("mon_daemons", "ps aux | grep ceph-mon")
             tail_ln = "tail -n {0} ".format(self.opts.ceph_log_max_lines)
             self.save_output("mon_log", tail_ln + "/var/log/ceph/ceph-mon.{0}.log".format(self.node.mon))
             self.save_output("ceph_log", tail_ln + " /var/log/ceph/ceph.log")
             self.save_output("ceph_audit", tail_ln + " /var/log/ceph/ceph.audit.log")
-
-
-class VirshCollector(Collector):
-    name = 'virsh'
-    collect_roles = ['virsh']
-
-    def collect(self, collect_roles_restriction):
-        if 'virsh' not in collect_roles_restriction:
-            return
-        raise NotImplementedError("{0}.collect is not implemented yet".format(self.__class__.__name__))
+            self.save_output("config", self.ceph_cmd + "daemon mon.{0} config show".format(self.node.mon),
+                             format='json')
 
 
 class NodeCollector(Collector):
@@ -351,23 +435,42 @@ class NodeCollector(Collector):
         "/proc/vmstat"
     ]
 
-    node_renamed_files = [("netdev", "/proc/net/dev"), ("ceph_conf", "/etc/ceph/ceph.conf")]
+    node_renamed_files = [("netdev", "/proc/net/dev"),
+                          ("dev_netstat", "/proc/net/netstat"),
+                          ("ceph_conf", "/etc/ceph/ceph.conf")]
 
     def collect(self, collect_roles_restriction):
         if 'node' not in collect_roles_restriction:
             return
 
-        with self.chdir('hosts/' + self.node.ip):
+        with self.chdir('hosts/' + self.node.fs_name):
             for path_offset, frmt, cmd in self.node_commands:
-                self.save_output(path_offset, cmd, format=frmt)
+                try:
+                    self.save_output(path_offset, cmd, format=frmt)
+                except Exception as exc:
+                    logger.warning("Failed to run %r on node %s: %s", cmd, self.node.name, exc)
 
             for fpath in self.node_files:
-                self.save_file(os.path.basename(fpath), fpath)
+                try:
+                    self.save_file(os.path.basename(fpath), fpath)
+                except Exception as exc:
+                    logger.warning("Failed to download file %r from node %s: %s", fpath, self.node.name, exc)
 
             for name, fpath in self.node_renamed_files:
-                self.save_file(name, fpath)
+                try:
+                    self.save_file(name, fpath)
+                except Exception as exc:
+                    logger.warning("Failed to download file %r from node %s: %s", fpath, self.node.name, exc)
 
             self.collect_interfaces_info()
+
+            try:
+                if self.node.rpc.fs.file_exists("/etc/debial_version"):
+                    self.save_output("packages_deb", "dpkg -l", format="txt")
+                else:
+                    self.save_output("packages_rpm", "yum list installed", format="txt")
+            except Exception as exc:
+                logger.warning("Failed to download packages information from node %s: %s", self.node.name, exc)
 
     def collect_interfaces_info(self):
         interfaces = {}
@@ -404,7 +507,7 @@ class NodeCollector(Collector):
                 }
                 for name, mult in mults.items():
                     if name in speed:
-                        speed = int(speed.replace(name, '')) * mult
+                        speed = int(float(speed.replace(name, '')) * mult)
                         break
                 else:
                     logger.warning("Node %s - can't transform %s interface speed %r to Bps",
@@ -426,30 +529,57 @@ class LoadCollector(Collector):
         raise RuntimeError("collect should not be called for {0} class instance".format(self.__class__.__name__))
 
     def start_performance_monitoring(self):
-        # TODO: ceph load collect
-        self.node.rpc.ceph_mon.start_ceph_perf_collectors("cpu", "net", "blk")
+        cfg = {
+            "block-io": {},
+            "net-io": {},
+            "vm-io": {},
+            "ceph": {"sources": ['historic', 'historic_js', 'perf_dump'], "osds": "all"}
+        }
+
+        # self.results = {}
+
+        #     "perprocess-cpu": {"allowed": ".*"},
+        #     "perprocess-ram": {"allowed": ".*"},
+        #     "system-cpu": {"allowed": ".*"},
+        #     "system-ram": {"allowed": ".*"},
+        #     "ceph": {"osds": []},
+
+        self.node.rpc.sensors.start(cfg)
 
     def collect_performance_data(self):
-        for tp, data in list(self.node.rpc.ceph_mon.get_perf_data()):
-            self.save("perf_monitoring/{0}/{1}".format(self.node.name, tp), "txt", 0, data)
+        for sensor_path, data, is_unpacked in unpack_rpc_updates(self.node.rpc.sensors.get_updates()):
+            if is_unpacked:
+                ext = 'arr' if isinstance(data, array.array) else 'json'
+                self.save("perf_monitoring/{0}/{1}".format(self.node.fs_name, sensor_path), ext, 0, data)
+            else:
+                sensor, dev, metric = sensor_path.split(".")
+                if metric == 'historic':
+                    self.storage.put_raw(data, "perf_monitoring/{0}/{1}.bin".format(self.node.fs_name, sensor_path))
+                elif metric == 'perf_dump':
+                    self.storage.put_raw(data, "perf_monitoring/{0}/{1}.json".format(self.node.fs_name, sensor_path))
+                else:
+                    assert metric == 'historic_js', sensor_path
+                    self.storage.put_raw(data, "perf_monitoring/{0}/{1}.json".format(self.node.fs_name, sensor_path))
 
 
 def discover_nodes(opts):
     nodes = {}
 
     for mon_id, (ip, name) in get_mons_nodes(check_output, opts.ceph_extra).items():
-        nodes[ip] = Node(ip)
-        nodes[ip].mon = name
+        node = Node(ip)
+        node.mon = name
+        node.roles.add('mon')
+        nodes[ip] = node
 
     for ip, osds in get_osds_nodes(check_output, opts.ceph_extra).items():
         node = nodes.setdefault(ip, Node(ip))
         node.osds = osds
+        node.roles.add('osd')
 
     return list(nodes.values())
 
 
-Collectors = collections.namedtuple("Collectors", ["ceph", "node", "load", "vm"])
-ALL_COLLECTORS = [CephDataCollector, NodeCollector, LoadCollector, VirshCollector]
+ALL_COLLECTORS = [CephDataCollector, NodeCollector, LoadCollector]
 ALL_COLLECTORS_MAP = dict((collector.name, collector) for collector in ALL_COLLECTORS)
 
 
@@ -461,7 +591,8 @@ def get_allowed_paths_checker(disabled_patterns):
 
 
 def set_node_name(node):
-    node.hostname = rpc_run_ch(node.rpc, "hostname", node_name=node.name).strip()
+    if node.hostname is None:
+        node.hostname = rpc_run_ch(node.rpc, "hostname", node_name=node.name).strip()
     logger.debug("%s -> %s", node.ip, node.hostname)
 
 
@@ -483,10 +614,35 @@ def collect(storage, opts):
     allowed_path_checker = get_allowed_paths_checker(opts.disable)
     allowed_collectors = opts.collectors.split(',')
 
-    nodes = discover_nodes(opts)
+    nodes = []
+    explicit_nodes = open(opts.inventory).read().split() if opts.inventory else []
+    for node in explicit_nodes + opts.node:
+        if not node:
+            pass
+
+        if not re.match(r"\d+\.\d+\.\d+\.\d+", node):
+            ip = socket.gethostbyname(node)
+            hostname = node
+        else:
+            ip = node
+            hostname = None
+
+        nodes.append(Node(ip, hostname))
+
+    if not opts.no_detect:
+        detect_nodes = discover_nodes(opts)
+        all_nodes_dct = dict((node.ip, node) for node in detect_nodes)
+    else:
+        all_nodes_dct = {}
+
+    for node in nodes:
+        if node.ip not in all_nodes_dct:
+            all_nodes_dct[node.ip] = node
+
+    ips, nodes = zip(*all_nodes_dct.items())
+
     logger.info("Found %s hosts in total", len(nodes))
 
-    ips = [node.ip for node in nodes]
     good_hosts = set(get_sshable_hosts(ips, SSH_OPTS))
     bad_hosts = set(ips) - good_hosts
 
@@ -494,7 +650,8 @@ def collect(storage, opts):
         logger.warning("Next hosts aren't available over ssh and would be skipped: %s", ", ".join(bad_hosts))
 
     for node in nodes:
-        descr = ("OFFLINE " if node.ip in bad_hosts else "") + node.name
+        node.ssh_ok = node.ip not in bad_hosts
+        descr = ("" if node.ssh_ok else "OFFLINE ") + node.name
         if node.mon:
             descr += " mon=" + node.mon
         if node.osds:
@@ -504,7 +661,8 @@ def collect(storage, opts):
     if opts.detect_only:
         return
 
-    storage.put_raw(json.dumps(list(bad_hosts)), "bad_hosts.json")
+    storage.put_raw(json.dumps([node.dct() for node in nodes]), "hosts.json")
+
     logger.info("Initializing RPC connections")
     nodes = [node for node in nodes if node.ip in good_hosts]
     nodes_map = dict((node.ip, node) for node in nodes if node.ip in good_hosts)
@@ -523,6 +681,7 @@ def collect(storage, opts):
         logger.info("RPC connected")
         logger.info("Getting node names")
         pmap_check(set_node_name, nodes, thcount=opts.pool_size)
+        load_collectors = []
 
         if LoadCollector.name in allowed_collectors:
             handlers = []
@@ -530,6 +689,8 @@ def collect(storage, opts):
                 collector = LoadCollector(allowed_path_checker, storage, opts, node,
                                           pretty_json=not opts.no_pretty_json)
                 handlers.append((collector.start_performance_monitoring, [], {}))
+                load_collectors.append(collector)
+            logger.info("Start performance collectors")
             prun_check(handlers, thcount=opts.pool_size)
             collect_at = time.time() + opts.load_collect_seconds
 
@@ -560,19 +721,20 @@ def collect(storage, opts):
         if LoadCollector.name in allowed_collectors:
             stime = collect_at - time.time()
             if stime > 0:
+                logger.info("Waiting for %s seconds for performance collectors", int(stime + 0.5))
                 time.sleep(stime)
 
-            handlers = []
-            for node in nodes:
-                collector_obj = LoadCollector(allowed_path_checker, storage, opts, node,
-                                              pretty_json=not opts.no_pretty_json)
-                handlers.append((collector_obj.collect_performance_data, [], {}))
-
+            logger.info("Collecting performance info")
+            handlers = [(collector.collect_performance_data, [], {}) for collector in load_collectors]
             prun_check(handlers, thcount=opts.pool_size)
     finally:
-        logger.info("Teardown RPC servers")
+        logger.info("Collecting logs and teardown RPC servers")
         for node in nodes:
             if node.rpc is not None:
+                try:
+                    storage.put_raw(node.rpc.server.get_logs(), "rpc_logs/{0}.txt".format(node.fs_name))
+                except:
+                    pass
                 try:
                     node.rpc.server.stop()
                 except ConnectionClosed:
@@ -587,8 +749,11 @@ def parse_args(argv):
     p.add_argument("-C", "--ceph-extra", default="", help="Extra opts to pass to 'ceph' command")
     p.add_argument("-d", "--disable", default=[], nargs='*', help="Disable collect pattern")
     p.add_argument("-D", "--detect-only", action="store_true", help="Don't collect any data, only detect cluster nodes")
+    p.add_argument("--no-detect", action="store_true", help="Don't detect nodes. Inventory must be provided")
     p.add_argument("-g", "--save-to-git", metavar="DIR", help="Commit into git repo, cloned to folder")
     p.add_argument("-G", "--git-push", metavar="DIR", help="Commit into git repo, cloned to folder and run 'git push'")
+    p.add_argument("-i", "--inventory", metavar="FILE", help="File with node names/addrs")
+    p.add_argument("-I", "--node", nargs='+', default=[], help="pass additional nodes from cli")
     p.add_argument("-j", "--no-pretty-json", action="store_true", help="Don't prettify json data")
     p.add_argument("-l", "--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
                    default=None, help="Console log level")
@@ -599,6 +764,7 @@ def parse_args(argv):
     p.add_argument("-n", "--dont-remove-unpacked", action="store_true", help="Keep unpacked data")
     p.add_argument("-N", "--dont-pack-result", action="store_true", help="Don't create archive")
     p.add_argument("-o", "--result", default=None, help="Result file")
+    p.add_argument("-O", "--output-folder", default=None, help="Result folder")
     p.add_argument("-p", "--pool-size", default=32, type=int, help="RPC/local worker pool size")
     p.add_argument("-P", "--ssh-pool-size", default=4, type=int, help="SSH worker pool size")
     p.add_argument("-s", "--load-collect-seconds", default=60, type=int, metavar="SEC",
@@ -606,6 +772,7 @@ def parse_args(argv):
     p.add_argument("-S", "--ssh-opts", default=None, help="SSH cli options")
     p.add_argument("-t", "--ssh-conn-timeout", default=60, type=int, help="SSH connection timeout")
     p.add_argument("-u", "--ssh-user", default=None, help="SSH user. Current user by default")
+    p.add_argument("-w", "--wipe", action='store_true', help="Wipe results directory before store data")
 
     if logging_tree:
         p.add_argument("-T", "--show-log-tree", action="store_true", help="Show logger tree.")
@@ -614,8 +781,8 @@ def parse_args(argv):
 
 
 def setup_logging(opts, out_folder, tmp_log_file=False):
-    default_lconf = os.path.join(os.path.dirname(__file__), 'logging.json')
-    log_config_fname = default_lconf if opts.log_config is None else opts.log_config
+    default_lconf_path = os.path.join(os.path.dirname(__file__), 'logging.json')
+    log_config_fname = default_lconf_path if opts.log_config is None else opts.log_config
     log_config = json.load(open(log_config_fname))
 
     if opts.detect_only:
@@ -681,11 +848,23 @@ def main(argv):
 
         git_dir = opts.git_push if opts.git_push else opts.save_to_git
 
+        if git_dir and opts.output_folder:
+            sys.stderr.write("--output-folder can't be used with -g/-G option\n")
+            return 1
+
         if not opts.detect_only:
             if git_dir:
                 if not git_prepare(git_dir):
                     return 1
                 out_folder = git_dir
+            elif opts.output_folder:
+                out_folder = opts.output_folder
+                if os.path.exists(out_folder):
+                    if opts.wipe:
+                        shutil.rmtree(out_folder)
+                        os.mkdir(out_folder)
+                else:
+                    os.mkdir(out_folder)
             else:
                 out_folder = tempfile.mkdtemp()
 
@@ -703,7 +882,10 @@ def main(argv):
 
     try:
         if out_folder:
-            logger.info("Temporary folder %r", out_folder)
+            if opts.output_folder:
+                logger.info("Store data into %r", out_folder)
+            else:
+                logger.info("Temporary folder %r", out_folder)
             storage = make_storage(out_folder, existing=False, serializer='raw')
         else:
             storage = None

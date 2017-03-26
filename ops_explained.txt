@@ -1,0 +1,59 @@
+
+http://www.spinics.net/lists/ceph-users/msg25858.html:
+	Initiated - first byte of message appears
+	op_applied - written to main storage
+
+
+waiting_for_subop -> subop_commit_rec -> done
+waiting_for_subop -> commit_queued_for_journal_write -> write_thread_in_journal_buffer -> commit_sent -> done
+waiting_for_subop -> journaled_completion_queued -> done
+op_commit -> commit_sent -> done
+waiting_for_subop -> op_applied -> done
+queued_for_pg -> reached_pg -> started -> done
+sub_op_applied -> done
+subop_apply_rec -> done
+
+
+
+waiting_for_subop <= journaled_completion_queued
+waiting_for_subop <= subop_commit_rec
+waiting_for_subop <= commit_queued_for_journal_write
+waiting_for_subop <= op_applied
+waiting_for_subop <= commit_sent
+waiting_for_subop <= op_commit
+waiting_for_subop <= write_thread_in_journal_buffer
+waiting_for_subop <= done
+
+
+commit_queued_for_journal_write <= write_thread_in_journal_buffer
+commit_queued_for_journal_write <= journaled_completion_queued
+commit_queued_for_journal_write <= done
+commit_queued_for_journal_write <= commit_sent
+
+queued_for_pg <= started
+queued_for_pg <= done
+queued_for_pg <= reached_pg
+
+write_thread_in_journal_buffer <= done
+write_thread_in_journal_buffer <= commit_sent
+write_thread_in_journal_buffer <= journaled_completion_queued
+
+op_commit <= commit_sent
+op_commit <= done
+
+reached_pg <= started
+reached_pg <= done
+
+commit_sent <= done
+
+journaled_completion_queued <= done
+
+op_applied <= done
+
+started <= done
+
+sub_op_applied <= done
+
+subop_apply_rec <= done
+
+subop_commit_rec <= done
