@@ -320,3 +320,23 @@ def get_io_resource_usage(cluster):
             order.append(dev_uuid)
     return writes_per_dev, reads_per_dev, order
 
+
+#
+#
+# def show_agg_osd_lat_histo(report, cluster, max_xbins=25, cut_percentile=(0.01, 0.99)):
+#     for field, header in (('journal_latency', "Journal latency"),
+#                           ('apply_latency',  "Apply latency"),
+#                           ('commitcycle_latency', "Commit cycle latency")):
+#         lats = numpy.concatenate([osd.osd_perf[field] for osd in cluster.osds])
+#         lats = lats[lats != NO_VALUE]
+#
+#         mmin, mmax = numpy.percentile(lats, (cut_percentile[0] * 100, cut_percentile[1] * 100))
+#         numpy.clip(lats, mmin, mmax, lats)
+#
+#         bins = auto_edges(lats, bins=max_xbins, round_base=None)
+#
+#         seaborn.plt.clf()
+#         _, ax = seaborn.plt.subplots(figsize=(6, 4))
+#         plot_histo(lats, bins=bins, ax=ax)
+#         seaborn.plt.tight_layout()
+#         report.add_block(4, header + " histo", get_img(seaborn.plt))

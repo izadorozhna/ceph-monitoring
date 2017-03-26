@@ -882,28 +882,20 @@ def main(argv):
         report.next_line()
 
         if not opts.no_plots:
-            from .plot_data import (show_agg_datadisk_bw_heatmaps,
-                                    show_osd_used_space_histo,
-                                    show_agg_datadisk_iops_heatmaps,
-                                    show_agg_osd_lat_histo,
-                                    show_agg_osd_load_histo,
+            from .plot_data import (show_osd_used_space_histo,
+                                    show_osd_load,
                                     show_osd_lat_heatmaps,
                                     show_osd_ops_boxplot,
                                     show_osd_pg_histo)
-
-            show_agg_datadisk_iops_heatmaps(report, cluster)
-            show_agg_datadisk_bw_heatmaps(report, cluster)
-            report.next_line()
 
             show_osd_used_space_histo(report, cluster)
             show_osd_pg_histo(report, cluster)
             report.next_line()
 
-            show_osd_lat_heatmaps(report, cluster)
+            show_osd_load(report, cluster)
             report.next_line()
 
-            show_agg_osd_load_histo(report, cluster)
-            show_agg_osd_lat_histo(report, cluster)
+            show_osd_lat_heatmaps(report, cluster)
             report.next_line()
 
             show_osd_ops_boxplot(report, cluster)

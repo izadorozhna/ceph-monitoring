@@ -225,6 +225,9 @@ class CephCluster(object):
         self.op_per_sec = None
         self.pgmap_stat = None
 
+        # synthetic props
+        self.usage = None
+
     def load(self):
         self.settings = AttredDict(**parse_txt_ceph_config(self.storage.txt.master.default_config))
         self.cluster_net = IPNetwork(self.settings['cluster_network'])
@@ -454,10 +457,10 @@ class CephCluster(object):
             if rr:
                 osd_versions[int(rr.group('osd_id'))] = (rr.group('version'), rr.group('hash'))
 
-        osd_perf = {}
+        osd_perf_scalar = {}
         for node in self.storage.json.master.osd_perf['osd_perf_infos']:
-            osd_perf[node['id']] = {"apply_latency": node["perf_stats"]["apply_latency_ms"],
-                                    "commitcycle_latency": node["perf_stats"]["commit_latency_ms"]}
+            osd_perf_scalar[node['id']] = {"apply_latency": node["perf_stats"]["apply_latency_ms"],
+                                           "commitcycle_latency": node["perf_stats"]["commit_latency_ms"]}
 
         for osd_data in self.storage.json.master.osd_dump['osds']:
             osd = CephOSD()
@@ -519,12 +522,11 @@ class CephCluster(object):
                 data = [obj['journal_wr_bytes']["sum"] for obj in fstor]
                 arr = numpy.array(data, dtype=numpy.float32)
                 osd.osd_perf["journal_bytes"] = arr[1:] - arr[:-1]
-
             else:
                 try:
-                    osd.osd_perf = osd_perf[osd.id]
+                    osd.osd_perf = osd_perf_scalar[osd.id]
                 except KeyError:
-                    msg = "Can't found perf_stats for osd {0} in master/osd_perf.json[osd_perf_infos]".format(osd.id)
+                    msg = "Can't found perf_stats for osd {0} in master/osd_perf[osd_perf_infos]".format(osd.id)
                     logger.error(msg)
                     raise KeyError(msg)
 

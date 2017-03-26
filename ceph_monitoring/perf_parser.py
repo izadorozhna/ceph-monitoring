@@ -132,26 +132,6 @@ def group_times(times, x_bins=25):
     return bin_ranges
 
 
-def process_heatmap_data(values, bin_ranges, cut_percentile=(0.05, 0.95), ybins=20, log_edges=True):
-    nvalues = [values[idx1:idx2] for idx1, idx2 in bin_ranges]
-    mmin, mmax = numpy.percentile(values, (cut_percentile[0] * 100, cut_percentile[1] * 100))
-
-    values[values > mmax] = mmax
-    values[values < mmin] = mmin
-
-    if log_edges:
-        bins = auto_edges(values, bins=ybins, round_base=None)
-    else:
-        bins = numpy.linspace(mmin, mmax, ybins + 1)
-
-    heatmap = numpy.empty((len(nvalues), ybins), dtype=numpy.float32)
-
-    for src_line, res_line in zip(nvalues, heatmap):
-        res_line[:], _ = numpy.histogram(src_line, bins)
-        res_line /= res_line.sum()
-
-    return heatmap
-
 
 def get_img(plt, format='svg'):
     bio = BIO()
