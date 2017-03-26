@@ -1,5 +1,6 @@
 import sys
 import json
+import time
 import shutil
 import bisect
 import logging
@@ -245,6 +246,15 @@ def show_summary(report, cluster):
         t.add_cells("Journal aio", cluster.settings.journal_aio)
         t.add_cells("Journal dio", cluster.settings.journal_dio)
         t.add_cells("Filestorage sync", str(cluster.settings.filestore_max_sync_interval) + 's')
+        t.add_cells("Monmap version", str(cluster.monmap_stat['epoch']))
+
+        mon_tm = time.mktime(time.strptime(cluster.monmap_stat['modified'], "%Y-%m-%d %H:%M:%S.%f"))
+        collect_tm = time.mktime(time.strptime(cluster.report_collected_at_local, "%Y-%m-%d %H:%M:%S"))
+        diff = int(collect_tm - mon_tm)
+        h = diff // 3600
+        m = (diff % 3600) % 60
+        s = diff % 60
+        t.add_cells("Monmap modified in", '{0}:{1:<02d}:{2:<02d}'.format(h, m, s))
     report.add_block(3, "OSD:", t)
 
     t = html.HTMLTable(["Setting", "Value"])
@@ -375,7 +385,7 @@ def show_osd_info(report, cluster):
                                     "status",
                                     "version [hash]",
                                     "daemon<br>run",
-                                    "fds",
+                                    "open<br>files",
                                     "ip<br>conn",
                                     "threads"] +
                                     w_headers +
@@ -520,13 +530,16 @@ def show_osd_perf_info(report, cluster):
         if osd.j_stor_stats is None:
             perf_info.extend([('-', 0)] * 3)
         else:
-            load = osd.j_stor_stats.load
-            perf_info.extend([
-                (os.path.basename(osd.data_stor_stats.root_dev), None),
-                (b2ssizei(load.write_bytes, False) + " / " + b2ssizei(load.write_iops, False), load.write_bytes),
-                (int(load.lat * 1000), load.lat) if load.lat is not None else ('-', 0),
-                (int(load.io_time * 100), load.io_time)
-            ])
+            if osd.j_stor_stats.root_dev != osd.data_stor_stats.root_dev:
+                load = osd.j_stor_stats.load
+                perf_info.extend([
+                    (os.path.basename(osd.j_stor_stats.root_dev), None),
+                    (b2ssizei(load.write_bytes, False) + " / " + b2ssizei(load.write_iops, False), load.write_bytes),
+                    (int(load.lat * 1000), load.lat) if load.lat is not None else ('-', 0),
+                    (int(load.io_time * 100), load.io_time)
+                ])
+            else:
+                perf_info.extend([("<--", None), ('-', 0), ('-', 0), ('-', 0)])
 
         table.add_cell(str(osd.id))
         table.add_cell(osd.host.name)

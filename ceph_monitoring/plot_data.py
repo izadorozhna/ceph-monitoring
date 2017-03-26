@@ -174,26 +174,51 @@ def show_osd_load(report, cluster, max_xbins=25):
     hm_vals /= 1024. ** 2
     plot_hmap_with_y_histo(hm_vals, ranges)
     seaborn.plt.tight_layout()
-    report.add_block(6, "OSD data write (MiBps)", get_img(seaborn.plt))
+    img = get_img(seaborn.plt)
+    if usage.colocated_journals:
+        report.add_block(6, "OSD data/journal write (MiBps)", img)
+    else:
+        report.add_block(6, "OSD data write (MiBps)", img)
 
     seaborn.plt.clf()
     data, chunk_ranges = hmap_from_2d(usage.ceph_data_dev_wio, max_xbins=max_xbins)
     plot_hmap_with_y_histo(data, chunk_ranges)
     seaborn.plt.tight_layout()
-    report.add_block(6, "OSD data write IOPS", get_img(seaborn.plt))
+    img = get_img(seaborn.plt)
+    if usage.colocated_journals:
+        report.add_block(6, "OSD data/journal write IOPS", img)
+    else:
+        report.add_block(6, "OSD data write IOPS", img)
 
     seaborn.plt.clf()
-    hm_vals, ranges = hmap_from_2d(usage.ceph_j_dev_wbytes, max_xbins=max_xbins)
-    hm_vals /= 1024. ** 2
-    plot_hmap_with_y_histo(hm_vals, ranges)
-    seaborn.plt.tight_layout()
-    report.add_block(6, "OSD journal write (MiBps)", get_img(seaborn.plt))
-
-    seaborn.plt.clf()
-    data, chunk_ranges = hmap_from_2d(usage.ceph_j_dev_wio, max_xbins=max_xbins)
+    data, chunk_ranges = hmap_from_2d(usage.ceph_data_dev_qd, max_xbins=max_xbins)
     plot_hmap_with_y_histo(data, chunk_ranges)
     seaborn.plt.tight_layout()
-    report.add_block(6, "OSD journal write IOPS", get_img(seaborn.plt))
+    img = get_img(seaborn.plt)
+    if usage.colocated_journals:
+        report.add_block(6, "OSD data/journal QD", img)
+    else:
+        report.add_block(6, "OSD data write QD", img)
+
+    if not usage.colocated_journals:
+        seaborn.plt.clf()
+        hm_vals, ranges = hmap_from_2d(usage.ceph_j_dev_wbytes, max_xbins=max_xbins)
+        hm_vals /= 1024. ** 2
+        plot_hmap_with_y_histo(hm_vals, ranges)
+        seaborn.plt.tight_layout()
+        report.add_block(6, "OSD journal write (MiBps)", get_img(seaborn.plt))
+
+        seaborn.plt.clf()
+        data, chunk_ranges = hmap_from_2d(usage.ceph_j_dev_wio, max_xbins=max_xbins)
+        plot_hmap_with_y_histo(data, chunk_ranges)
+        seaborn.plt.tight_layout()
+        report.add_block(6, "OSD journal write IOPS", get_img(seaborn.plt))
+
+        seaborn.plt.clf()
+        data, chunk_ranges = hmap_from_2d(usage.ceph_j_dev_qd, max_xbins=max_xbins)
+        plot_hmap_with_y_histo(data, chunk_ranges)
+        seaborn.plt.tight_layout()
+        report.add_block(6, "OSD journal QD", get_img(seaborn.plt))
 
 
 def show_osd_lat_heatmaps(report, cluster, max_xbins=25):
@@ -237,4 +262,34 @@ def show_osd_ops_boxplot(report, cluster):
     seaborn.boxplot(data=values, ax=ax)
     names = [STAGES_PRINTABLE_NAMES[name] for name in ALL_STAGES_IN_ORDER]
     ax.set_xticklabels(names, rotation=35)
-    report.add_block(12, "Cepg OPS time", get_img(seaborn.plt))
+    report.add_block(12, "Ceph OPS time", get_img(seaborn.plt))
+
+
+def plot_crush(report, cluster):
+    import networkx
+    import matplotlib.pyplot as plt
+
+    G = networkx.DiGraph()
+
+    G.add_node("ROOT")
+    for i in xrange(5):
+        G.add_node("Child_%i" % i)
+        G.add_node("Grandchild_%i" % i)
+        G.add_node("Greatgrandchild_%i" % i)
+
+        G.add_edge("ROOT", "Child_%i" % i)
+        G.add_edge("Child_%i" % i, "Grandchild_%i" % i)
+        G.add_edge("Grandchild_%i" % i, "Greatgrandchild_%i" % i)
+
+    # write dot file to use with graphviz
+    # run "dot -Tpng test.dot >test.png"
+    # nx.write_dot(G,'test.dot')
+
+    # same layout using matplotlib with no labels
+    # plt.title('draw_networkx')
+    plt.clf()
+    pos = networkx.fruchterman_reingold_layout(G)
+    networkx.draw(G, pos, with_labels=False, arrows=False)
+    # plt.savefig('nx_test.png')
+    report.add_block(4, "nodes", get_img(plt))
+

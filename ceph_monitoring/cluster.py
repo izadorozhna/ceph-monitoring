@@ -224,6 +224,7 @@ class CephCluster(object):
         self.write_bytes_sec = None
         self.op_per_sec = None
         self.pgmap_stat = None
+        self.monmap_stat = None
 
         # synthetic props
         self.usage = None
@@ -304,6 +305,7 @@ class CephCluster(object):
         self.write_bytes_sec = mstorage.status['pgmap'].get("write_bytes_sec", 0)
         self.op_per_sec = mstorage.status['pgmap'].get("op_per_sec", 0)
         self.pgmap_stat = mstorage.status['pgmap']
+        self.monmap_stat = mstorage.status['monmap']
 
     def load_hosts(self):
         hosts = self.storage.txt.hosts

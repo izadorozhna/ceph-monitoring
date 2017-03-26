@@ -14,9 +14,12 @@ class ResourceUsage(object):
         self.ceph_data_dev_wbytes = None # 2D array
         self.ceph_data_dev_rio = None    # 2D array
         self.ceph_data_dev_rbytes = None # 2D array
+        self.ceph_data_dev_qd = None
+        self.colocated_journals = False
 
         self.ceph_j_dev_wbytes = None    # 2D array
         self.ceph_j_dev_wio = None       # 2D array
+        self.ceph_j_dev_qd = None
 
 
 def get_resource_usage(cluster):
@@ -47,15 +50,18 @@ def get_resource_usage(cluster):
     # usually each OSD has dedicated data device (but not always)
     # but several OSD often share the same device for journal
 
-    for is_journal in (True, False):
-        if is_journal:
-            all_disks = {(osd.host.name, osd.j_stor_stats.src_dev) for osd in cluster.osds}
-        else:
-            all_disks = {(osd.host.name, osd.data_stor_stats.src_dev) for osd in cluster.osds}
+    all_data_disks = {(osd.host.name, osd.j_stor_stats.src_dev) for osd in cluster.osds}
+    all_j_disks = {(osd.host.name, osd.data_stor_stats.src_dev) for osd in cluster.osds}
 
+    if all_j_disks.issubset(all_data_disks):
+        usage.colocated_journals = True
+
+    for is_journal in (True, False):
+        all_disks = all_j_disks if is_journal else all_data_disks
         shape = len(all_disks), len(times)
         wio = numpy.empty(shape)
         wbytes = numpy.empty(shape)
+        qd = numpy.empty(shape)
 
         if not is_journal:
             rio = numpy.empty(shape)
@@ -67,6 +73,7 @@ def get_resource_usage(cluster):
             idx1, idx2 = node_bounds[storname]
             wio[idx] = stor['writes_completed'][idx1:idx2]
             wbytes[idx] = stor['sectors_written'][idx1:idx2]
+            qd[idx] = stor['io_queue'][idx1:idx2]
 
             if not is_journal:
                 rio[idx] = stor['reads_completed'][idx1:idx2]
@@ -75,11 +82,13 @@ def get_resource_usage(cluster):
         if is_journal:
             usage.ceph_j_dev_wio = wio
             usage.ceph_j_dev_wbytes = wbytes
+            usage.ceph_j_dev_qd = wio
         else:
             usage.ceph_data_dev_wio = wio
             usage.ceph_data_dev_wbytes = wbytes
             usage.ceph_data_dev_rio = rio
             usage.ceph_data_dev_rbytes = rbytes
+            usage.ceph_data_dev_qd = qd
 
     logger.info("Done")
     cluster.usage = usage
