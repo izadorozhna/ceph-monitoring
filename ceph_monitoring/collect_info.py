@@ -25,7 +25,7 @@ except ImportError:
 
 from agent.agent import ConnectionClosed
 from cephlib.storage import make_storage
-from cephlib.common import check_output, prun_check, run, get_sshable_hosts, tmpnam, pmap, pmap_check
+from cephlib.common import check_output, prun_check, run, get_sshable_hosts, tmpnam, pmap, pmap_check, setup_logging
 from cephlib.rpc import init_node, rpc_run, rpc_run_ch
 from cephlib.discover import get_osds_nodes, get_mons_nodes
 from cephlib.sensors_rpc_plugin import unpack_rpc_updates
@@ -780,28 +780,22 @@ def parse_args(argv):
     return p.parse_args(argv[1:])
 
 
-def setup_logging(opts, out_folder, tmp_log_file=False):
+def setup_logging2(opts, out_folder, tmp_log_file=False):
     default_lconf_path = os.path.join(os.path.dirname(__file__), 'logging.json')
     log_config_fname = default_lconf_path if opts.log_config is None else opts.log_config
-    log_config = json.load(open(log_config_fname))
 
     if opts.detect_only:
-        log_config["handlers"]["log_file"]["filename"] = '/dev/null'
-        log_file = None
+        log_file = '/dev/null'
     else:
         if tmp_log_file:
             fd, log_file = tempfile.mkstemp()
             os.close(fd)
         else:
             log_file = os.path.join(out_folder, "log.txt")
-        log_config["handlers"]["log_file"]["filename"] = log_file
 
-    if opts.log_level is not None:
-        log_config["handlers"]["console"]["level"] = opts.log_level
+    setup_logging(log_config_fname, log_file=log_file, log_level=opts.log_level)
 
-    logging.config.dictConfig(log_config)
-
-    return log_file
+    return log_file if log_file != '/dev/null' else None
 
 
 def git_prepare(path):
@@ -868,7 +862,7 @@ def main(argv):
             else:
                 out_folder = tempfile.mkdtemp()
 
-        log_file = setup_logging(opts, out_folder, git_dir is not None)
+        log_file = setup_logging2(opts, out_folder, git_dir is not None)
 
         if opts.show_log_tree:
             logging_tree.printout()
