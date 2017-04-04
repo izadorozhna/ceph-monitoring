@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 
 from cephlib.sensors_rpc_plugin import CephSensor, pack_ceph_op, CEPH_OP_DESCR_IDX
 from cephlib.sensors_rpc_plugin import ALL_STAGES
+from cephlib.plot import auto_edges
 
 
 all_pairs = [(x, y)
@@ -82,27 +83,6 @@ def group_ops(ops):
     # return new, seen_so_far2
 
 
-def auto_edges(vals, log_base=2, bins=20, round_base=10):
-    lower = numpy.min(vals)
-    upper = numpy.max(vals)
-
-    if lower == upper:
-        return numpy.array([lower * 0.9, lower * 1.1])
-
-    if lower < 1:
-        return numpy.linspace(lower, upper, bins + 1)
-
-    if round_base:
-        # to upper and lower poser of 10
-        lower_lg = math.floor(math.log(lower) / math.log(round_base)) * (math.log(round_base) / math.log(log_base))
-        upper_lg = int(math.log(upper) / math.log(round_base) + 0.99) * (math.log(round_base) / math.log(log_base))
-    else:
-        lower_lg = math.log(lower) / math.log(log_base)
-        upper_lg = math.log(upper) / math.log(log_base)
-
-    return numpy.logspace(lower_lg, upper_lg, bins + 1, base=log_base)
-
-
 def txthist(values, bin_edges=None, hist_width=70):
     if not bin_edges:
         bin_edges = auto_edges(values)
@@ -130,7 +110,6 @@ def group_times(times, x_bins=25):
     bin_ranges.append((bin_ranges[-1][1], len(times)))
 
     return bin_ranges
-
 
 
 def get_img(plt, format='svg'):
@@ -200,78 +179,3 @@ def load_stage(ops, stage_name, no_gaps=True):
     assert not no_gaps or values.min() > 0, "Some ops has no {0!r} stage".format(stage_name)
     return values
 
-
-def main(argv):
-    # load init_at and done
-
-    templ = os.path.join(argv[1], 'perf_monitoring', '*', 'ceph.osd*.perf_dump.json')
-    ops = []
-    for name in glob.glob(templ):
-        agg_ops = []
-        for obj in json.load(open(name)):
-            dt = obj["filestore"]["apply_latency"]
-            agg_ops.append((dt['avgcount'], dt['sum']))
-
-        for idx, cs in enumerate(zip(agg_ops[:-1], agg_ops[1:])):
-            (c1, s1), (c2, s2) = cs
-            if c2 != c1:
-                ops.append((idx, (s2 - s1) / (c2 - c1)))
-
-    ops.sort()
-    values = numpy.array([op[1] for op in ops])
-    times = numpy.array([op[0] for op in ops])
-
-    vls, bin_ranges = group_values(times, values)
-    heatmap = process_heatmap_data(vls, bin_ranges)
-    open("/tmp/hmap.svg", "wb").write(get_heatmap_img(heatmap, bin_ranges))
-    return
-
-    # templ = os.path.join(argv[1], 'perf_monitoring', '*', 'ceph.osd*.historic.bin')
-    # files = glob.glob(templ)
-    # ops = load_ops(files)
-    # ops.sort(key=lambda x: x.initiated_at)
-    # values = load_stage(ops, 'done')
-    # times = numpy.array([op.initiated_at // 1000000 for op in ops], dtype=numpy.uint32)
-    # seen_so_far = set()
-    # curr = all_pairs
-    # for op in ops:
-    #     if op.descr_idx == CEPH_OP_DESCR_IDX["osd_op"]:
-    #         curr, seen_so_far = validate(op, curr, seen_so_far)
-    #
-    # #
-    # lt_than = {}
-    # for gt, lt in sorted(curr):
-    #     lt_than[lt] = lt_than.get(lt, 0) + 1
-    #
-    # sorted_curr = sorted(curr, key=lambda pair: [-lt_than.get(pair[1], 0), pair[1]])
-    #
-    # print("All ops :\n    " + "\n    ".join(sorted(seen_so_far)))
-    # for gt, lt in sorted_curr:
-    #     if gt in seen_so_far and lt in seen_so_far:
-    #         print(lt.replace("\n", ' '), "<=", gt.replace("\n", ' '))
-    # # return 1
-
-    grouped_res = group_ops(ops)
-
-    # convert us -> ms
-    values = [numpy.array(grouped_res[name]) / 1000. for name in all_stages_in_order]
-
-    # cut upper 5%
-    for arr in values:
-        arr.sort()
-        if len(arr) >= 100:
-            upper_idx = int(len(arr) * 0.95)
-            arr[upper_idx:] = arr[upper_idx]
-
-    _, ax = plt.subplots(figsize=(14, 14))
-    seaborn.boxplot(data=values, ax=ax)
-    # seaborn.violinplot(data=values, ax=ax)
-    ax.set_xticklabels([user_names[name] for name in all_stages_in_order], rotation=35, size='large')
-    plt.show()
-    return 0
-
-
-if __name__ == "__main__":
-    # test_parse_pack_unpack(sys.argv[1])
-    # compare(sys.argv[1], sys.argv[2])
-    exit(main(sys.argv))
