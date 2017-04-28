@@ -84,7 +84,7 @@ def get_host_interfaces(node):
 
 
 def get_device_for_file(node, fname):
-    dev = node.rpc.sensors.get_dev_for_file(fname)
+    dev = node.rpc.fs.get_dev_for_file(fname)
     assert dev.startswith('/dev'), "{0!r} is not starts with /dev".format(dev)
     root_dev = dev = dev.strip()
     while root_dev[-1].isdigit():
