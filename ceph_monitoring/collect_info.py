@@ -319,7 +319,7 @@ class NodeCollector(Collector):
     run_alone = False
 
     node_commands = [
-        ("lshw", "xml", "lshw -xml"),
+        ("lshw", "xml", "sudo lshw -xml"),
         ("lsblk", "txt", "lsblk -a"),
         ("diskstats", "txt", "cat /proc/diskstats"),
         ("uname", "txt", "uname -a"),
