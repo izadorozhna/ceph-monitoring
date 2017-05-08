@@ -77,7 +77,8 @@ def get_device_for_file(host, opts, fname):
     dev_str = dev_str.strip()
     dev_link = dev_str.strip().split("\n")[1].split()[0]
 
-    if dev_link == 'udev':
+    # This sets the right fname if the journal is a raw device. Ubuntu returns 'udev', while in SUSE 'devtmpfs' is returned
+    if dev_link == 'udev' or dev_link == "devtmpfs":
         dev_link = fname
 
     abs_path_cmd = '\'path="{0}" ;'.format(dev_link)
