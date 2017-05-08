@@ -323,7 +323,7 @@ class NodeCollector(Collector):
         ("lsblk", "txt", "lsblk -a"),
         ("diskstats", "txt", "cat /proc/diskstats"),
         ("uname", "txt", "uname -a"),
-        ("dmidecode", "txt", "dmidecode"),
+        ("dmidecode", "txt", "sudo dmidecode"),
         ("meminfo", "txt", "cat /proc/meminfo"),
         ("loadavg", "txt", "cat /proc/loadavg"),
         ("cpuinfo", "txt", "cat /proc/cpuinfo"),
