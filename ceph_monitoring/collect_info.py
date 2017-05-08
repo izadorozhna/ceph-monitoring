@@ -366,6 +366,9 @@ class NodeCollector(Collector):
                 if 'Tx-Power=' in br1:
                     speed = br1.split('Tx-Power=')[0]
 
+            if speed is "Unknown!":
+                speed = None
+
             if speed is not None:
                 mults = {
                     'Kb/s': 125,
