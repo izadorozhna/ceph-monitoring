@@ -332,7 +332,7 @@ class NodeCollector(Collector):
         ("netdev", "txt", "cat /proc/net/dev"),
         ("ceph_conf", "txt", "cat /etc/ceph/ceph.conf"),
         ("uptime", "txt", "cat /proc/uptime"),
-        ("dmesg", "txt", "cat /var/log/dmesg"),
+        ("dmesg", "txt", "dmesg"),
         ("netstat", "txt", "netstat -nap")
     ]
 
