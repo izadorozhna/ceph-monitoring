@@ -864,7 +864,7 @@ def main(argv):
 
         log_file = setup_logging2(opts, out_folder, git_dir is not None)
 
-        if opts.show_log_tree:
+        if logging_tree and opts.show_log_tree:
             logging_tree.printout()
             return 0
 
