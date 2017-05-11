@@ -77,7 +77,8 @@ def get_device_for_file(host, opts, fname):
     dev_str = dev_str.strip()
     dev_link = dev_str.strip().split("\n")[1].split()[0]
 
-    if dev_link == 'udev':
+    # This sets the right fname if the journal is a raw device. Ubuntu returns 'udev', while in SUSE 'devtmpfs' is returned
+    if dev_link == 'udev' or dev_link == "devtmpfs":
         dev_link = fname
 
     abs_path_cmd = '\'path="{0}" ;'.format(dev_link)
@@ -318,11 +319,11 @@ class NodeCollector(Collector):
     run_alone = False
 
     node_commands = [
-        ("lshw", "xml", "lshw -xml"),
+        ("lshw", "xml", "sudo lshw -xml"),
         ("lsblk", "txt", "lsblk -a"),
         ("diskstats", "txt", "cat /proc/diskstats"),
         ("uname", "txt", "uname -a"),
-        ("dmidecode", "txt", "dmidecode"),
+        ("dmidecode", "txt", "sudo dmidecode"),
         ("meminfo", "txt", "cat /proc/meminfo"),
         ("loadavg", "txt", "cat /proc/loadavg"),
         ("cpuinfo", "txt", "cat /proc/cpuinfo"),
@@ -331,7 +332,7 @@ class NodeCollector(Collector):
         ("netdev", "txt", "cat /proc/net/dev"),
         ("ceph_conf", "txt", "cat /etc/ceph/ceph.conf"),
         ("uptime", "txt", "cat /proc/uptime"),
-        ("dmesg", "txt", "cat /var/log/dmesg"),
+        ("dmesg", "txt", "dmesg"),
         ("netstat", "txt", "netstat -nap")
     ]
 
@@ -358,12 +359,16 @@ class NodeCollector(Collector):
                         speed = line.split(":")[1].strip()
                     if 'Duplex:' in line:
                         interface['duplex'] = line.split(":")[1].strip() == 'Full'
+            print "HOST: "+host+" DEV: "+dev+" SPEED: "+speed
 
             ok, data = check_output_ssh(host, self.opts, "iwconfig " + dev)
             if ok and 'Bit Rate=' in data:
                 br1 = data.split('Bit Rate=')[1]
                 if 'Tx-Power=' in br1:
                     speed = br1.split('Tx-Power=')[0]
+
+            if speed == "Unknown!":
+                speed = None
 
             if speed is not None:
                 mults = {
