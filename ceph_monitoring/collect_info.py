@@ -359,7 +359,6 @@ class NodeCollector(Collector):
                         speed = line.split(":")[1].strip()
                     if 'Duplex:' in line:
                         interface['duplex'] = line.split(":")[1].strip() == 'Full'
-            print "HOST: "+host+" DEV: "+dev+" SPEED: "+speed
 
             ok, data = check_output_ssh(host, self.opts, "iwconfig " + dev)
             if ok and 'Bit Rate=' in data:
