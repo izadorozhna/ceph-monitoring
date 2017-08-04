@@ -907,7 +907,7 @@ def main(argv):
                     logger.info("Result saved into %r", out_file)
 
                     if opts.log_level in ('WARNING', 'ERROR', "CRITICAL"):
-                        print "Result saved into %r" % (out_file,)
+                        print("Result saved into %r" % (out_file,))
 
             if git_dir:
                 logger.info("Comiting into git")
@@ -931,7 +931,7 @@ def main(argv):
             if out_folder:
                 logger.info("Temporary folder %r", out_folder)
                 if opts.log_level in ('WARNING', 'ERROR', "CRITICAL"):
-                    print "Temporary folder %r" % (out_folder,)
+                    print("Temporary folder %r" % (out_folder,))
     except Exception:
         logger.exception("During make_storage/collect")
         raise
