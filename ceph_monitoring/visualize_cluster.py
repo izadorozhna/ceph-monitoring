@@ -5,15 +5,13 @@ import shutil
 import bisect
 import logging
 import os.path
-import hotshot
 import tempfile
 import argparse
 import subprocess
 import collections
-import hotshot.stats
 import logging.config
 
-from cephlib.storage import FSStorage, TxtResultStorage, JsonResultStorage, XMLResultStorage
+from cephlib.storage import make_storage, make_attr_storage
 
 from . import html
 from .hw_info import b2ssize, b2ssizei
@@ -24,16 +22,15 @@ H = html.rtag
 logger = logging.getLogger('cephlib.report')
 
 
-class TypedStorage(object):
+class TypedStorage:
     def __init__(self, storage):
-        self.txt = TxtResultStorage(storage)
-        self.json = JsonResultStorage(storage)
-        self.xml = XMLResultStorage(storage)
+        self.txt = make_attr_storage(storage.sstorage, 'txt')
+        self.json = make_attr_storage(storage.sstorage, 'json')
+        self.xml = make_attr_storage(storage.sstorage, 'xml')
         self.raw = storage
 
     def substorage(self, path):
         return self.__class__(self.raw.substorage(path))
-
 
 
 HTML_UNKNOWN = H.font('???', color="orange")
@@ -84,7 +81,7 @@ def val_to_color(val, color_map=def_color_map):
     return "#%02X%02X%02X" % tuple(map(int, ncolor))
 
 
-class Report(object):
+class Report:
     def __init__(self, cluster_name, output_file):
         self.cluster_name = cluster_name
         self.output_file = output_file
@@ -650,7 +647,7 @@ def show_host_io_load_in_color(report, cluster):
             if dev_stat is not None:
                 hname = osd.host.name
                 load_stats = dev_stat.load
-                dev = dev_stat.src_dev
+                dev = dev_stat.root_dev
 
                 wbts[hname][dev] = load_stats.write_bytes
                 rbts[hname][dev] = load_stats.read_bytes
@@ -738,7 +735,7 @@ def show_hosts_info(report, cluster):
 
         table.add_cell(host.name)
         srv_strs = []
-        steps = len(services) / 3 + (1 if len(services) % 3 else 0)
+        steps = len(services) // 3 + (1 if len(services) % 3 else 0)
         for idx in range(steps):
             srv_strs.append(",".join(services[idx * 3: idx * 3 + 3]))
         table.add_cell("<br>".join(srv_strs))
@@ -796,8 +793,7 @@ def parse_args(argv):
     p.add_argument("-w", '--overwrite', action='store_true',  help="Overwrite result folder data")
     p.add_argument("-p", "--pretty-html", help="Prettify index.html", action="store_true")
     p.add_argument("data_folder", help="Folder with data, or .tar.gz archive")
-
-    p.add_argument("--profile", help="Profile report creation", action="store_true")
+    # p.add_argument("--profile", help="Profile report creation", action="store_true")
 
     return p.parse_args(argv[1:])
 
@@ -824,12 +820,12 @@ def main(argv):
 
     logger.info("Generating report from %r to %r", opts.data_folder, opts.out)
 
-    if opts.profile:
-        fd, profile_fname = tempfile.mktemp()
-        os.close(fd)
-        logger.info("Store profile info into %r", profile_fname)
-        prof = hotshot.Profile(profile_fname)
-        prof.start()
+    # if opts.profile:
+    #     fd, profile_fname = tempfile.mktemp()
+    #     os.close(fd)
+    #     logger.info("Store profile info into %r", profile_fname)
+    #     prof = hotshot.Profile(profile_fname)
+    #     prof.start()
 
     if os.path.isfile(opts.data_folder):
         arch_name = opts.data_folder
@@ -852,8 +848,8 @@ def main(argv):
         os.makedirs(opts.out)
 
     try:
-        fsstorage = FSStorage(folder, existing=True)
-        storage = TypedStorage(fsstorage)
+        storage = make_storage(folder, existing=True)
+        storage = TypedStorage(storage)
         cluster = CephCluster(storage)
         logger.info("Loading cluster info into ram")
         cluster.load()
@@ -920,14 +916,14 @@ def main(argv):
         if remove_folder:
             shutil.rmtree(folder)
 
-    if opts.profile:
-        prof.stop()
-        prof.close()
-
-        stats = hotshot.stats.load(profile_fname)
-        stats.strip_dirs()
-        stats.sort_stats('time', 'calls')
-        stats.print_stats(40)
+    # if opts.profile:
+    #     prof.stop()
+    #     prof.close()
+    #
+    #     stats = hotshot.stats.load(profile_fname)
+    #     stats.strip_dirs()
+    #     stats.sort_stats('time', 'calls')
+    #     stats.print_stats(40)
 
 
 if __name__ == "__main__":

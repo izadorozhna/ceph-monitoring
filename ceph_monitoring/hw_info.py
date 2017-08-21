@@ -12,7 +12,7 @@ SMAP = dict(k=1024, m=1024 ** 2, g=1024 ** 3, t=1024 ** 4)
 
 def ssize2b(ssize):
     try:
-        if isinstance(ssize, (int, long)):
+        if isinstance(ssize, int):
             return ssize
 
         ssize = ssize.lower()
@@ -63,7 +63,7 @@ def b2ssize(size, add_i=True, base=1024):
     return "{0} {1}{2}".format(size // scale, name, i)
 
 
-class HWInfo(object):
+class HWInfo:
     def __init__(self):
         self.hostname = None
         self.cores = []

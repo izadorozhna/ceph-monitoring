@@ -1,19 +1,12 @@
 from __future__ import print_function
 import os
-import sys
-import glob
 import json
-import math
 import itertools
-from StringIO import StringIO as BIO
 
 import numpy
 
 import seaborn
 seaborn.set()
-
-import matplotlib.pyplot as plt
-
 
 from cephlib.sensors_rpc_plugin import CephSensor, pack_ceph_op, CEPH_OP_DESCR_IDX
 from cephlib.sensors_rpc_plugin import ALL_STAGES
@@ -110,31 +103,6 @@ def group_times(times, x_bins=25):
     bin_ranges.append((bin_ranges[-1][1], len(times)))
 
     return bin_ranges
-
-
-def get_img(plt, format='svg'):
-    bio = BIO()
-    if format in ('png', 'jpg'):
-        plt.savefig(bio, format=format)
-        return bio.getvalue()
-    elif format == 'svg':
-        plt.savefig(bio, format='svg')
-        img_start = "<!-- Created with matplotlib (http://matplotlib.org/) -->"
-        return bio.getvalue().split(img_start, 1)[1]
-
-
-def get_heatmap_img(heatmap, bins_ranges, clear=True, figsize=None):
-    labels = ["{:.2e}".format((beg + end) / 2) for beg, end in bins_ranges]
-    if figsize:
-        _, ax = seaborn.plt.subplots(figsize=figsize)
-    else:
-        ax = None
-    ax = seaborn.heatmap(heatmap[:,::-1].T, xticklabels=False, cmap="Blues", ax=ax)
-    ax.set_yticklabels(labels, rotation='horizontal')
-    res = get_img(seaborn.plt)
-    if clear:
-        seaborn.plt.clf()
-    return res
 
 
 def test_parse_pack_unpack(js_file):

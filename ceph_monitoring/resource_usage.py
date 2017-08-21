@@ -50,8 +50,8 @@ def get_resource_usage(cluster):
     # usually each OSD has dedicated data device (but not always)
     # but several OSD often share the same device for journal
 
-    all_data_disks = {(osd.host.name, osd.j_stor_stats.src_dev) for osd in cluster.osds}
-    all_j_disks = {(osd.host.name, osd.data_stor_stats.src_dev) for osd in cluster.osds}
+    all_data_disks = {(osd.host.name, osd.j_stor_stats.root_dev) for osd in cluster.osds}
+    all_j_disks = {(osd.host.name, osd.data_stor_stats.root_dev) for osd in cluster.osds}
 
     if all_j_disks.issubset(all_data_disks):
         usage.colocated_journals = True

@@ -1,4 +1,6 @@
+from typing import Callable, Any
 import warnings
+from io import BytesIO
 
 import numpy
 with warnings.catch_warnings():
@@ -6,20 +8,53 @@ with warnings.catch_warnings():
     import seaborn
 
 from .cluster import NO_VALUE
-from .perf_parser import (load_ops_from_fd, ALL_STAGES_IN_ORDER, ALL_STAGES, STAGES_PRINTABLE_NAMES, get_img)
+from .perf_parser import load_ops_from_fd, ALL_STAGES_IN_ORDER, ALL_STAGES, STAGES_PRINTABLE_NAMES
 from .resource_usage import get_resource_usage
-from cephlib.plot import plot_histo, hmap_from_2d, plot_hmap_with_y_histo
 
+from cephlib.plot import plot_histo, hmap_from_2d, do_plot_hmap_with_histo
 
 # ----------------------------------------------------------------------------------------------------------------------
 
+def get_img(plt, format='svg'):
+    bio = BytesIO()
+    if format in ('png', 'jpg'):
+        plt.savefig(bio, format=format)
+        return bio.getvalue()
+    elif format == 'svg':
+        plt.savefig(bio, format='svg')
+        img_start = b"<!-- Created with matplotlib (http://matplotlib.org/) -->"
+        return bio.getvalue().split(img_start, 1)[1]
+
+
+def plot_img(func: Callable, *args, **kwargs) -> Any:
+    fig = seaborn.plt.figure(figsize=(6, 4), tight_layout=True)
+    func(fig, *args, **kwargs)
+    return get_img(fig)
+
+
+def get_heatmap_img(heatmap, bins_ranges, clear=True, figsize=None):
+    labels = ["{:.2e}".format((beg + end) / 2) for beg, end in bins_ranges]
+    if figsize:
+        _, ax = seaborn.plt.subplots(figsize=figsize)
+    else:
+        ax = None
+    ax = seaborn.heatmap(heatmap[:,::-1].T, xticklabels=False, cmap="Blues", ax=ax)
+    ax.set_yticklabels(labels, rotation='horizontal')
+    res = get_img(seaborn.plt)
+    if clear:
+        seaborn.plt.clf()
+    return res
+
 
 def show_osd_used_space_histo(report, cluster):
+    for osd in cluster.osds:
+        print(osd)
+
     vals = [(100 - osd.free_perc) for osd in cluster.osds if osd.free_perc is not None]
 
     seaborn.plt.clf()
     _, ax = seaborn.plt.subplots(figsize=(6, 4))
-    plot_histo(vals, left=0, right=100, ax=ax)
+    plot_histo(ax, numpy.array(vals), left=0, right=100)
     seaborn.plt.tight_layout()
     report.add_block(6, "OSD used space (GiB)", get_img(seaborn.plt))
 
@@ -29,7 +64,7 @@ def show_osd_pg_histo(report, cluster):
 
     seaborn.plt.clf()
     _, ax = seaborn.plt.subplots(figsize=(6, 4))
-    plot_histo(vals, left=min(vals) * 0.9, right=max(vals) * 1.1, ax=ax)
+    plot_histo(ax, vals, left=min(vals) * 0.9, right=max(vals) * 1.1)
     seaborn.plt.tight_layout()
     report.add_block(6, "OSD PG", get_img(seaborn.plt))
 
@@ -40,7 +75,9 @@ def show_osd_load(report, cluster, max_xbins=25):
     seaborn.plt.clf()
     hm_vals, ranges = hmap_from_2d(usage.ceph_data_dev_wbytes, max_xbins=max_xbins)
     hm_vals /= 1024. ** 2
-    plot_hmap_with_y_histo(hm_vals, ranges)
+    import IPython
+    IPython.embed()
+    plot_img(do_plot_hmap_with_histo, hm_vals, ranges)
     seaborn.plt.tight_layout()
     img = get_img(seaborn.plt)
     if usage.colocated_journals:
@@ -50,7 +87,7 @@ def show_osd_load(report, cluster, max_xbins=25):
 
     seaborn.plt.clf()
     data, chunk_ranges = hmap_from_2d(usage.ceph_data_dev_wio, max_xbins=max_xbins)
-    plot_hmap_with_y_histo(data, chunk_ranges)
+    do_plot_hmap_with_histo(data, chunk_ranges)
     seaborn.plt.tight_layout()
     img = get_img(seaborn.plt)
     if usage.colocated_journals:
@@ -60,7 +97,7 @@ def show_osd_load(report, cluster, max_xbins=25):
 
     seaborn.plt.clf()
     data, chunk_ranges = hmap_from_2d(usage.ceph_data_dev_qd, max_xbins=max_xbins)
-    plot_hmap_with_y_histo(data, chunk_ranges)
+    do_plot_hmap_with_histo(data, chunk_ranges)
     seaborn.plt.tight_layout()
     img = get_img(seaborn.plt)
     if usage.colocated_journals:
@@ -72,19 +109,19 @@ def show_osd_load(report, cluster, max_xbins=25):
         seaborn.plt.clf()
         hm_vals, ranges = hmap_from_2d(usage.ceph_j_dev_wbytes, max_xbins=max_xbins)
         hm_vals /= 1024. ** 2
-        plot_hmap_with_y_histo(hm_vals, ranges)
+        do_plot_hmap_with_histo(hm_vals, ranges)
         seaborn.plt.tight_layout()
         report.add_block(6, "OSD journal write (MiBps)", get_img(seaborn.plt))
 
         seaborn.plt.clf()
         data, chunk_ranges = hmap_from_2d(usage.ceph_j_dev_wio, max_xbins=max_xbins)
-        plot_hmap_with_y_histo(data, chunk_ranges)
+        do_plot_hmap_with_histo(data, chunk_ranges)
         seaborn.plt.tight_layout()
         report.add_block(6, "OSD journal write IOPS", get_img(seaborn.plt))
 
         seaborn.plt.clf()
         data, chunk_ranges = hmap_from_2d(usage.ceph_j_dev_qd, max_xbins=max_xbins)
-        plot_hmap_with_y_histo(data, chunk_ranges)
+        do_plot_hmap_with_histo(data, chunk_ranges)
         seaborn.plt.tight_layout()
         report.add_block(6, "OSD journal QD", get_img(seaborn.plt))
 
@@ -101,7 +138,7 @@ def show_osd_lat_heatmaps(report, cluster, max_xbins=25):
         seaborn.plt.clf()
         hmap, ranges = hmap_from_2d(lats, max_xbins=max_xbins, noval=NO_VALUE)
         hmap *= 1000
-        plot_hmap_with_y_histo(hmap, ranges)
+        do_plot_hmap_with_histo(hmap, ranges)
         seaborn.plt.tight_layout()
         report.add_block(6, header, get_img(seaborn.plt))
 
@@ -140,7 +177,7 @@ def plot_crush(report, cluster):
     G = networkx.DiGraph()
 
     G.add_node("ROOT")
-    for i in xrange(5):
+    for i in range(5):
         G.add_node("Child_%i" % i)
         G.add_node("Grandchild_%i" % i)
         G.add_node("Greatgrandchild_%i" % i)

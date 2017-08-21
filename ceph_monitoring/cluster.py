@@ -1,15 +1,13 @@
 import re
-import json
 import logging
-import itertools
+from typing import List
 import collections
+from ipaddress import IPv4Network, IPv4Address
 
-from ipaddr import IPNetwork
 import numpy
 
 from cephlib.crush import load_crushmap
 from cephlib.common import AttredDict
-
 
 from .hw_info import get_hw_info, ssize2b
 
@@ -18,7 +16,7 @@ logger = logging.getLogger("cephlib.parse")
 NO_VALUE = -1
 
 
-class CephOSD(object):
+class CephOSD:
     def __init__(self):
         self.id = None
         self.reweight = None
@@ -46,8 +44,11 @@ class CephOSD(object):
     def daemon_runs(self):
         return self.config is not None
 
+    def __str__(self) -> str:
+        return "OSD(id={0.id}, host={0.host.name}, free_perc={0.free_perc})".format(self)
 
-class CephMonitor(object):
+
+class CephMonitor:
     def __init__(self):
         self.name = None
         self.status = None
@@ -55,13 +56,13 @@ class CephMonitor(object):
         self.role = None
 
 
-class Pool(object):
+class Pool:
     def __init__(self):
         self.id = None
         self.name = None
 
 
-class NetLoad(object):
+class NetLoad:
     def __init__(self):
         self.send_bytes = None
         self.recv_bytes = None
@@ -73,17 +74,23 @@ class NetLoad(object):
         self.recv_packets_avg = None
 
 
-class NetworkAdapter(object):
+class NetAdapterAddr:
+    def __init__(self, ip: IPv4Address, net: IPv4Network) -> None:
+        self.ip = ip
+        self.net = net
+
+
+class NetworkAdapter:
     def __init__(self, name):
         self.name = name
-        self.ips = []
+        self.ips = []  # type: List[NetAdapterAddr]
         self.is_phy = None
         self.speed = None
         self.duplex = None
         self.load = None
 
 
-class DiskLoad(object):
+class DiskLoad:
     def __init__(self):
         self.read_bytes = None
         self.write_bytes = None
@@ -96,13 +103,13 @@ class DiskLoad(object):
         self.lat = None
 
 
-class Disk(object):
+class Disk:
     def __init__(self, dev, load):
         self.dev = dev
         self.load = load
 
 
-class Host(object):
+class Host:
     def __init__(self, name, stor_id):
         self.name = name
         self.net_adapters = {}
@@ -118,7 +125,7 @@ class Host(object):
         self.open_udp_sock = None
 
 
-class TabulaRasa(object):
+class TabulaRasa:
     def __init__(self, **attrs):
         self.__dict__.update(attrs)
 
@@ -130,14 +137,6 @@ class TabulaRasa(object):
 
     def __contains__(self, name):
         return name in self.__dict__
-
-
-dev_re = re.compile(r"/dev/([^0-9]*)\d*")
-def dev_name(path):
-    rr = dev_re.match(path)
-    if rr:
-        return rr.group(1)
-    raise ValueError("Can't find source dev name in {0!r} (must be /dev/XXXX\\d*)".format(path))
 
 
 netstat_fields = "recv_bytes recv_packets rerrs rdrop rfifo rframe rcompressed" + \
@@ -195,7 +194,7 @@ US2S = 0.000001
 MS2S = 0.001
 
 
-class CephCluster(object):
+class CephCluster:
     # incorporated both ceph cluster and all nodes information
     def __init__(self, storage):
         # servers
@@ -231,8 +230,8 @@ class CephCluster(object):
 
     def load(self):
         self.settings = AttredDict(**parse_txt_ceph_config(self.storage.txt.master.default_config))
-        self.cluster_net = IPNetwork(self.settings['cluster_network'])
-        self.public_net = IPNetwork(self.settings['public_network'])
+        self.cluster_net = IPv4Network(self.settings['cluster_network'])
+        self.public_net = IPv4Network(self.settings['public_network'])
         self.crush = load_crushmap(content=self.storage.txt.master.crushmap)
 
         self.perf_data, self.osd_perf_dump, self.osd_historys_ops_paths = self.get_perf_monitoring()
@@ -260,15 +259,16 @@ class CephCluster(object):
             for is_file, fname in self.storage.txt.perf_monitoring[host_id]:
                 if is_file and fname == 'collected_at.arr':
                     path = "perf_monitoring/{0}/collected_at.arr".format(host_id, fname)
-                    host_data['collected_at'] = numpy.array(self.storage.raw.get_array(path))
+                    _, _, data = self.storage.raw.get_array(path)
+                    host_data['collected_at'] = numpy.array(data)
                     continue
 
                 if is_file and fname.count('.') == 3:
                     sensor, dev, metric, ext = fname.split(".")
                     if ext == 'arr':
                         path = "perf_monitoring/{0}/{1}".format(host_id, fname)
-                        host_data.setdefault(sensor, {}).setdefault(dev, {})[metric] = \
-                            numpy.array(self.storage.raw.get_array(path))
+                        _, _, data = self.storage.raw.get_array(path)
+                        host_data.setdefault(sensor, {}).setdefault(dev, {})[metric] = numpy.array(data)
                         continue
                     elif ext == 'json' and sensor == 'ceph' and metric == 'perf_dump':
                         os_id = osd_rr.match(dev)
@@ -276,7 +276,7 @@ class CephCluster(object):
                         assert os_id.group(1) not in osd_perf_dump, "Two set of perf_dump data for osd {0}"\
                             .format(os_id.group(1))
                         path = "perf_monitoring/{0}/{1}".format(host_id, fname)
-                        osd_perf_dump[int(os_id.group(1))] = json.loads(self.storage.raw.get(path))
+                        osd_perf_dump[int(os_id.group(1))] = self.storage.raw.get(path)
                         continue
                     elif ext == 'bin' and sensor == 'ceph' and metric == 'historic':
                         os_id = osd_rr.match(dev)
@@ -374,14 +374,15 @@ class CephCluster(object):
             for line in stor_node.ipa.split("\n"):
                 match = re.match(ip_rr_s, line)
                 if match is not None:
-                    net_addr = IPNetwork(match.group('ip'), int(match.group('size')))
+                    ip_addr = IPv4Address(match.group('ip'))
+                    net_addr = IPv4Network("{}/{}".format(ip_addr, int(match.group('size'))), strict=False)
                     adapter = host.net_adapters[match.group('adapter')]
-                    adapter.ips.append(net_addr)
+                    adapter.ips.append(NetAdapterAddr(ip_addr, net_addr))
 
-                    if net_addr.ip in self.cluster_net:
+                    if ip_addr in self.cluster_net:
                         host.ceph_cluster_adapter = adapter
 
-                    if net_addr.ip in self.public_net:
+                    if ip_addr in self.public_net:
                         host.ceph_public_adapter = adapter
 
     def fill_io_devices_usage_stats(self, host):
@@ -488,11 +489,17 @@ class CephCluster(object):
             try:
                 osd_stor_node = self.storage.json.osd[str(osd.id)]
                 osd.data_stor_stats = TabulaRasa(**osd_stor_node.data.stats)
-                osd.j_stor_stats = TabulaRasa(**osd_stor_node.journal.stats)
-                osd.data_stor_stats.src_dev = dev_name(osd.data_stor_stats.dev)
-                osd.data_stor_stats.load = osd.host.disks[osd.data_stor_stats.src_dev].load
-                osd.j_stor_stats.src_dev = dev_name(osd.j_stor_stats.dev)
-                osd.j_stor_stats.load = osd.host.disks[osd.j_stor_stats.src_dev].load
+                osd_disks_info = osd_stor_node.devs_cfg
+                data_dev = osd_disks_info['r_data']
+                j_dev = osd_disks_info['r_journal']
+
+                if data_dev == j_dev:
+                    osd.j_stor_stats = TabulaRasa(**osd_stor_node.data.stats)
+                else:
+                    osd.j_stor_stats = TabulaRasa(**osd_stor_node.journal.stats)
+
+                osd.data_stor_stats.load = osd.host.disks[data_dev].load
+                osd.j_stor_stats.load = osd.host.disks[j_dev].load
 
                 osd.used_space = osd.data_stor_stats.get('used')
                 osd.free_space = osd.data_stor_stats.get('avail')
@@ -538,7 +545,7 @@ class CephCluster(object):
             osd.config = None if config is None else AttredDict(**parse_txt_ceph_config(config))
 
             try:
-                osd.cmdline = self.storage.raw.get('osd/{0}/cmdline'.format(osd.id)).split("\x00")
+                osd.cmdline = self.storage.raw.get_raw('osd/{0}/cmdline'.format(osd.id)).split("\x00")
             except KeyError:
                 pass
 
