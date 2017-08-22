@@ -18,8 +18,11 @@ function gh_dep() {
     rm master.tar.gz
 }
 
+URL=https://pypi.python.org/packages/44/88/d09c6a7fe1af4a02f16d2f1766212bec752aadb04e5699a9706a10a1a37d/typing-3.6.2-py3-none-any.whl
+
 gh_dep koder-ua/cephlib
 gh_dep koder-ua/agent
+wget $URL
 
 cp "${cdir}/ceph_monitoring/collect_info.py" .
 cp "${cdir}/ceph_monitoring/logging.json" .
