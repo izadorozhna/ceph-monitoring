@@ -496,8 +496,8 @@ def show_osd_perf_info(report, cluster):
     table = html.HTMLTable(headers=["OSD",
                                     "node",
                                     "journal<br>lat, ms",
-                                    "apply<br>lat, ms",
-                                    "commit<br>lat, ms",
+                                    "apply<br>lat, ms<br>avg/osd perf",
+                                    "commit<br>lat, ms<br>avg/osd perf",
                                     "D dev",
                                     "D read<br>Bps/OPS",
                                     "D write<br>Bps/OPS",
@@ -541,27 +541,44 @@ def show_osd_perf_info(report, cluster):
         table.add_cell(str(osd.id))
         table.add_cell(osd.host.name)
 
+        def lat2s(val):
+            if val is None or val < 1e-6:
+                return HTML_UNKNOWN
+            elif val < 1e-3:
+                return "{0:.3f}".format(val * 1000)
+            else:
+                return "{0}".format(int(val * 1000))
+
+        lats = (("journal_latency", None), ("apply_latency", "apply_latency_s"),
+                ("commitcycle_latency", "commitcycle_latency_s"))
+
         if osd.osd_perf is not None:
-            for name in ("journal_latency", "apply_latency", "commitcycle_latency"):
+            for name, name_s in lats:
+                s_val = None if name_s is None else str(osd.osd_perf[name_s])
+
                 if name not in osd.osd_perf:
-                    table.add_cell(HTML_UNKNOWN)
+                    v_val = HTML_UNKNOWN
                 elif isinstance(osd.osd_perf[name], int):
-                    table.add_cell(str(osd.osd_perf[name]))
+                    v_val = str(osd.osd_perf[name])
                 else:
+                    # scan for latest available value
                     for val in osd.osd_perf[name][::-1]:
                         if val != NO_VALUE:
-                            if val < 1e-6:
-                                val_s = HTML_UNKNOWN
-                            elif val < 1e-3:
-                                val_s = "{0:.3f}".format(val * 1000)
-                            else:
-                                val_s = "{0}".format(int(val * 1000))
-                            table.add_cell(val_s)
+                            v_val = lat2s(val)
                             break
                     else:
-                        table.add_cell(HTML_UNKNOWN)
+                        v_val = HTML_UNKNOWN
+
+                if s_val:
+                    table.add_cell("{} / {}".format(v_val, s_val))
+                else:
+                    table.add_cell(v_val)
         else:
-            [table.add_cell(HTML_UNKNOWN) for i in range(3)]
+            for name, name_s in lats:
+                if name_s:
+                    table.add_cell("{0} / {0}".format(HTML_UNKNOWN))
+                else:
+                    table.add_cell(HTML_UNKNOWN)
 
         for val, sorted_val in perf_info:
             if sorted_val is None:
@@ -851,7 +868,7 @@ def main(argv):
         storage = make_storage(folder, existing=True)
         storage = TypedStorage(storage)
         cluster = CephCluster(storage)
-        logger.info("Loading cluster info into ram")
+        logger.info("Loading cluster info into RAM")
         cluster.load()
         logger.info("Done")
 

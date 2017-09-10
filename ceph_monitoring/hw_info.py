@@ -281,3 +281,13 @@ def get_hw_info(lshw_out):
             pass
 
     return res
+
+
+def get_dev_file_name(path_or_name: str) -> str:
+    if '/dev/' in path_or_name:
+        res = path_or_name[5:]
+    else:
+        res = path_or_name
+
+    assert '/' not in res
+    return res

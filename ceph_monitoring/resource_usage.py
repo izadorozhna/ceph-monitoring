@@ -4,6 +4,8 @@ import logging
 
 import numpy
 
+from .hw_info import get_dev_file_name
+
 
 logger = logging.getLogger('cephlib.report')
 
@@ -29,23 +31,20 @@ def get_resource_usage(cluster):
     logger.info("Loading cluster usage into RAM")
 
     usage = ResourceUsage()
-    US2S = 1000 * 1000
     collected = {host: host_data['collected_at'] for host, host_data in cluster.perf_data.items()}
-
-    # select range, which present on all nodes
-    lower = max(arr.min() // US2S for arr in collected.values())
-    upper = min(arr.max() // US2S for arr in collected.values())
 
     # node name to node storageid
     name2stor = {name.split('-', 1)[1]: name for name in cluster.perf_data}
 
-    times = numpy.arange(lower, upper + 1)
+    # select range, which present on all nodes
+    lower = int(max(arr.min() for arr in collected.values()))
+    upper = int(min(arr.max() for arr in collected.values()) + 0.999)
 
-    # find indexes for each node to select [lower, upper] range
-    node_bounds = {
-        host: host_data['collected_at'].searchsorted((lower * US2S, (upper + 1) * US2S))
-        for host, host_data in cluster.perf_data.items()
-    }
+    node_bounds = {host: host_data['collected_at'].searchsorted((lower, upper + 1))
+                   for host, host_data in cluster.perf_data.items()}
+
+    min_sz = min((i2 - i1) for i1, i2 in node_bounds.values())
+    times = numpy.arange(lower, lower + min_sz)
 
     # usually each OSD has dedicated data device (but not always)
     # but several OSD often share the same device for journal
@@ -69,8 +68,11 @@ def get_resource_usage(cluster):
 
         for idx, (hostname, dev) in enumerate(all_disks):
             storname = name2stor[hostname]
-            stor = cluster.perf_data[storname]['block-io'][dev]
-            idx1, idx2 = node_bounds[storname]
+            stor = cluster.perf_data[storname]['block-io'][get_dev_file_name(dev)]
+            idx1, _ = node_bounds[storname]
+            idx2 = idx1 + min_sz
+
+            # print(idx, wio[idx], idx1, idx2, stor['writes_completed'][idx1:idx2])
             wio[idx] = stor['writes_completed'][idx1:idx2]
             wbytes[idx] = stor['sectors_written'][idx1:idx2]
             qd[idx] = stor['io_queue'][idx1:idx2]

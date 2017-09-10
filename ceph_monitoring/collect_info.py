@@ -140,7 +140,7 @@ class Collector:
             self.storage = saved
 
     def save(self, path: str, frmt: str, code: int, data: Union[str, bytes, array.array],
-             check: bool = True) -> Optional[str]:
+             check: bool = True, extra: List[str] = None) -> Optional[str]:
         """Save results into storage"""
         if check and not self.allowed_path(path):
             logger.debug("Skipped saving %s bytes of data to path %r", len(data), path)
@@ -153,11 +153,13 @@ class Collector:
 
         # TODO: fix storage
         if isinstance(data, str):
+            assert extra is None
             self.storage.put_raw(data.encode('utf8'), rpath)
         elif isinstance(data, bytes):
+            assert extra is None
             self.storage.put_raw(data, rpath)
         elif isinstance(data, array.array):
-            self.storage.put_array(rpath, data, [])
+            self.storage.put_array(rpath, data, extra if extra else [])
         else:
             raise TypeError("Can't save value of type {0!r} (to {1!r})".format(type(data), rpath))
 
@@ -603,7 +605,7 @@ class LoadCollector(Collector):
             "block-io": {},
             "net-io": {},
             "vm-io": {},
-            "ceph": {"sources": ['historic', 'historic_js', 'perf_dump'], "osds": "all"}
+            "ceph": {"sources": ['historic_js', 'perf_dump'], "osds": "all"}  # 'historic', 'perf_dump'
         }
 
         # self.results = {}
@@ -617,12 +619,18 @@ class LoadCollector(Collector):
         self.node.rpc.sensors.start(cfg)
 
     def collect_performance_data(self) -> None:
-        for sensor_path, data, is_unpacked, _ in unpack_rpc_updates(self.node.rpc.sensors.get_updates()):
-            if is_unpacked:
-                ext = 'arr' if isinstance(data, array.array) else 'json'
-                self.save("perf_monitoring/{0}/{1}".format(self.node.fs_name, sensor_path), ext, 0, data)
-            else:
+        for sensor_path, data, is_unpacked, units in unpack_rpc_updates(self.node.rpc.sensors.get_updates()):
+            if '.' in sensor_path:
                 sensor, dev, metric = sensor_path.split(".")
+            else:
+                sensor, dev, metric = sensor_path, "", ""
+
+            if is_unpacked:
+                ext = 'csv' if isinstance(data, array.array) else 'json'
+                extra = [sensor, dev, metric, units]
+                self.save("perf_monitoring/{0}/{1}".format(self.node.fs_name, sensor_path), ext, 0, data,
+                          extra=extra)
+            else:
                 if metric == 'historic':
                     self.storage.put_raw(data, "perf_monitoring/{0}/{1}.bin".format(self.node.fs_name, sensor_path))
                 elif metric == 'perf_dump':

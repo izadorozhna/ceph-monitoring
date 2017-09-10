@@ -1,15 +1,18 @@
 import re
+import json
 import logging
-from typing import List
 import collections
 from ipaddress import IPv4Network, IPv4Address
+from typing import List
 
 import numpy
 
 from cephlib.crush import load_crushmap
 from cephlib.common import AttredDict
+from cephlib.units import unit_conversion_coef_f
 
-from .hw_info import get_hw_info, ssize2b
+
+from .hw_info import get_hw_info, ssize2b, get_dev_file_name
 
 
 logger = logging.getLogger("cephlib.parse")
@@ -234,7 +237,8 @@ class CephCluster:
         self.public_net = IPv4Network(self.settings['public_network'])
         self.crush = load_crushmap(content=self.storage.txt.master.crushmap)
 
-        self.perf_data, self.osd_perf_dump, self.osd_historys_ops_paths = self.get_perf_monitoring()
+        self.perf_data, self.osd_perf_dump, \
+            self.osd_historic_ops_paths, self.osd_historicjs_ops_paths = self.get_perf_monitoring()
         self.load_ceph_settings()
         self.load_hosts()
         # TODO: set reweight for OSD
@@ -249,7 +253,8 @@ class CephCluster:
     def get_perf_monitoring(self):
         all_data = {}
         osd_perf_dump = {}
-        osd_historys_ops_paths = {}
+        osd_historicjs_ops_paths = {}
+        osd_historic_ops_paths = {}
         osd_rr = re.compile(r"osd(\d+)$")
         for is_file, host_id in self.storage.txt.perf_monitoring:
             if is_file:
@@ -257,15 +262,15 @@ class CephCluster:
 
             host_data = all_data[host_id] = {}
             for is_file, fname in self.storage.txt.perf_monitoring[host_id]:
-                if is_file and fname == 'collected_at.arr':
-                    path = "perf_monitoring/{0}/collected_at.arr".format(host_id, fname)
-                    _, _, data = self.storage.raw.get_array(path)
-                    host_data['collected_at'] = numpy.array(data)
+                if is_file and fname == 'collected_at.csv':
+                    path = "perf_monitoring/{0}/collected_at.csv".format(host_id, fname)
+                    (_, _, _, units), _, data = self.storage.raw.get_array(path)
+                    host_data['collected_at'] = numpy.array(data)[::2] * unit_conversion_coef_f(units, 's')
                     continue
 
                 if is_file and fname.count('.') == 3:
                     sensor, dev, metric, ext = fname.split(".")
-                    if ext == 'arr':
+                    if ext == 'csv':
                         path = "perf_monitoring/{0}/{1}".format(host_id, fname)
                         _, _, data = self.storage.raw.get_array(path)
                         host_data.setdefault(sensor, {}).setdefault(dev, {})[metric] = numpy.array(data)
@@ -276,22 +281,27 @@ class CephCluster:
                         assert os_id.group(1) not in osd_perf_dump, "Two set of perf_dump data for osd {0}"\
                             .format(os_id.group(1))
                         path = "perf_monitoring/{0}/{1}".format(host_id, fname)
-                        osd_perf_dump[int(os_id.group(1))] = self.storage.raw.get(path)
+                        osd_perf_dump[int(os_id.group(1))] = json.loads(self.storage.raw.get_raw(path).decode("utf8"))
                         continue
                     elif ext == 'bin' and sensor == 'ceph' and metric == 'historic':
                         os_id = osd_rr.match(dev)
                         assert os_id, "{0!r} don't match osdXXX name".format(dev)
                         assert os_id.group(1) not in osd_perf_dump, \
-                            "Two set of osd_historys_ops_paths data for osd {0}".format(os_id.group(1))
-                        osd_historys_ops_paths[int(os_id.group(1))] = "perf_monitoring/{0}/{1}".format(host_id, fname)
+                            "Two set of osd_historic_ops_paths data for osd {0}".format(os_id.group(1))
+                        osd_historic_ops_paths[int(os_id.group(1))] = "perf_monitoring/{0}/{1}".format(host_id, fname)
                         continue
                     elif ext == 'json' and sensor == 'ceph' and metric == 'historic_js':
+                        os_id = osd_rr.match(dev)
+                        assert os_id, "{0!r} don't match osdXXX name".format(dev)
+                        assert os_id.group(1) not in osd_perf_dump, \
+                            "Two set of osd_historic_ops_paths data for osd {0}".format(os_id.group(1))
+                        osd_historicjs_ops_paths[int(os_id.group(1))] = "perf_monitoring/{0}/{1}".format(host_id, fname)
                         continue
 
                 logger.warning("Unexpected %s %r in %r host performance_data folder",
                                'file' if is_file else 'folder', fname, host_id)
 
-        return all_data, osd_perf_dump, osd_historys_ops_paths
+        return all_data, osd_perf_dump, osd_historic_ops_paths, osd_historicjs_ops_paths
 
     def load_ceph_settings(self):
         mstorage = self.storage.json.master
@@ -345,10 +355,12 @@ class CephCluster:
 
             # net_stats = parse_netdev(stor_node.netdev)
             host.uptime = float(stor_node.uptime.split()[0])
+
             host.perf_monitoring = self.perf_data.get(host.stor_id)
+            host.perf_monitoring['collected_at'] = host.perf_monitoring['collected_at']
 
             if host.perf_monitoring:
-                dtime = (host.perf_monitoring['collected_at'][-2] - host.perf_monitoring['collected_at'][0]) * US2S
+                dtime = (host.perf_monitoring['collected_at'][-1] - host.perf_monitoring['collected_at'][0])
                 self.fill_io_devices_usage_stats(host)
                 for name, adapter_dct in jstor_node.interfaces.items():
                     adapter_dct = adapter_dct.copy()
@@ -389,8 +401,7 @@ class CephCluster:
         if 'block-io' not in host.perf_monitoring:
             return
 
-        cl_at = host.perf_monitoring['collected_at']
-        dtime = (cl_at[-2] - cl_at[0]) * US2S
+        dtime = host.perf_monitoring['collected_at'][-1] - host.perf_monitoring['collected_at'][0]
         io_data = host.perf_monitoring['block-io']
         for dev, data in io_data.items():
             if dtime > 1.0:
@@ -462,8 +473,8 @@ class CephCluster:
 
         osd_perf_scalar = {}
         for node in self.storage.json.master.osd_perf['osd_perf_infos']:
-            osd_perf_scalar[node['id']] = {"apply_latency": node["perf_stats"]["apply_latency_ms"],
-                                           "commitcycle_latency": node["perf_stats"]["commit_latency_ms"]}
+            osd_perf_scalar[node['id']] = {"apply_latency_s": node["perf_stats"]["apply_latency_ms"],
+                                           "commitcycle_latency_s": node["perf_stats"]["commit_latency_ms"]}
 
         for osd_data in self.storage.json.master.osd_dump['osds']:
             osd = CephOSD()
@@ -493,13 +504,11 @@ class CephCluster:
                 data_dev = osd_disks_info['r_data']
                 j_dev = osd_disks_info['r_journal']
 
-                if data_dev == j_dev:
-                    osd.j_stor_stats = TabulaRasa(**osd_stor_node.data.stats)
-                else:
-                    osd.j_stor_stats = TabulaRasa(**osd_stor_node.journal.stats)
+                stat = osd_stor_node.data.stats if data_dev == j_dev else osd_stor_node.journal.stats
+                osd.j_stor_stats = TabulaRasa(**stat)
 
-                osd.data_stor_stats.load = osd.host.disks[data_dev].load
-                osd.j_stor_stats.load = osd.host.disks[j_dev].load
+                osd.data_stor_stats.load = osd.host.disks[get_dev_file_name(data_dev)].load
+                osd.j_stor_stats.load = osd.host.disks[get_dev_file_name(j_dev)].load
 
                 osd.used_space = osd.data_stor_stats.get('used')
                 osd.free_space = osd.data_stor_stats.get('avail')
@@ -512,8 +521,7 @@ class CephCluster:
             if osd.id in self.osd_perf_dump:
                 fstor = [obj["filestore"] for obj in self.osd_perf_dump[osd.id]]
                 for field in ("apply_latency", "commitcycle_latency", "journal_latency"):
-                    data = [obj[field]["avgcount"] for obj in fstor]
-                    count = numpy.array(data, dtype=numpy.float32)
+                    count = numpy.array([obj[field]["avgcount"] for obj in fstor], dtype=numpy.float32)
                     values = numpy.array([obj["filestore"][field]["sum"] for obj in self.osd_perf_dump[osd.id]],
                                           dtype=numpy.float32)
 
@@ -524,22 +532,14 @@ class CephCluster:
                     avg_vals[numpy.isnan(avg_vals)] = NO_VALUE
                     osd.osd_perf[field] = avg_vals
 
-                data = [obj['journal_wr_bytes']["avgcount"] for obj in fstor]
-                arr = numpy.array(data, dtype=numpy.float32)
+                arr = numpy.array([obj['journal_wr_bytes']["avgcount"] for obj in fstor], dtype=numpy.float32)
                 osd.osd_perf["journal_ops"] = arr[1:] - arr[:-1]
-
-                data = [obj['journal_wr_bytes']["sum"] for obj in fstor]
-                arr = numpy.array(data, dtype=numpy.float32)
+                arr = numpy.array([obj['journal_wr_bytes']["sum"] for obj in fstor], dtype=numpy.float32)
                 osd.osd_perf["journal_bytes"] = arr[1:] - arr[:-1]
-            else:
-                try:
-                    osd.osd_perf = osd_perf_scalar[osd.id]
-                except KeyError:
-                    msg = "Can't found perf_stats for osd {0} in master/osd_perf[osd_perf_infos]".format(osd.id)
-                    logger.error(msg)
-                    raise KeyError(msg)
 
-            osd.historic_ops_storage_path = self.osd_historys_ops_paths.get(osd.id)
+            osd.osd_perf.update(osd_perf_scalar[osd.id])
+            osd.historic_ops_storage_path = self.osd_historic_ops_paths.get(osd.id)
+            osd.historicjs_ops_storage_path = self.osd_historicjs_ops_paths.get(osd.id)
             osd.pg_count = None if self.sum_per_osd is None else self.sum_per_osd[osd.id]
             config = self.storage.txt.osd[str(osd.id)].config
             osd.config = None if config is None else AttredDict(**parse_txt_ceph_config(config))
