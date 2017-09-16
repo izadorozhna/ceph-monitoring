@@ -26,7 +26,7 @@ except ImportError:
     logging_tree = None
 
 from agent.agent import ConnectionClosed, SimpleRPCClient
-from cephlib.storage import make_storage, IStorage
+from cephlib.storage import make_storage, IStorageNNP
 from cephlib.common import run_locally, get_sshable_hosts, tmpnam, setup_logging
 from cephlib.rpc import init_node, rpc_run
 from cephlib.discover import get_osds_nodes, get_mons_nodes
@@ -120,7 +120,7 @@ class Collector:
 
     def __init__(self,
                  allowed_path: Callable[[str], bool],
-                 storage: IStorage,
+                 storage: IStorageNNP,
                  opts: Any,
                  node: SimpleRPCClient,
                  pretty_json: bool = False) -> None:
@@ -681,7 +681,7 @@ def set_node_name(node: SimpleRPCClient) -> None:
     logger.debug("%s -> %s", node.ip, node.hostname)
 
 
-def collect(storage: IStorage, opts: Any, executor: Executor) -> None:
+def collect(storage: IStorageNNP, opts: Any, executor: Executor) -> None:
     if run_with_code('which ceph')[0] != 0:
         logger.error("No 'ceph' command available. Run this script from node, which has ceph access")
         return

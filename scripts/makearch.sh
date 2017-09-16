@@ -2,7 +2,7 @@
 set -ex
 set -o pipefail
 
-output_file="$1"
+output_file=$(realpath "$1")
 cdir=$(pwd)
 tdir=$(mktemp -d)
 archfile=$(mktemp)
