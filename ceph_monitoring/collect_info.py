@@ -12,6 +12,7 @@ import os.path
 import tempfile
 import argparse
 import datetime
+import ipaddress
 import traceback
 import contextlib
 import subprocess
@@ -36,14 +37,14 @@ logger = logging.getLogger('collect')
 
 
 class Node:
-    def __init__(self, ip: str, hostname: str = None) -> None:
+    def __init__(self, ip: str, hostname: str = None, roles: Set[str] = None) -> None:
         self.ip = ip
         self.hostname = hostname
         self.rpc = None
         self.daemon_pid = None   # type: int
         self.osds = []    # type: List[int]
         self.mon = None
-        self.roles = set()  # type: Set[str]
+        self.roles = roles if roles else set() # type: Set[str]
         self.ssh_ok = False
 
     def dct(self) -> Dict[str, Any]:
@@ -640,16 +641,18 @@ class LoadCollector(Collector):
                     self.storage.put_raw(data, "perf_monitoring/{0}/{1}.json".format(self.node.fs_name, sensor_path))
 
 
-def discover_nodes(opts: Any) -> List[Node]:
+def discover_nodes(opts: Any, ip_mapping: Dict[str, str] = None) -> List[Node]:
     nodes = {}
 
-    for mon_id, (ip, name) in get_mons_nodes(lambda x: run_locally(x).decode('utf8'), opts.ceph_extra).items():
+    mons = get_mons_nodes(lambda x: run_locally(x).decode('utf8'), opts.ceph_extra, ip_mapping=ip_mapping)
+    for mon_id, (ip, name) in mons.items():
         node = Node(ip)
         node.mon = name
         node.roles.add('mon')
         nodes[ip] = node
 
-    for ip, osds in get_osds_nodes(lambda x: run_locally(x).decode('utf8'), opts.ceph_extra).items():
+    osd_nodes = get_osds_nodes(lambda x: run_locally(x).decode('utf8'), opts.ceph_extra, ip_mapping=ip_mapping)
+    for ip, osds in osd_nodes.items():
         node = nodes.setdefault(ip, Node(ip))
         node.osds = osds
         node.roles.add('osd')
@@ -693,30 +696,61 @@ def collect(storage: IStorage, opts: Any, executor: Executor) -> None:
     allowed_path_checker = get_allowed_paths_checker(opts.disable)
     allowed_collectors = opts.collectors.split(',')
 
-    nodes = []
-    explicit_nodes = open(opts.inventory).read().split() if opts.inventory else []
-    for node in explicit_nodes + opts.node:
-        if not node:
-            pass
+    ip_mapping = {}
+    if opts.ip_mapping:
+        with open(opts.ip_mapping) as fd:
+            for line in fd:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                ip, ssh_ip = line.split()
+                ip_mapping[ip] = ssh_ip
 
-        if not re.match(r"\d+\.\d+\.\d+\.\d+", node):
-            ip = socket.gethostbyname(node)
-            hostname = node
-        else:
-            ip = node
-            hostname = None
+    nmap = {}
 
-        nodes.append(Node(ip, hostname))
+    inventory = {}
+    explicit_nodes = open(opts.inventory).read().splitlines() if opts.inventory else []
+    for line in explicit_nodes + opts.node:
+        line = line.strip()
+        if line:
+            if ':' in line:
+                name, roles_s = line.split(":")
+                roles = [role.strip() for role in roles_s.split(",")]
+            else:
+                name = line
+                roles = set()
+            inventory[name] = roles
+
+    for node_name_or_ip, roles in inventory.items():
+        if node_name_or_ip:
+            try:
+                ipaddress.ip_address(node_name_or_ip)
+            except ValueError:
+                ip = socket.gethostbyname(node_name_or_ip)
+                hostname = node_name_or_ip
+            else:
+                ip = node_name_or_ip
+                hostname = None
+                if not opts.dont_rev_resolve:
+                    try:
+                        hostname = socket.gethostbyaddr(node_name_or_ip)[0]
+                    except:
+                        pass
+
+            node = nmap.setdefault(ip, Node(ip, hostname))
+            node.roles.update(roles)
 
     if not opts.no_detect:
-        detect_nodes = discover_nodes(opts)
+        detect_nodes = discover_nodes(opts, ip_mapping)
         all_nodes_dct = dict((node.ip, node) for node in detect_nodes)
     else:
         all_nodes_dct = {}
 
-    for node in nodes:
+    for node in nmap.values():
         if node.ip not in all_nodes_dct:
             all_nodes_dct[node.ip] = node
+        else:
+            logger.warning("Node %s present in both inventory and in detection results. Inventory ignored", node.ip)
 
     ips, nodes = zip(*all_nodes_dct.items())
 
@@ -850,11 +884,17 @@ def parse_args(argv: List[str]) -> Any:
     p.add_argument("-C", "--ceph-extra", default="", help="Extra opts to pass to 'ceph' command")
     p.add_argument("-d", "--disable", default=[], nargs='*', help="Disable collect pattern")
     p.add_argument("-D", "--detect-only", action="store_true", help="Don't collect any data, only detect cluster nodes")
+    p.add_argument("--dont-rev-resolve", action="store_true", default=False, help="Disable node name detection by ip")
     p.add_argument("--no-detect", action="store_true", help="Don't detect nodes. Inventory must be provided")
     p.add_argument("-g", "--save-to-git", metavar="DIR", help="Commit into git repo, cloned to folder")
     p.add_argument("-G", "--git-push", metavar="DIR", help="Commit into git repo, cloned to folder and run 'git push'")
-    p.add_argument("-i", "--inventory", metavar="FILE", help="File with node names/addrs")
-    p.add_argument("-I", "--node", nargs='+', default=[], help="pass additional nodes from cli")
+    p.add_argument("-i", "--inventory", metavar="FILE",
+                   help="File with node names/addrs in formal - ip_or_name[:role[,role..]]")
+    p.add_argument("-I", "--node", nargs='+', default=[],
+                   help="pass additional nodes from cli. ip_or_name[:role[,role..]]")
+    p.add_argument("--ip-mapping", metavar='FILE',
+                   help="File, which maps node ip to sshable ip of same node. Use if sshd don't listen on ceph " +
+                        "public ip or in other cases")
     p.add_argument("-j", "--no-pretty-json", action="store_true", help="Don't prettify json data")
     p.add_argument("-l", "--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
                    default=None, help="Console log level")
