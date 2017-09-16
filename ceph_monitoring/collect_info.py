@@ -643,16 +643,19 @@ class LoadCollector(Collector):
 
 def discover_nodes(opts: Any, ip_mapping: Dict[str, str] = None) -> List[Node]:
     nodes = {}
+    ip_mapping = {} if not ip_mapping else ip_mapping
 
-    mons = get_mons_nodes(lambda x: run_locally(x).decode('utf8'), opts.ceph_extra, ip_mapping=ip_mapping)
+    mons = get_mons_nodes(lambda x: run_locally(x).decode('utf8'), opts.ceph_extra)
     for mon_id, (ip, name) in mons.items():
+        ip = ip_mapping.get(ip, ip)
         node = Node(ip)
         node.mon = name
         node.roles.add('mon')
         nodes[ip] = node
 
-    osd_nodes = get_osds_nodes(lambda x: run_locally(x).decode('utf8'), opts.ceph_extra, ip_mapping=ip_mapping)
+    osd_nodes = get_osds_nodes(lambda x: run_locally(x).decode('utf8'), opts.ceph_extra)
     for ip, osds in osd_nodes.items():
+        ip = ip_mapping.get(ip, ip)
         node = nodes.setdefault(ip, Node(ip))
         node.osds = osds
         node.roles.add('osd')
