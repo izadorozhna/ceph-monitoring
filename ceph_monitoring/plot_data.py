@@ -120,14 +120,19 @@ def show_osd_lat_heatmaps(report, cluster, max_xbins=25):
     for field, header in (('journal_latency', "Journal latency, ms"),
                           ('apply_latency',  "Apply latency, ms"),
                           ('commitcycle_latency', "Commit cycle latency, ms")):
+
         if field not in cluster.osds[0].osd_perf:
             continue
+
+        import IPython
+        IPython.embed()
 
         min_perf_len = min(osd.osd_perf[field].size for osd in cluster.osds)
 
         lats = numpy.concatenate([osd.osd_perf[field][:min_perf_len] for osd in cluster.osds])
         lats = lats.reshape((len(cluster.osds), min_perf_len))
 
+        print(field)
         hmap, ranges = hmap_from_2d(lats, max_xbins=max_xbins, noval=NO_VALUE)
 
         if len(hmap) != 0:
