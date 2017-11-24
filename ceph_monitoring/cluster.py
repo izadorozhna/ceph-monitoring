@@ -42,6 +42,7 @@ class CephOSD:
         self.free_perc = None
         self.procinfo = None
         self.cmdline = None
+        self.storage_type = None  # filestore or bluestore
 
     @property
     def daemon_runs(self):
@@ -231,14 +232,23 @@ class CephCluster:
         # synthetic props
         self.usage = None
 
+        self.is_luminous = False
+        self.has_performance_data = False
+
     def load(self):
         self.settings = AttredDict(**parse_txt_ceph_config(self.storage.txt.master.default_config))
         self.cluster_net = IPv4Network(self.settings['cluster_network'])
         self.public_net = IPv4Network(self.settings['public_network'])
+
+        self.is_luminous = self.storage.json.master.mon_status['feature_map']['mon']['group']['release'] == 'luminous'
+
         self.crush = load_crushmap(content=self.storage.txt.master.crushmap)
 
         self.perf_data, self.osd_perf_dump, \
             self.osd_historic_ops_paths, self.osd_historicjs_ops_paths = self.get_perf_monitoring()
+
+        self.has_performance_data = self.perf_data is not None
+
         self.load_ceph_settings()
         self.load_hosts()
         # TODO: set reweight for OSD
@@ -251,6 +261,9 @@ class CephCluster:
         self.report_collected_at_local, self.report_collected_at_gmt, _ = coll_time.split("\n")
 
     def get_perf_monitoring(self):
+        if 'perf_monitoring' not in self.storage.txt:
+            return None, None, None, None
+
         all_data = {}
         osd_perf_dump = {}
         osd_historicjs_ops_paths = {}
@@ -306,7 +319,8 @@ class CephCluster:
     def load_ceph_settings(self):
         mstorage = self.storage.json.master
         self.overall_status = mstorage.status['health']['overall_status']
-        self.health_summary = mstorage.status['health']['summary']
+
+        self.health_summary = mstorage.status['health']['checks' if self.is_luminous else 'summary']
         self.num_pgs = mstorage.status['pgmap']['num_pgs']
         self.bytes_used = mstorage.status['pgmap']["bytes_used"]
         self.bytes_total = mstorage.status['pgmap']["bytes_total"]
@@ -356,31 +370,37 @@ class CephCluster:
             # net_stats = parse_netdev(stor_node.netdev)
             host.uptime = float(stor_node.uptime.split()[0])
 
-            host.perf_monitoring = self.perf_data.get(host.stor_id)
-            host.perf_monitoring['collected_at'] = host.perf_monitoring['collected_at']
+            if self.has_performance_data:
+                host.perf_monitoring = self.perf_data.get(host.stor_id)
+                host.perf_monitoring['collected_at'] = host.perf_monitoring['collected_at']
+            else:
+                host.perf_monitoring = None
 
             if host.perf_monitoring:
                 dtime = (host.perf_monitoring['collected_at'][-1] - host.perf_monitoring['collected_at'][0])
                 self.fill_io_devices_usage_stats(host)
-                for name, adapter_dct in jstor_node.interfaces.items():
-                    adapter_dct = adapter_dct.copy()
-                    dev = adapter_dct.pop('dev')
-                    adapter = NetworkAdapter(dev)
-                    adapter.__dict__.update(adapter_dct)
-                    host.net_adapters[dev] = adapter
+            else:
+                dtime = None
 
-                    adapter.load = None
-                    if dtime and dtime > 1.0:
-                        load = NetLoad()
-                        load_node = host.perf_monitoring.get('net-io', {}).get(adapter.name, {})
-                        for metric in 'send_bytes send_packets recv_packets recv_bytes'.split():
-                            data = load_node.get(metric)
-                            if data is None:
-                                break
-                            setattr(load, metric, data)
-                            setattr(load, metric + "_avg", sum(data) / dtime)
-                        else:
-                            adapter.load = load
+            for name, adapter_dct in jstor_node.interfaces.items():
+                adapter_dct = adapter_dct.copy()
+                dev = adapter_dct.pop('dev')
+                adapter = NetworkAdapter(dev)
+                adapter.__dict__.update(adapter_dct)
+                host.net_adapters[dev] = adapter
+
+                adapter.load = None
+                if dtime and dtime > 1.0 and host.perf_monitoring:
+                    load = NetLoad()
+                    load_node = host.perf_monitoring.get('net-io', {}).get(adapter.name, {})
+                    for metric in 'send_bytes send_packets recv_packets recv_bytes'.split():
+                        data = load_node.get(metric)
+                        if data is None:
+                            break
+                        setattr(load, metric, data)
+                        setattr(load, metric + "_avg", sum(data) / dtime)
+                    else:
+                        adapter.load = load
 
             ip_rr_s = r"\d+:\s+(?P<adapter>.*?)\s+inet\s+(?P<ip>\d+\.\d+\.\d+\.\d+)/(?P<size>\d+)"
             for line in stor_node.ipa.split("\n"):
@@ -388,7 +408,10 @@ class CephCluster:
                 if match is not None:
                     ip_addr = IPv4Address(match.group('ip'))
                     net_addr = IPv4Network("{}/{}".format(ip_addr, int(match.group('size'))), strict=False)
-                    adapter = host.net_adapters[match.group('adapter')]
+                    try:
+                        adapter = host.net_adapters[match.group('adapter')]
+                    except KeyError:
+                        continue
                     adapter.ips.append(NetAdapterAddr(ip_addr, net_addr))
 
                     if ip_addr in self.cluster_net:
@@ -465,16 +488,26 @@ class CephCluster:
 
         osd_versions = {}
         version_rr = re.compile(r'osd.(?P<osd_id>\d+)\s*:\s*' +
-                                r'\{"version":"ceph version\s+(?P<version>[^ ]*)\s+\((?P<hash>[^)]*?)\)"\}\s*$')
-        for line in self.storage.txt.master.osd_versions.split("\n"):
-            rr = version_rr.match(line)
-            if rr:
-                osd_versions[int(rr.group('osd_id'))] = (rr.group('version'), rr.group('hash'))
+                                r'\{"version":"ceph version\s+(?P<version>[^ ]*)\s+\((?P<hash>[^)]*?)\).*?"\}\s*$')
+
+        try:
+            fc = self.storage.txt.master.osd_versions
+        except:
+            fc = self.storage.raw.get_raw('master/osd_versions.err').decode("utf8")
+
+        for line in fc.split("\n"):
+            line = line.strip()
+            if line:
+                rr = version_rr.match(line.strip())
+                if rr:
+                    osd_versions[int(rr.group('osd_id'))] = (rr.group('version'), rr.group('hash'))
 
         osd_perf_scalar = {}
         for node in self.storage.json.master.osd_perf['osd_perf_infos']:
             osd_perf_scalar[node['id']] = {"apply_latency_s": node["perf_stats"]["apply_latency_ms"],
                                            "commitcycle_latency_s": node["perf_stats"]["commit_latency_ms"]}
+
+        osd_df_map = {node['id']: node for node in self.storage.json.master.osd_df['nodes']}
 
         for osd_data in self.storage.json.master.osd_dump['osds']:
             osd = CephOSD()
@@ -486,7 +519,9 @@ class CephCluster:
             osd.id = osd_data['osd']
             osd.reweight = osd_rw_dict[osd.id]
             osd.status = 'up' if osd_data['up'] else 'down'
-            osd.version = osd_versions[osd.id]
+            osd.version = osd_versions.get(osd.id)
+            osd.pg_count = None if self.sum_per_osd is None else self.sum_per_osd[osd.id]
+            osd.storage_type = self.storage.txt.osd['{}/type'.format(osd.id)]
 
             try:
                 osd.host = ip2host[osd.cluster_ip]
@@ -497,50 +532,56 @@ class CephCluster:
 
             osd.host.osd_ids.add(osd.id)
 
-            try:
-                osd_stor_node = self.storage.json.osd[str(osd.id)]
-                osd.data_stor_stats = TabulaRasa(**osd_stor_node.data.stats)
-                osd_disks_info = osd_stor_node.devs_cfg
-                data_dev = osd_disks_info['r_data']
-                j_dev = osd_disks_info['r_journal']
+            if osd.status == 'down':
+                continue
 
-                stat = osd_stor_node.data.stats if data_dev == j_dev else osd_stor_node.journal.stats
-                osd.j_stor_stats = TabulaRasa(**stat)
+            osd_stor_node = self.storage.json.osd[str(osd.id)]
+            osd_disks_info = osd_stor_node.devs_cfg
+            data_dev = osd_disks_info['r_data']
+            j_dev = osd_disks_info['r_journal']
 
+            stat = osd_stor_node.data.stats if data_dev == j_dev else osd_stor_node.journal.stats
+
+            osd.data_stor_stats = TabulaRasa(**osd_stor_node.data.stats)
+            osd.j_stor_stats = TabulaRasa(**stat)
+
+            if self.has_performance_data:
                 osd.data_stor_stats.load = osd.host.disks[get_dev_file_name(data_dev)].load
                 osd.j_stor_stats.load = osd.host.disks[get_dev_file_name(j_dev)].load
+            else:
+                osd.data_stor_stats.load = None
+                osd.j_stor_stats.load = None
 
-                osd.used_space = osd.data_stor_stats.get('used')
-                osd.free_space = osd.data_stor_stats.get('avail')
-                osd.free_perc = int((osd.free_space * 100.0) / (osd.free_space + osd.used_space) + 0.5)
+            osd_df_data = osd_df_map[osd.id]
+            osd.used_space = osd_df_data['kb_used'] * 1024
+            osd.free_space = osd_df_data['kb_avail']  * 1024
+            osd.free_perc = int((osd.free_space * 100.0) / (osd.free_space + osd.used_space) + 0.5)
 
-            except (AttributeError, KeyError):
-                osd.data_stor_stats = None
-                osd.j_stor_stats = None
+            if self.has_performance_data:
+                if osd.id in self.osd_perf_dump:
+                    fstor = [obj["filestore"] for obj in self.osd_perf_dump[osd.id]]
+                    for field in ("apply_latency", "commitcycle_latency", "journal_latency"):
+                        count = numpy.array([obj[field]["avgcount"] for obj in fstor], dtype=numpy.float32)
+                        values = numpy.array([obj["filestore"][field]["sum"] for obj in self.osd_perf_dump[osd.id]],
+                                              dtype=numpy.float32)
 
-            if osd.id in self.osd_perf_dump:
-                fstor = [obj["filestore"] for obj in self.osd_perf_dump[osd.id]]
-                for field in ("apply_latency", "commitcycle_latency", "journal_latency"):
-                    count = numpy.array([obj[field]["avgcount"] for obj in fstor], dtype=numpy.float32)
-                    values = numpy.array([obj["filestore"][field]["sum"] for obj in self.osd_perf_dump[osd.id]],
-                                          dtype=numpy.float32)
+                        with numpy.errstate(divide='ignore', invalid='ignore'):
+                            avg_vals = (values[1:] - values[:-1]) / (count[1:] - count[:-1])
 
-                    with numpy.errstate(divide='ignore', invalid='ignore'):
-                        avg_vals = (values[1:] - values[:-1]) / (count[1:] - count[:-1])
+                        avg_vals[avg_vals == numpy.inf] = NO_VALUE
+                        avg_vals[numpy.isnan(avg_vals)] = NO_VALUE
+                        osd.osd_perf[field] = avg_vals
 
-                    avg_vals[avg_vals == numpy.inf] = NO_VALUE
-                    avg_vals[numpy.isnan(avg_vals)] = NO_VALUE
-                    osd.osd_perf[field] = avg_vals
+                    arr = numpy.array([obj['journal_wr_bytes']["avgcount"] for obj in fstor], dtype=numpy.float32)
+                    osd.osd_perf["journal_ops"] = arr[1:] - arr[:-1]
+                    arr = numpy.array([obj['journal_wr_bytes']["sum"] for obj in fstor], dtype=numpy.float32)
+                    osd.osd_perf["journal_bytes"] = arr[1:] - arr[:-1]
 
-                arr = numpy.array([obj['journal_wr_bytes']["avgcount"] for obj in fstor], dtype=numpy.float32)
-                osd.osd_perf["journal_ops"] = arr[1:] - arr[:-1]
-                arr = numpy.array([obj['journal_wr_bytes']["sum"] for obj in fstor], dtype=numpy.float32)
-                osd.osd_perf["journal_bytes"] = arr[1:] - arr[:-1]
+                osd.osd_perf.update(osd_perf_scalar[osd.id])
+                if self.osd_historic_ops_paths is not None:
+                    osd.historic_ops_storage_path = self.osd_historic_ops_paths.get(osd.id)
+                    osd.historicjs_ops_storage_path = self.osd_historicjs_ops_paths.get(osd.id)
 
-            osd.osd_perf.update(osd_perf_scalar[osd.id])
-            osd.historic_ops_storage_path = self.osd_historic_ops_paths.get(osd.id)
-            osd.historicjs_ops_storage_path = self.osd_historicjs_ops_paths.get(osd.id)
-            osd.pg_count = None if self.sum_per_osd is None else self.sum_per_osd[osd.id]
             config = self.storage.txt.osd[str(osd.id)].config
             osd.config = None if config is None else AttredDict(**parse_txt_ceph_config(config))
 
@@ -576,11 +617,21 @@ class CephCluster:
                 self.pools[int(pool_part['id'])].__dict__.update(cat)
 
     def load_monitors(self):
-        srv_health = self.storage.json.master.status['health']['health']['health_services']
-        assert len(srv_health) == 1
-        for srv in srv_health[0]['mons']:
+        if self.is_luminous:
+            mons = self.storage.json.master.status['monmap']['mons']
+            mon_status = self.storage.json.master.mon_status
+        else:
+            srv_health = self.storage.json.master.status['health']['health']['health_services']
+            assert len(srv_health) == 1
+            mons = srv_health[0]['mons']
+
+        for srv in mons:
             mon = CephMonitor()
-            mon.health = srv["health"]
+            if self.is_luminous:
+                mon.health = None
+            else:
+                mon.health = srv["health"]
+
             mon.name = srv["name"]
             mon.host = srv["name"]
 
@@ -593,7 +644,12 @@ class CephCluster:
                 logger.error(msg)
                 raise ValueError(msg)
 
-            mon.kb_avail = srv["kb_avail"]
-            mon.avail_percent = srv["avail_percent"]
+            if self.is_luminous:
+                mon.kb_avail = None
+                mon.avail_percent = None
+            else:
+                mon.kb_avail = srv["kb_avail"]
+                mon.avail_percent = srv["avail_percent"]
+
             self.mons.append(mon)
 

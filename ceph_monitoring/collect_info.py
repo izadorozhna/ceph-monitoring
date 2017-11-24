@@ -69,7 +69,7 @@ def run_rpc_with_code(rpc: SimpleRPCClient, cmd: str, *args, **kwargs) -> Tuple[
     try:
         code, out = 0, rpc_run(rpc, cmd, *args, **kwargs)
     except subprocess.CalledProcessError as exc:
-        code, out = exc.returncode, (exc.output + exc.stderr)
+        code, out = exc.returncode, (exc.output + (b"" if exc.stderr is None else exc.stderr))
 
     return code, out.decode('utf8')
 
@@ -78,7 +78,7 @@ def run_with_code(cmd: str) -> Tuple[int, str]:
     try:
         code, out = 0, run_locally(cmd)
     except subprocess.CalledProcessError as exc:
-        code, out = exc.returncode, (exc.output + exc.stderr)
+        code, out = exc.returncode, (exc.output + (b"" if exc.stderr is None else exc.stderr))
 
     return code, out.decode('utf8')
 
@@ -277,6 +277,16 @@ class CephDataCollector(Collector):
                 time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
                 time.time())
 
+            code, out = run_with_code(self.ceph_cmd + "osd versions")
+            is_luminous = (code == 0)
+            if is_luminous:
+                self.save("osd_versions2", 'txt', 0, out)
+                self.save_output("mon_versions2", self.ceph_cmd + "mon versions", "txt")
+                self.save_output("mgr_versions2", self.ceph_cmd + "mgr versions", "txt")
+
+            self.save_output("osd_versions", self.ceph_cmd + "tell 'osd.*' version", "txt")
+            self.save_output("mon_versions", self.ceph_cmd + "tell 'mon.*' version", "txt")
+
             self.save("collected_at", 'txt', 0, curr_data)
             _, out = self.save_output("status", self.ceph_cmd + "status", 'json')  # type: ignore
             assert out, "{0!r} failed".format(self.ceph_cmd + "status")
@@ -305,6 +315,7 @@ class CephDataCollector(Collector):
                     'mon_status',
                     'osd lspools',
                     'osd perf',
+                    'osd df',
                     'health detail']
 
             num_pgs = status['pgmap']['num_pgs']
@@ -320,8 +331,6 @@ class CephDataCollector(Collector):
                 self.save_output(cmd.replace(" ", "_"), self.ceph_cmd + cmd, 'json')
 
             self.save_output("default_config", self.ceph_cmd + "--show-config", 'txt')
-            self.save_output("osd_versions", self.ceph_cmd + "tell 'osd.*' version", "txt")
-            self.save_output("mon_versions", self.ceph_cmd + "tell 'mon.*' version", "txt")
             self.save_output("rados_df", self.rados_cmd + "df", 'json')
 
             with tempfile.NamedTemporaryFile() as fd:
@@ -392,11 +401,17 @@ class CephDataCollector(Collector):
             self.save("cephdisk", 'txt', 0, cephdisk_ls)
             self.save("cephdisk", 'json', 0, cephdisk_js)
 
+
+
         devs_for_osd = {}  # type: Dict[int, Tuple[str, str, Optional[str]]]
         for dev_info in cephdisk_dct:
             for part_info in dev_info.get('partitions', []):
                 if part_info.get('type') == 'data':
-                    devs_for_osd[int(part_info['whoami'])] = (part_info['path'], part_info['journal_dev'], None)
+                    if 'block_dev' in part_info:
+                        devs_for_osd[int(part_info['whoami'])] = (part_info['block_dev'],
+                                                                  part_info['block_dev'], None)
+                    else:
+                        devs_for_osd[int(part_info['whoami'])] = (part_info['path'], part_info['journal_dev'], None)
 
         for osd in self.node.osds:
             with self.chdir('osd/{0}'.format(osd.id)):
@@ -414,23 +429,32 @@ class CephDataCollector(Collector):
 
                     self.save("pgs", "txt", code, res)
 
-                    data_dev, j_dev, _ = devs_for_osd[osd.id]
-                    r_data_dev = dev_tree[data_dev]
-                    r_j_dev = dev_tree[j_dev]
+                    # detect osd storage type
+                    dir_path = re.search("osd_data = (?P<dir_path>.*?)\n", osd.config).group("dir_path")
+                    stor_type = self.node.rpc.fs.get_file(os.path.join(dir_path, 'type'), compress=False)
+                    stor_type = stor_type.decode('utf8').strip()
+                    self.save("type", "txt", 0, stor_type)
 
-                    osd_dev_conf = {'data': data_dev,
-                                    'r_data': r_data_dev,
-                                    'journal': j_dev,
-                                    'r_journal': r_j_dev}
+                    if stor_type in ('filestore', 'bluestore'):
+                        data_dev, j_dev, _ = devs_for_osd[osd.id]
+                        r_data_dev = dev_tree[data_dev]
+                        r_j_dev = dev_tree[j_dev]
 
-                    self.save('devs_cfg', 'json', 0, json.dumps(osd_dev_conf))
+                        osd_dev_conf = {'data': data_dev,
+                                        'r_data': r_data_dev,
+                                        'journal': j_dev,
+                                        'r_journal': r_j_dev}
 
-                    with self.chdir("data"):
-                        self.collect_dev_info(r_data_dev, data_dev)
+                        self.save('devs_cfg', 'json', 0, json.dumps(osd_dev_conf))
 
-                    if r_data_dev != r_j_dev:
-                        with self.chdir("journal"):
-                            self.collect_dev_info(r_j_dev, j_dev)
+                        with self.chdir("data"):
+                            self.collect_dev_info(r_data_dev, data_dev)
+
+                        if r_data_dev != r_j_dev:
+                            with self.chdir("journal"):
+                                self.collect_dev_info(r_j_dev, j_dev)
+                    else:
+                        logger.error("Unknown storage type on osd %s: %s", osd.id, stor_type)
                 else:
                     logger.warning("osd-{0} in node {1} is down.".format(osd.id, self.node.name) +
                                    " No config available, will use default data and journal path")
@@ -788,7 +812,7 @@ def collect(storage: IStorageNNP, opts: Any, executor: Executor) -> None:
 
         def init_node_with_code(node):
             try:
-                return True, init_node(node, ssh_opts=ssh_opts)
+                return True, init_node(node, ssh_opts=ssh_opts, with_sudo=opts.sudo)
             except Exception:
                 return False, (None, None)
 
@@ -864,7 +888,9 @@ def collect(storage: IStorageNNP, opts: Any, executor: Executor) -> None:
             logger.info("Collecting performance info")
             for future in [executor.submit(collector.collect_performance_data) for collector in load_collectors]:
                 future.result()
-
+    except Exception as exc:
+        logger.error("Exception happened(see full tb below): %s", exc)
+        raise
     finally:
         logger.info("Collecting logs and teardown RPC servers")
         for node in nodes:
@@ -916,6 +942,7 @@ def parse_args(argv: List[str]) -> Any:
     p.add_argument("-S", "--ssh-opts", default=None, help="SSH cli options")
     p.add_argument("-t", "--ssh-conn-timeout", default=60, type=int, help="SSH connection timeout")
     p.add_argument("-u", "--ssh-user", default=None, help="SSH user. Current user by default")
+    p.add_argument("--sudo", action="store_true", help="Run agent with sudo on remote node")
     p.add_argument("-w", "--wipe", action='store_true', help="Wipe results directory before store data")
 
     if logging_tree:

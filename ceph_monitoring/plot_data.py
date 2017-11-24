@@ -63,10 +63,11 @@ def plot_img(func: Callable, *args, **kwargs) -> Any:
 #     return res
 #
 #
-def show_osd_used_space_histo(report, cluster):
+def show_osd_used_space_histo(report, cluster, min_osd=3):
     vals = [(100 - osd.free_perc) for osd in cluster.osds if osd.free_perc is not None]
-    img = plot_img(plot_histo, numpy.array(vals), left=0, right=100, ax=True)
-    report.add_block(6, "OSD used space (GiB)", img)
+    if len(vals) >= min_osd:
+        img = plot_img(plot_histo, numpy.array(vals), left=0, right=100, ax=True)
+        report.add_block(6, "OSD used space (GiB)", img)
 
 
 def show_osd_pg_histo(report, cluster):

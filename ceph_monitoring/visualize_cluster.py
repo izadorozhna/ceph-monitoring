@@ -233,7 +233,7 @@ def show_summary(report, cluster):
     else:
         t = html.HTMLTable(["Setting", "Value"])
         t.add_cells("Count", osd_count)
-        t.add_cells("PG per OSD", cluster.num_pgs / osd_count)
+        t.add_cells("Average PG per OSD", cluster.num_pgs // osd_count)
         t.add_cells("Cluster net", cluster.cluster_net)
         t.add_cells("Public net", cluster.public_net)
         t.add_cells("Near full ratio", cluster.settings.mon_osd_nearfull_ratio)
@@ -259,29 +259,40 @@ def show_summary(report, cluster):
     t.add_cells("Client IO IOPS", b2ssize(cluster.op_per_sec, False))
     report.add_block(2, "Activity:", t)
 
+    colors = {
+        "HEALTH_WARN": "orange",
+        "HEALTH_ERR": "red"
+    }
+
     if len(cluster.health_summary) != 0:
         t = html.Doc()
-        for msg in cluster.health_summary:
-            if msg['severity'] == "HEALTH_WARN":
-                color = "orange"
-            elif msg['severity'] == "HEALTH_ERR":
-                color = "red"
-            else:
-                color = "black"
 
-            t.font(msg['summary'].capitalize(), color=color)
-            t.br
+        if cluster.is_luminous:
+            for check in cluster.health_summary.values():
+                color = colors.get(check["severity"], "black")
+                t.font(check['summary']['message'].capitalize(), color=color)
+                t.br
+        else:
+            for msg in cluster.health_summary:
+                color = colors.get(msg['severity'], "black")
+                t.font(msg['summary'].capitalize(), color=color)
+                t.br
 
         report.add_block(2, "Status messages:", t)
 
 
 def show_mons_info(report, cluster):
-    table = html.HTMLTable(headers=["Name", "Node", "Role", "Disk free<br>B (%)"])
+    table = html.HTMLTable(headers=["Name", "Health", "Role", "Disk free<br>B (%)"])
 
     for mon in cluster.mons:
-        health = html_ok("HEALTH_OK") if mon.health == "HEALTH_OK" else html_fail(mon.health)
-        line = [mon.name, health, mon.role, "{0} ({1})".format(b2ssize(mon.kb_avail * 1024, False), mon.avail_percent)]
-        table.add_row(map(str, line))
+        if mon.health is None:
+            health = "Unknown"
+        else:
+            health = html_ok("HEALTH_OK") if mon.health == "HEALTH_OK" else html_fail(mon.health)
+
+        perc = ("Unknown" if cluster.is_luminous else
+                "{0} ({1})".format(b2ssize(mon.kb_avail * 1024, False), mon.avail_percent))
+        table.add_row(map(str, [mon.name, health, "Unknown" if mon.role is None else mon.role, perc]))
 
     report.add_block(3, "Monitors info:", table)
 
@@ -305,12 +316,13 @@ def show_osd_state(report, cluster):
     statuses = collections.defaultdict(lambda: [])
 
     for osd in cluster.osds:
-        statuses[osd.status].append("{0.host}:{0.id}".format(osd))
+        statuses[osd.status].append("{0.host.name}:{0.id}".format(osd))
 
     table = html.HTMLTable(headers=["Status", "Count", "ID's"])
 
     for status, osds in sorted(statuses.items()):
-        table.add_row([status, len(osds), "" if status == "up" else "<br>".join(osds)])
+        table.add_row([status, len(osds), "" if status == "up" else
+            ("<br>".join(osds) if len(osds) < 5 else "<br>".join(osds[:4]) + "<br>and {} more".format(len(osds) - 4))])
 
     report.add_block(2, "OSD's state:", table)
 
@@ -341,7 +353,11 @@ def show_pools_info(report, cluster):
         table.add_cell('---')
         table.add_cell(b2ssize(int(pool.read_bytes), False), sorttable_customkey=str(int(pool.read_bytes)))
         table.add_cell(b2ssize(int(pool.write_bytes), False), sorttable_customkey=str(int(pool.write_bytes)))
-        table.add_cell(str(pool.crush_ruleset))
+
+        if cluster.is_luminous:
+            table.add_cell(str(pool.crush_rule))
+        else:
+            table.add_cell(str(pool.crush_ruleset))
 
         if pool.pg_placement_num != pool.pg_num:
             table.add_cell("{0}({1})".format(pool.pg_num, H.font(str(pool.pg_placement_num), color="red")),
@@ -362,12 +378,19 @@ def show_pools_info(report, cluster):
         else:
             row = [osd_pg.get(pool.name, 0) for osd_pg in cluster.osd_pool_pg_2d.values()]
             avg = float(sum(row)) / len(row)
-            dev = (sum((i - avg) ** 2.0 for i in row) / (len(row) - 1)) ** 0.5
+            if len(row) < 2:
+                dev = None
+            else:
+                dev = (sum((i - avg) ** 2.0 for i in row) / (len(row) - 1)) ** 0.5
 
             if avg < 1E-5:
                 table.add_cell('--')
             else:
-                dev_perc = str(int(dev * 100. / avg))
+                if dev is None:
+                    dev_perc = "--"
+                else:
+                    dev_perc = str(int(dev * 100. / avg))
+
                 table.add_cell("{0:.1f} ~ {1}%".format(avg, dev_perc), sorttable_customkey=str(int(avg * 1000)))
 
         table.next_row()
@@ -388,6 +411,7 @@ def show_osd_info(report, cluster):
                                     w_headers +
                                    ["reweight",
                                     "PG count",
+                                    "Storage tp",
                                     "Storage<br>used",
                                     "Storage<br>free",
                                     "Storage<br>free %",
@@ -442,8 +466,11 @@ def show_osd_info(report, cluster):
         table.add_cell(str(osd.id))
         table.add_cell(osd.host.name)
         table.add_cell(html_ok("up") if osd.status == 'up' else html_fail("down"))
-        ver, hash = osd.version
-        table.add_cell("{0}  [{1}]".format(ver, hash[:8]))
+        if osd.version is None:
+            table.add_cell("Unknown")
+        else:
+            ver, hash = osd.version
+            table.add_cell("{0}  [{1}]".format(ver, hash[:8]))
         table.add_cell(daemon_msg)
 
         if osd.procinfo:
@@ -472,6 +499,8 @@ def show_osd_info(report, cluster):
             table.add_cell(HTML_UNKNOWN, sorttable_customkey=0)
         else:
             table.add_cell(str(osd.pg_count))
+
+        table.add_cell(osd.storage_type)
 
         if isinstance(used_b, str):
             table.add_cell(used_b, sorttable_customkey='0')
@@ -791,9 +820,9 @@ def show_osd_pool_PG_distribution(report, cluster):
         data = [osd_id] + [row.get(pool_name, 0) for pool_name in pools] + [cluster.sum_per_osd[osd_id]]
         table.add_row(map(str, data))
 
-    table.add_cell("sum", sorttable_customkey=str(max(osd.id for osd in cluster.osds) + 1))
+    table.add_cell("Total cluster PG", sorttable_customkey=str(max(osd.id for osd in cluster.osds) + 1))
 
-    map(table.add_cell, (cluster.sum_per_pool[pool_name] for pool_name in pools))
+    list(map(table.add_cell, (cluster.sum_per_pool[pool_name] for pool_name in pools)))
     table.add_cell(str(sum(cluster.sum_per_pool.values())))
 
     report.add_block(8, "PG copy per OSD:", table)
@@ -891,7 +920,10 @@ def main(argv):
         report.next_line()
 
         show_osd_info(report, cluster)
-        show_osd_perf_info(report, cluster)
+
+        if cluster.has_performance_data:
+            show_osd_perf_info(report, cluster)
+
         report.next_line()
 
         show_pools_info(report, cluster)
@@ -901,11 +933,13 @@ def main(argv):
         show_osd_pool_PG_distribution(report, cluster)
         report.next_line()
 
-        show_host_io_load_in_color(report, cluster)
-        report.next_line()
+        if cluster.has_performance_data:
+            show_host_io_load_in_color(report, cluster)
+            report.next_line()
 
-        show_host_network_load_in_color(report, cluster)
-        report.next_line()
+        if cluster.has_performance_data:
+            show_host_network_load_in_color(report, cluster)
+            report.next_line()
 
         if not opts.no_plots:
             from .plot_data import (show_osd_used_space_histo,
@@ -918,14 +952,17 @@ def main(argv):
             show_osd_pg_histo(report, cluster)
             report.next_line()
 
-            show_osd_load(report, cluster)
-            report.next_line()
+            if cluster.has_performance_data:
+                show_osd_load(report, cluster)
+                report.next_line()
 
-            show_osd_lat_heatmaps(report, cluster)
-            report.next_line()
+            if cluster.has_performance_data:
+                show_osd_lat_heatmaps(report, cluster)
+                report.next_line()
 
-            show_osd_ops_boxplot(report, cluster)
-            report.next_line()
+            if cluster.has_performance_data:
+                show_osd_ops_boxplot(report, cluster)
+                report.next_line()
 
         report.save_to(opts.out, opts.pretty_html)
         logger.info("Report successfully stored to %r", index_path)
