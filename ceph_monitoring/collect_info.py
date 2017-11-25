@@ -140,6 +140,9 @@ class Collector:
         finally:
             self.storage = saved
 
+    def run(self, cmd):
+        return run_rpc_with_code(self.node.rpc, cmd, node_name=self.node.name)
+
     def save(self, path: str, frmt: str, code: int, data: Union[str, bytes, array.array],
              check: bool = True, extra: List[str] = None) -> Optional[str]:
         """Save results into storage"""
@@ -200,7 +203,7 @@ class Collector:
             code, out = run_with_code(cmd)
             loc = "locally"
         else:
-            code, out = run_rpc_with_code(self.node.rpc, cmd, node_name=self.node.name)
+            code, out = self.run(cmd)
             loc = "on node {0}".format(self.node.name)
 
         if code != 0:
@@ -365,12 +368,12 @@ class CephDataCollector(Collector):
         if run_rpc_with_code(self.node.rpc, "which hdparm", node_name=self.node.name, log=False)[0]:
             logger.warning("hdparm is not installed on %s", self.node.name)
         else:
-            self.save_output('hdparm', "sudo hdparm -I " + root_dev)
+            self.save_output('hdparm_{}'.format(root_dev), "sudo hdparm -I " + root_dev)
 
         if run_rpc_with_code(self.node.rpc, "which smartctl", node_name=self.node.name, log=False)[0]:
             logger.warning("smartctl is not installed on %s", self.node.name)
         else:
-            self.save_output('smartctl', "sudo smartctl -a " + root_dev)
+            self.save_output('smartctl_{}'.format(root_dev), "sudo smartctl -a " + root_dev)
 
         val = {'dev': device, 'root_dev': root_dev, 'used': used, 'avail': avail, 'is_ssd': is_ssd}
         self.save('stats', 'json', 0, json.dumps(val))
@@ -400,8 +403,6 @@ class CephDataCollector(Collector):
         with self.chdir('hosts/' + self.node.fs_name):
             self.save("cephdisk", 'txt', 0, cephdisk_ls)
             self.save("cephdisk", 'json', 0, cephdisk_js)
-
-
 
         devs_for_osd = {}  # type: Dict[int, Tuple[str, str, Optional[str]]]
         for dev_info in cephdisk_dct:
@@ -515,21 +516,27 @@ class NodeCollector(Collector):
     collect_roles = ['node']
 
     node_commands = [
-        ("lshw", "xml", "lshw -xml"),
-        ("lsblk", "txt", "lsblk -a"),
-        ("lsblkjs", "js", "lsblk -a --json"),
-        ("uname", "txt", "uname -a"),
-        ("dmidecode", "txt", "dmidecode"),
-        ("mount", "txt", "mount"),
-        ("ipa", "txt", "ip -o -4 a"),
-        ("netstat", "txt", "netstat -nap"),
-        ("sysctl", "txt", "sysctl -a"),
         ("df", 'txt', 'df'),
+        ("dmidecode", "txt", "dmidecode"),
+        ("dmesg", "txt", "dmesg"),
+        ("ipa4", "txt", "ip -o -4 a"),
+        ("ipa", "txt", "ip a"),
+        ("ifconfig", "txt", "ifconfig"),
+        ("ifconfig_short", "txt", "ifconfig -s"),
+        ("journalctl", 'txt', 'journalctl -b'),
+        ("lshw", "xml", "lshw -xml"),
+        ("lsblk", "txt", "lsblk -O"),
+        ("lsblk_short", "txt", "lsblk"),
+        ("lsblkjs", "json", "lsblk -O -b -J"),
+        ("mount", "txt", "mount"),
+        ("netstat", "txt", "netstat -nap"),
+        ("netstat_stat", "txt", "netstat -s"),
+        ("sysctl", "txt", "sysctl -a"),
+        ("uname", "txt", "uname -a"),
     ]
 
     node_files = [
-        "/proc/diskstats", "/proc/meminfo", "/proc/loadavg", "/proc/cpuinfo", "/proc/uptime", "/var/log/dmesg",
-        "/proc/vmstat"
+        "/proc/diskstats", "/proc/meminfo", "/proc/loadavg", "/proc/cpuinfo", "/proc/uptime", "/proc/vmstat"
     ]
 
     node_renamed_files = [("netdev", "/proc/net/dev"),
@@ -560,6 +567,7 @@ class NodeCollector(Collector):
                     logger.warning("Failed to download file %r from node %s: %s", fpath, self.node.name, exc)
 
             self.collect_interfaces_info()
+            self.collect_block_devs()
 
             try:
                 if self.node.rpc.fs.file_exists("/etc/debian_version"):
@@ -568,6 +576,47 @@ class NodeCollector(Collector):
                     self.save_output("packages_rpm", "yum list installed", frmt="txt")
             except Exception as exc:
                 logger.warning("Failed to download packages information from node %s: %s", self.node.name, exc)
+
+    def collect_block_devs(self) -> None:
+        bdevs_info = self.node.rpc.sensors.get_block_devs_info()
+        bdevs_info = {name.decode('utf8'): data for name, data in bdevs_info.items()}
+        for name_prefix in ['loop']:
+            for name in bdevs_info:
+                if name.startswith(name_prefix):
+                    del bdevs_info[name]
+
+        hdparm_exists, smartctl_exists, nvme_exists = self.node.rpc.fs.binarys_exists(['hdparm', 'smartctl', 'nvme'])
+
+        missing = []
+        if not hdparm_exists:
+            missing.append('hdparm')
+
+        if not smartctl_exists:
+            missing.append('smartctl-tools')
+
+        if not nvme_exists:
+            missing.append('nvme-tools')
+        else:
+            code, out = self.save_output('nvme_list', 'nvme list -o json', frmt='json')
+            if code == 0:
+                try:
+                    for dev in json.loads(out)['Devices']:
+                        name = os.path.basename(dev['DevicePath'])
+                        self.save_output('block_devs/{}/nvme_smart_log'.format(name),
+                                         'nvme smart-log {} -o json'.format(dev['DevicePath']), frmt='json')
+                except:
+                    logging.warning("Failed to process nvme list output")
+
+        if missing:
+            logger.warning("%s is not installed on %s", ",".join(missing), self.node.name)
+
+        for name, data in bdevs_info.items():
+            with self.chdir('block_devs/' + name):
+                if hdparm_exists:
+                    self.save_output('hdparm', "sudo hdparm -I /dev/" + name)
+
+                if smartctl_exists:
+                    self.save_output('smartctl', "sudo smartctl -a /dev/" + name)
 
     def collect_interfaces_info(self) -> None:
         interfaces = {}

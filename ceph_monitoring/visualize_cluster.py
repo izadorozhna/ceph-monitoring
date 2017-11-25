@@ -238,7 +238,7 @@ def show_summary(report, cluster):
         t.add_cells("Public net", cluster.public_net)
         t.add_cells("Near full ratio", cluster.settings.mon_osd_nearfull_ratio)
         t.add_cells("Full ratio", cluster.settings.mon_osd_full_ratio)
-        t.add_cells("Backfill full ratio", cluster.settings.osd_backfill_full_ratio)
+        t.add_cells("Backfill full ratio", getattr(cluster.settings, "osd_backfill_full_ratio", "?"))
         t.add_cells("Filesafe full ratio", cluster.settings.osd_failsafe_full_ratio)
         t.add_cells("Journal aio", cluster.settings.journal_aio)
         t.add_cells("Journal dio", cluster.settings.journal_dio)

@@ -3,7 +3,7 @@ import json
 import logging
 import collections
 from ipaddress import IPv4Network, IPv4Address
-from typing import List
+from typing import List, Dict, Any
 
 import numpy
 
@@ -30,8 +30,21 @@ class CephOSD:
         self.pg_count = None
         self.config = None
         self.pgs = {}
+
         self.data_stor_stats = None
         self.j_stor_stats = None
+        self.db_stor_stats = None
+        self.db_wal_stor_stats = None
+
+        self.journal_dev = None
+        self.journal_partition = None
+        self.data_dev = None
+        self.data_partition = None
+        self.db_dev = None
+        self.db_partition = None
+        self.wal_dev = None
+        self.wal_partition = None
+
         self.version = None
         self.osd_perf = {}  # map perf field (apply_latency/journal_latency/etc) to either numpy.array with per sec
                             # avg values (-1 mean no value available), or single value for whole range
@@ -61,9 +74,16 @@ class CephMonitor:
 
 
 class Pool:
-    def __init__(self):
-        self.id = None
-        self.name = None
+    def __init__(self, pool_id: int, name: str, size: int, min_size: int, pg: int, pgp: int,
+                 crush_rule: int, extra: Dict[str, Any]):
+        self.id = pool_id
+        self.name = name
+        self.size = size
+        self.min_size = min_size
+        self.pg = pg
+        self.pgp = pgp
+        self.crush_rule = crush_rule
+        self.extra = extra
 
 
 class NetLoad:
@@ -108,19 +128,24 @@ class DiskLoad:
 
 
 class Disk:
-    def __init__(self, dev, load):
+    def __init__(self, dev: str, load: DiskLoad, size: int, tp: str, io_scheduler: str = None) -> None:
         self.dev = dev
         self.load = load
+        self.size = size
+        self.io_scheduler = io_scheduler
+        self.tp = tp  # hdd/ssd/nvme
+        self.partitions = []  # type: Dict[str, int]
 
 
 class Host:
-    def __init__(self, name, stor_id):
+    def __init__(self, name: str, stor_id):
         self.name = name
+        self.stor_id = stor_id
+
         self.net_adapters = {}
         self.disks = {}
         self.uptime = None
         self.perf_monitoring = None
-        self.stor_id = stor_id
         self.ceph_cluster_adapter = None
         self.ceph_public_adapter = None
         self.osd_ids = set()
@@ -474,6 +499,13 @@ class CephCluster:
                     self.sum_per_pool[pool_name] += 1
                     self.sum_per_osd[osd_num] += 1
 
+
+
+    # dev_str = rpc_run(self.node.rpc, "df " + device, node_name=self.node.name).decode('utf8')
+    # dev_data = dev_str.strip().split("\n")[1].split()
+    #
+    # used = int(dev_data[2]) * 1024
+    # avail = int(dev_data[3]) * 1024
     def load_osds(self):
         ip2host = {}
 
@@ -526,8 +558,7 @@ class CephCluster:
             try:
                 osd.host = ip2host[osd.cluster_ip]
             except KeyError:
-                logger.exception("Can't found host for osd %s, as no host own %r ip addr",
-                                 osd.id, osd.cluster_ip)
+                logger.exception("Can't found host for osd %s, as no host own %r ip addr", osd.id, osd.cluster_ip)
                 raise
 
             osd.host.osd_ids.add(osd.id)
@@ -600,11 +631,18 @@ class CephCluster:
     def load_pools(self):
         self.pools = {}
 
-        for pool_part in self.storage.json.master.osd_dump['pools']:
-            pool = Pool()
-            pool.id = pool_part['pool']
-            pool.name = pool_part['pool_name']
-            pool.__dict__.update(pool_part)
+        for info in self.storage.json.master.osd_dump['pools']:
+            pool = Pool(
+                pool_id=info['pool'],
+                name=info['pool_name'],
+                size=info['size'],
+                min_size=info['min_size'],
+                pg=info['pg_num'],
+                pgp=info['pg_placement_num'],
+                crush_rule=info['crush_rule'],
+                extra=info
+            )
+
             self.pools[int(pool.id)] = pool
 
         for pool_part in self.storage.json.master.rados_df['pools']:
