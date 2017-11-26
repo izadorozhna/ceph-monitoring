@@ -232,6 +232,10 @@ def show_summary(report, cluster):
 
     report.add_block(3, "Status:", t)
 
+    stor_set = set(osd.storage_type for osd in cluster.osds)
+    has_bs = 'bluestore' in stor_set
+    has_fs = 'filestore' in stor_set
+
     if cluster.settings is None:
         t = H.font("No live OSD found!", color="red")
     else:
@@ -244,9 +248,12 @@ def show_summary(report, cluster):
         t.add_cells("Full ratio", "%0.3f" % (float(cluster.settings.mon_osd_full_ratio,)))
         t.add_cells("Backfill full ratio", getattr(cluster.settings, "osd_backfill_full_ratio", "?"))
         t.add_cells("Filesafe full ratio", "%0.3f" % (float(cluster.settings.osd_failsafe_full_ratio,)))
-        t.add_cells("Journal aio", cluster.settings.journal_aio)
-        t.add_cells("Journal dio", cluster.settings.journal_dio)
-        t.add_cells("Filestorage sync", str(int(float(cluster.settings.filestore_max_sync_interval))) + 's')
+        t.add_cells("Storage types", list(stor_set)[0] if len(stor_set) == 1 else html_fail(",".join(stor_set)))
+
+        if has_fs:
+            t.add_cells("Journal aio", cluster.settings.journal_aio)
+            t.add_cells("Journal dio", cluster.settings.journal_dio)
+            t.add_cells("Filestorage sync", str(int(float(cluster.settings.filestore_max_sync_interval))) + 's')
         t.add_cells("Monmap version", str(cluster.monmap_stat['epoch']))
 
         mon_tm = time.mktime(time.strptime(cluster.monmap_stat['modified'], "%Y-%m-%d %H:%M:%S.%f"))
@@ -398,63 +405,35 @@ def show_pools_info(report, cluster):
     report.add_block(8, "Pool's stats:", table)
 
 
-# class OSDInfo:
-#     id = None  # type: int
-#     node = None  # type: str
-#     status = None  # type: str
-#     version = None  # type: str
-#     hash = None  # type: str
-#     running = None  # type: bool
-#     open_files = None  # type: int
-#     ip_conn = None  # type: int
-#     threads = None  # type: int
-#     storage_type = None  # type: str
-#     weights = None  # type: Dict[str, float]
-#     reweight = None  # type: float
-#     pg_count = None  # type: Optional[int]
-#     used_space = None  # type; int
-#     free_space = None  # type: int
-#
-#     data_dev = None  # type: str
-#     data_dev_size = None  # type: str
-#     data_dev_tp = None  # type: str
-#     j_size = None  # type: int
-#     j_dev = None  # type: str
-#     j_dev_tp = None  # type: str
-#     j_on_file = None  # type: bool
-#     wal_size = None  # type: int
-#     wal_dev = None  # type: str
-#     wal_dev_tp = None  # type: str
-#     db_size = None  # type: int
-#     db_dev = None  # type: str
-#     db_dev_tp = None  # type: str
-#
-#
-# def get_osd_info(cluster: CephCluster, osd: CephOSD) -> OSDInfo:
-#     osd_i = OSDInfo()
-#     osd_i.id = osd.id
-#     osd_i.node = osd.host
-#     osd_i.status = osd.status
-#     osd_i.running = osd.daemon_runs
-#     osd_i.used_b = osd.used_space
-#             avail_b = osd.free_space
-#             avail_perc = osd.free_perc
-#     return osd_i
-#
-
-
 def show_osd_info(report, cluster):
     # osds_info = [get_osd_info(cluster, osd) for osd in cluster.osds]  # type: List[OSDInfo]
 
     w_headers = ["weight<br>" + root.name for root in cluster.crush.roots]
 
+    stor_set = set(osd.storage_type for osd in cluster.osds)
+    has_bs = 'bluestore' in stor_set
+    has_fs = 'filestore' in stor_set
+    assert has_fs or has_bs
+
     headers=["OSD", "node", "status", "version [hash]", "daemon<br>run", "open<br>files", "ip<br>conn", "threads"] + \
-             w_headers + ["reweight", "PG",
-             "Type",  # bluestore or filestore
-             "Storage<br>dev type", "Storage<br>used", "Storage<br>free %",
-             "Journal<br>or wal<br>colocated", "Journal<br>or wal<br>dev type", "Journal<br>or wal<br>on file",
-             "Journal<br>or wal<br>size",
-             "DB<br>colocated", "DB<br>dev type", "DB<br>size"]
+             w_headers + ["reweight", "PG"]
+
+    if has_bs and has_fs:
+        headers.append("Type")
+
+    headers.extend(["Storage<br>dev type", "Storage<br>used", "Storage<br>free %"])
+
+    if has_fs and has_bs:
+        headers.extend(["Journal<br>or wal<br>colocated", "Journal<br>or wal<br>dev type",
+                        "Journal<br>on file", "Journal<br>or wal<br>size"])
+    elif has_fs and not has_bs:
+        headers.extend(["Journal<br>colocated", "Journal<br>dev type",
+                        "Journal<br>on file", "Journal<br>size"])
+    else:
+        headers.extend(["wal<br>colocated", "wal<br>dev type", "wal<br>size"])
+
+    if has_bs:
+        headers.extend(["DB<br>colocated", "DB<br>dev type", "DB<br>size"])
 
     table = html.HTMLTable(headers)
 
@@ -514,7 +493,8 @@ def show_osd_info(report, cluster):
         else:
             table.add_cell(str(osd.pg_count))
 
-        table.add_cell(osd.storage_type)
+        if has_fs and has_bs:
+            table.add_cell(osd.storage_type)
 
         disks = cluster.hosts[osd.host.name].disks
         storage_devs = cluster.hosts[osd.host.name].storage_devs
@@ -548,6 +528,11 @@ def show_osd_info(report, cluster):
                 osd_sync = float(osd.config['filestore_max_sync_interval'])
                 j_size_s = j_size_s if j_size >= osd_sync * 100 * (1024 ** 2) else html_fail(j_size_s)
             table.add_cell(j_size_s)
+
+            if has_bs:
+                table.add_cell('-')
+                table.add_cell('-')
+                table.add_cell('-')
         else:
             assert osd.storage_type == 'bluestore'
             wal_on_same_drive = html_ok("no") if osd.wal_dev != osd.data_dev else html_fail("yes")
@@ -562,7 +547,8 @@ def show_osd_info(report, cluster):
 
             table.add_cell(wal_on_same_drive)
             table.add_cell(wal_drive_type)
-            table.add_cell('-')
+            if has_fs:
+                table.add_cell('-')
             table.add_cell(wal_size)
 
             db_on_same_drive = html_ok("no") if osd.db_dev != osd.data_dev else html_fail("yes")
