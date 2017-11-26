@@ -355,31 +355,6 @@ class CephDataCollector(Collector):
                 self.save('osdmap', 'bin', code, data)
                 self.save_output('osdmap', "osdmaptool --print {0}".format(fd.name), "txt")
 
-    def collect_dev_info(self, root_dev: str, device: str) -> Optional[str]:
-        dev_str = rpc_run(self.node.rpc, "df " + device, node_name=self.node.name).decode('utf8')
-        dev_data = dev_str.strip().split("\n")[1].split()
-
-        used = int(dev_data[2]) * 1024
-        avail = int(dev_data[3]) * 1024
-
-        rot_info_path = "/sys/block/{0}/queue/rotational".format(os.path.basename(root_dev))
-        is_ssd = self.node.rpc.fs.get_file(rot_info_path, compress=False).decode('utf8').strip() == '0'
-
-        if run_rpc_with_code(self.node.rpc, "which hdparm", node_name=self.node.name, log=False)[0]:
-            logger.warning("hdparm is not installed on %s", self.node.name)
-        else:
-            self.save_output('hdparm_{}'.format(root_dev), "sudo hdparm -I " + root_dev)
-
-        if run_rpc_with_code(self.node.rpc, "which smartctl", node_name=self.node.name, log=False)[0]:
-            logger.warning("smartctl is not installed on %s", self.node.name)
-        else:
-            self.save_output('smartctl_{}'.format(root_dev), "sudo smartctl -a " + root_dev)
-
-        val = {'dev': device, 'root_dev': root_dev, 'used': used, 'avail': avail, 'is_ssd': is_ssd}
-        self.save('stats', 'json', 0, json.dumps(val))
-
-        return root_dev
-
     def collect_osd(self) -> None:
         # check OSD process status
         out = rpc_run(self.node.rpc, "ps aux | grep ceph-osd", node_name=self.node.name).decode("utf8")
@@ -404,58 +379,62 @@ class CephDataCollector(Collector):
             self.save("cephdisk", 'txt', 0, cephdisk_ls)
             self.save("cephdisk", 'json', 0, cephdisk_js)
 
-        devs_for_osd = {}  # type: Dict[int, Tuple[str, str, Optional[str]]]
+        devs_for_osd = {}  # type: Dict[int, Dict[str, str]]
         for dev_info in cephdisk_dct:
             for part_info in dev_info.get('partitions', []):
-                if part_info.get('type') == 'data':
-                    if 'block_dev' in part_info:
-                        devs_for_osd[int(part_info['whoami'])] = (part_info['block_dev'],
-                                                                  part_info['block_dev'], None)
-                    else:
-                        devs_for_osd[int(part_info['whoami'])] = (part_info['path'], part_info['journal_dev'], None)
+                if "cluster" in part_info and part_info.get('type') == 'data':
+                    osd_id = int(part_info['whoami'])
+                    # TODO: extend with extra attrs for blustore
+                    devs_for_osd[osd_id] = {attr: part_info[attr]
+                                            for attr in ("block_dev", "journal_dev", "path")
+                                            if attr in part_info}
 
         for osd in self.node.osds:
             with self.chdir('osd/{0}'.format(osd.id)):
                 cmd = "tail -n {0} /var/log/ceph/ceph-osd.{1}.log".format(self.opts.ceph_log_max_lines, osd.id)
                 self.save_output("log", cmd)
 
+                # TODO: much of this can be done even id osd is down for filestore
                 if osd.id in running_osds:
                     self.save("config", "txt", 0, osd.config)
-                    cmd = "ls -1 '{0}'".format(os.path.join(osd.storage, 'current'))
-                    code, res = run_rpc_with_code(self.node.rpc, cmd)
-
-                    if code == 0:
-                        pgs = [name.split("_")[0] for name in res.split() if "_head" in name]
-                        res = "\n".join(pgs)
-
-                    self.save("pgs", "txt", code, res)
-
-                    # detect osd storage type
                     dir_path = re.search("osd_data = (?P<dir_path>.*?)\n", osd.config).group("dir_path")
                     stor_type = self.node.rpc.fs.get_file(os.path.join(dir_path, 'type'), compress=False)
                     stor_type = stor_type.decode('utf8').strip()
-                    self.save("type", "txt", 0, stor_type)
+                    assert stor_type in ('filestore', 'bluestore')
+                    devs_for_osd[osd.id]['store_type'] = stor_type
 
-                    if stor_type in ('filestore', 'bluestore'):
-                        data_dev, j_dev, _ = devs_for_osd[osd.id]
-                        r_data_dev = dev_tree[data_dev]
-                        r_j_dev = dev_tree[j_dev]
+                    if stor_type == 'filestore':
+                        cmd = "ls -1 '{0}'".format(os.path.join(osd.storage, 'current'))
+                        code, res = run_rpc_with_code(self.node.rpc, cmd)
 
+                        if code == 0:
+                            pgs = [name.split("_")[0] for name in res.split() if "_head" in name]
+                            res = "\n".join(pgs)
+
+                        self.save("pgs", "txt", code, res)
+
+                    if stor_type == 'filestore':
+                        data_dev = devs_for_osd[osd.id]["path"]
+                        j_dev = devs_for_osd[osd.id]["journal_dev"]
                         osd_dev_conf = {'data': data_dev,
-                                        'r_data': r_data_dev,
                                         'journal': j_dev,
-                                        'r_journal': r_j_dev}
-
-                        self.save('devs_cfg', 'json', 0, json.dumps(osd_dev_conf))
-
-                        with self.chdir("data"):
-                            self.collect_dev_info(r_data_dev, data_dev)
-
-                        if r_data_dev != r_j_dev:
-                            with self.chdir("journal"):
-                                self.collect_dev_info(r_j_dev, j_dev)
+                                        'r_data': dev_tree[data_dev],
+                                        'r_journal': dev_tree[j_dev],
+                                        'type': stor_type}
                     else:
-                        logger.error("Unknown storage type on osd %s: %s", osd.id, stor_type)
+                        assert stor_type == 'bluestore'
+                        data_dev = devs_for_osd[osd.id]["block_dev"]
+                        db_dev = data_dev
+                        wal_dev = data_dev
+                        osd_dev_conf = {'data': data_dev,
+                                        'wal': wal_dev,
+                                        'db': db_dev,
+                                        'r_data': dev_tree[data_dev],
+                                        'r_wal': dev_tree[wal_dev],
+                                        'r_db': dev_tree[db_dev],
+                                        'type': stor_type}
+
+                    self.save('devs_cfg', 'json', 0, json.dumps(osd_dev_conf))
                 else:
                     logger.warning("osd-{0} in node {1} is down.".format(osd.id, self.node.name) +
                                    " No config available, will use default data and journal path")
@@ -527,7 +506,6 @@ class NodeCollector(Collector):
         ("lshw", "xml", "lshw -xml"),
         ("lsblk", "txt", "lsblk -O"),
         ("lsblk_short", "txt", "lsblk"),
-        ("lsblkjs", "json", "lsblk -O -b -J"),
         ("mount", "txt", "mount"),
         ("netstat", "txt", "netstat -nap"),
         ("netstat_stat", "txt", "netstat -s"),
@@ -610,13 +588,16 @@ class NodeCollector(Collector):
         if missing:
             logger.warning("%s is not installed on %s", ",".join(missing), self.node.name)
 
-        for name, data in bdevs_info.items():
-            with self.chdir('block_devs/' + name):
-                if hdparm_exists:
-                    self.save_output('hdparm', "sudo hdparm -I /dev/" + name)
+        code, out_js = self.save_output("lsblkjs", "lsblk -O -b -J", frmt="json")
+        if code == 0:
+            for dev_node in json.loads(out_js)['blockdevices']:
+                name = dev_node['name']
+                with self.chdir('block_devs/' + name):
+                    if hdparm_exists:
+                        self.save_output('hdparm', "sudo hdparm -I /dev/" + name)
 
-                if smartctl_exists:
-                    self.save_output('smartctl', "sudo smartctl -a /dev/" + name)
+                    if smartctl_exists:
+                        self.save_output('smartctl', "sudo smartctl -a /dev/" + name)
 
     def collect_interfaces_info(self) -> None:
         interfaces = {}

@@ -1,21 +1,25 @@
+import io
 import sys
 import json
 import time
+import pstats
 import shutil
 import bisect
 import logging
 import os.path
 import tempfile
+import cProfile
 import argparse
 import subprocess
 import collections
 import logging.config
+from typing import Dict, Optional, List
 
 from cephlib.storage import make_storage, make_attr_storage
 
 from . import html
 from .hw_info import b2ssize, b2ssizei
-from .cluster import CephCluster, NO_VALUE
+from .cluster import CephCluster, NO_VALUE, CephOSD
 
 
 H = html.rtag
@@ -221,7 +225,7 @@ def show_summary(report, cluster):
     t.add_cells("Data", b2ssize(cluster.data_bytes, False))
 
     avail_perc = cluster.bytes_avail * 100 / cluster.bytes_total
-    t.add_cells("Free %", avail_perc)
+    t.add_cells("Free %", int(avail_perc))
 
     osd_count = len(cluster.osds)
     t.add_cells("Mon count", len(cluster.mons))
@@ -236,13 +240,13 @@ def show_summary(report, cluster):
         t.add_cells("Average PG per OSD", cluster.num_pgs // osd_count)
         t.add_cells("Cluster net", cluster.cluster_net)
         t.add_cells("Public net", cluster.public_net)
-        t.add_cells("Near full ratio", cluster.settings.mon_osd_nearfull_ratio)
-        t.add_cells("Full ratio", cluster.settings.mon_osd_full_ratio)
+        t.add_cells("Near full ratio", "%0.3f" % (float(cluster.settings.mon_osd_nearfull_ratio,)))
+        t.add_cells("Full ratio", "%0.3f" % (float(cluster.settings.mon_osd_full_ratio,)))
         t.add_cells("Backfill full ratio", getattr(cluster.settings, "osd_backfill_full_ratio", "?"))
-        t.add_cells("Filesafe full ratio", cluster.settings.osd_failsafe_full_ratio)
+        t.add_cells("Filesafe full ratio", "%0.3f" % (float(cluster.settings.osd_failsafe_full_ratio,)))
         t.add_cells("Journal aio", cluster.settings.journal_aio)
         t.add_cells("Journal dio", cluster.settings.journal_dio)
-        t.add_cells("Filestorage sync", str(cluster.settings.filestore_max_sync_interval) + 's')
+        t.add_cells("Filestorage sync", str(int(float(cluster.settings.filestore_max_sync_interval))) + 's')
         t.add_cells("Monmap version", str(cluster.monmap_stat['epoch']))
 
         mon_tm = time.mktime(time.strptime(cluster.monmap_stat['modified'], "%Y-%m-%d %H:%M:%S.%f"))
@@ -353,23 +357,19 @@ def show_pools_info(report, cluster):
         table.add_cell('---')
         table.add_cell(b2ssize(int(pool.read_bytes), False), sorttable_customkey=str(int(pool.read_bytes)))
         table.add_cell(b2ssize(int(pool.write_bytes), False), sorttable_customkey=str(int(pool.write_bytes)))
+        table.add_cell(str(pool.crush_rule))
 
-        if cluster.is_luminous:
-            table.add_cell(str(pool.crush_rule))
+        if pool.pgp != pool.pg:
+            table.add_cell("{0}({1})".format(pool.pg, H.font(str(pool.pgp), color="red")),
+                                             sorttable_customkey=str(pool.pg))
         else:
-            table.add_cell(str(pool.crush_ruleset))
+            table.add_cell(str(pool.pg), sorttable_customkey=str(pool.pg))
 
-        if pool.pg_placement_num != pool.pg_num:
-            table.add_cell("{0}({1})".format(pool.pg_num, H.font(str(pool.pg_placement_num), color="red")),
-                                             sorttable_customkey=str(pool.pg_num))
-        else:
-            table.add_cell(str(pool.pg_num), sorttable_customkey=str(pool.pg_num))
-
-        bytes_per_pg = int(pool.size_bytes) // int(pool.pg_num)
+        bytes_per_pg = int(pool.size_bytes) // int(pool.pg)
         bytes_per_pg_s = b2ssize(bytes_per_pg)
         table.add_cell(bytes_per_pg_s, sorttable_customkey=str(bytes_per_pg))
 
-        obj_per_pg = int(pool.num_objects) // int(pool.pg_num)
+        obj_per_pg = int(pool.num_objects) // int(pool.pg)
         obj_per_pg_s = b2ssize(obj_per_pg, base=1000)
         table.add_cell(obj_per_pg_s, sorttable_customkey=str(obj_per_pg))
 
@@ -398,28 +398,67 @@ def show_pools_info(report, cluster):
     report.add_block(8, "Pool's stats:", table)
 
 
-def show_osd_info(report, cluster):
-    w_headers = ["weight<br>" + root.name for root in cluster.crush.roots]
-    table = html.HTMLTable(headers=["OSD",
-                                    "node",
-                                    "status",
-                                    "version [hash]",
-                                    "daemon<br>run",
-                                    "open<br>files",
-                                    "ip<br>conn",
-                                    "threads"] +
-                                    w_headers +
-                                   ["reweight",
-                                    "PG count",
-                                    "Storage tp",
-                                    "Storage<br>used",
-                                    "Storage<br>free",
-                                    "Storage<br>free %",
-                                    "Journal<br>colocated",
-                                    "Journal<br>on SSD",
-                                    "Journal<br>on file"])
+# class OSDInfo:
+#     id = None  # type: int
+#     node = None  # type: str
+#     status = None  # type: str
+#     version = None  # type: str
+#     hash = None  # type: str
+#     running = None  # type: bool
+#     open_files = None  # type: int
+#     ip_conn = None  # type: int
+#     threads = None  # type: int
+#     storage_type = None  # type: str
+#     weights = None  # type: Dict[str, float]
+#     reweight = None  # type: float
+#     pg_count = None  # type: Optional[int]
+#     used_space = None  # type; int
+#     free_space = None  # type: int
+#
+#     data_dev = None  # type: str
+#     data_dev_size = None  # type: str
+#     data_dev_tp = None  # type: str
+#     j_size = None  # type: int
+#     j_dev = None  # type: str
+#     j_dev_tp = None  # type: str
+#     j_on_file = None  # type: bool
+#     wal_size = None  # type: int
+#     wal_dev = None  # type: str
+#     wal_dev_tp = None  # type: str
+#     db_size = None  # type: int
+#     db_dev = None  # type: str
+#     db_dev_tp = None  # type: str
+#
+#
+# def get_osd_info(cluster: CephCluster, osd: CephOSD) -> OSDInfo:
+#     osd_i = OSDInfo()
+#     osd_i.id = osd.id
+#     osd_i.node = osd.host
+#     osd_i.status = osd.status
+#     osd_i.running = osd.daemon_runs
+#     osd_i.used_b = osd.used_space
+#             avail_b = osd.free_space
+#             avail_perc = osd.free_perc
+#     return osd_i
+#
 
-    for osd in cluster.osds:
+
+def show_osd_info(report, cluster):
+    # osds_info = [get_osd_info(cluster, osd) for osd in cluster.osds]  # type: List[OSDInfo]
+
+    w_headers = ["weight<br>" + root.name for root in cluster.crush.roots]
+
+    headers=["OSD", "node", "status", "version [hash]", "daemon<br>run", "open<br>files", "ip<br>conn", "threads"] + \
+             w_headers + ["reweight", "PG",
+             "Type",  # bluestore or filestore
+             "Storage<br>dev type", "Storage<br>used", "Storage<br>free %",
+             "Journal<br>or wal<br>colocated", "Journal<br>or wal<br>dev type", "Journal<br>or wal<br>on file",
+             "Journal<br>or wal<br>size",
+             "DB<br>colocated", "DB<br>dev type", "DB<br>size"]
+
+    table = html.HTMLTable(headers)
+
+    for osd in sorted(cluster.osds, key=lambda x: x.id):
         if osd.daemon_runs is None:
             daemon_msg = HTML_UNKNOWN
         elif osd.daemon_runs:
@@ -427,41 +466,16 @@ def show_osd_info(report, cluster):
         else:
             daemon_msg = html_fail('no')
 
-        if osd.data_stor_stats is not None:
-            used_b = osd.used_space
-            avail_b = osd.free_space
-            avail_perc = osd.free_perc
+        used_b = osd.used_space
+        avail_perc = osd.free_perc
 
-            if avail_perc < 20:
-                color = "red"
-            elif avail_perc < 40:
-                color = "yellow"
-            else:
-                color = "green"
-
-            avail_perc_str = H.font(avail_perc, color=color)
-
-            if osd.data_stor_stats.root_dev == osd.j_stor_stats.root_dev:
-                j_on_same_drive = html_fail("yes")
-            else:
-                j_on_same_drive = html_ok("no")
-
-            if osd.data_stor_stats.dev != osd.j_stor_stats.dev:
-                j_on_file = html_ok("no")
-            else:
-                j_on_file = html_fail("yes")
-
-            if osd.j_stor_stats.is_ssd:
-                j_on_ssd = html_ok("yes")
-            else:
-                j_on_ssd = html_fail("no")
+        if avail_perc < 20:
+            color = "red"
+        elif avail_perc < 40:
+            color = "yellow"
         else:
-            used_b = HTML_UNKNOWN
-            avail_b = HTML_UNKNOWN
-            avail_perc_str = HTML_UNKNOWN
-            j_on_same_drive = HTML_UNKNOWN
-            j_on_file = HTML_UNKNOWN
-            j_on_ssd = HTML_UNKNOWN
+            color = "green"
+        avail_perc_str = H.font(avail_perc, color=color)
 
         table.add_cell(str(osd.id))
         table.add_cell(osd.host.name)
@@ -502,20 +516,68 @@ def show_osd_info(report, cluster):
 
         table.add_cell(osd.storage_type)
 
+        disks = cluster.hosts[osd.host.name].disks
+        storage_devs = cluster.hosts[osd.host.name].storage_devs
+
+        data_drive_type = disks[osd.data_dev].tp
+        data_drive_type = (html_ok if data_drive_type in ('ssd', 'nvme') else lambda x: x)(data_drive_type)
+        table.add_cell(data_drive_type)
+
         if isinstance(used_b, str):
             table.add_cell(used_b, sorttable_customkey='0')
         else:
             table.add_cell(b2ssize(used_b, False), sorttable_customkey=used_b)
 
-        if isinstance(avail_b, str):
-            table.add_cell(avail_b, sorttable_customkey='0')
-        else:
-            table.add_cell(b2ssize(avail_b, False), sorttable_customkey=avail_b)
+        table.add_cell(avail_perc_str, sorttable_customkey=avail_perc)
 
-        table.add_cell(avail_perc_str)
-        table.add_cell(j_on_same_drive)
-        table.add_cell(j_on_ssd)
-        table.add_cell(j_on_file)
+        if osd.storage_type == 'filestore':
+            j_on_same_drive = html_ok("no") if osd.journal_dev != osd.data_dev else html_fail("yes")
+            j_on_file = html_ok("no") if osd.journal_partition != osd.data_partition else html_fail("yes")
+            j_drive_type = disks[osd.journal_dev].tp
+            j_drive_type = (html_ok if j_drive_type in ('ssd', 'nvme') else html_fail)(j_drive_type)
+
+            table.add_cell(j_on_same_drive)
+            table.add_cell(j_drive_type)
+            table.add_cell(j_on_file)
+
+            if j_on_same_drive:
+                j_size_s = '-'
+            else:
+                j_size = storage_devs[osd.journal_partition].size
+                j_size_s = b2ssize(j_size)
+                osd_sync = float(osd.config['filestore_max_sync_interval'])
+                j_size_s = j_size_s if j_size >= osd_sync * 100 * (1024 ** 2) else html_fail(j_size_s)
+            table.add_cell(j_size_s)
+        else:
+            assert osd.storage_type == 'bluestore'
+            wal_on_same_drive = html_ok("no") if osd.wal_dev != osd.data_dev else html_fail("yes")
+            wal_drive_type = disks[osd.wal_dev].tp
+            wal_drive_type = (html_ok if wal_drive_type in ('ssd', 'nvme') else html_fail)(wal_drive_type)
+
+            if osd.wal_partition not in (osd.db_partition, osd.data_partition):
+                wal_size = storage_devs[osd.wal_partition].size
+                wal_size = html_fail(str(wal_size)) if wal_size < 512 * 1024 * 1024 else str(wal_size)
+            else:
+                wal_size = '-'
+
+            table.add_cell(wal_on_same_drive)
+            table.add_cell(wal_drive_type)
+            table.add_cell('-')
+            table.add_cell(wal_size)
+
+            db_on_same_drive = html_ok("no") if osd.db_dev != osd.data_dev else html_fail("yes")
+            db_drive_type = disks[osd.db_dev].tp
+            db_drive_type = (html_ok if db_drive_type in ('ssd', 'nvme') else html_fail)(db_drive_type)
+            if osd.db_partition != osd.data_partition:
+                db_size = storage_devs[osd.db_partition].size
+                data_size = storage_devs[osd.data_partition].size
+                db_size = html_fail(str(db_size)) if db_size < data_size * 0.0095 else str(db_size)
+            else:
+                db_size = '-'
+
+            table.add_cell(db_on_same_drive)
+            table.add_cell(db_drive_type)
+            table.add_cell(db_size)
         table.next_row()
 
     report.add_block(10, "OSD's info:", table)
@@ -839,7 +901,7 @@ def parse_args(argv):
     p.add_argument("-w", '--overwrite', action='store_true',  help="Overwrite result folder data")
     p.add_argument("-p", "--pretty-html", help="Prettify index.html", action="store_true")
     p.add_argument("data_folder", help="Folder with data, or .tar.gz archive")
-    # p.add_argument("--profile", help="Profile report creation", action="store_true")
+    p.add_argument("--profile", help="Profile report creation", action="store_true")
 
     return p.parse_args(argv[1:])
 
@@ -866,12 +928,9 @@ def main(argv):
 
     logger.info("Generating report from %r to %r", opts.data_folder, opts.out)
 
-    # if opts.profile:
-    #     fd, profile_fname = tempfile.mktemp()
-    #     os.close(fd)
-    #     logger.info("Store profile info into %r", profile_fname)
-    #     prof = hotshot.Profile(profile_fname)
-    #     prof.start()
+    if opts.profile:
+        prof = cProfile.Profile()
+        prof.enable()
 
     if os.path.isfile(opts.data_folder):
         arch_name = opts.data_folder
@@ -970,14 +1029,12 @@ def main(argv):
         if remove_folder:
             shutil.rmtree(folder)
 
-    # if opts.profile:
-    #     prof.stop()
-    #     prof.close()
-    #
-    #     stats = hotshot.stats.load(profile_fname)
-    #     stats.strip_dirs()
-    #     stats.sort_stats('time', 'calls')
-    #     stats.print_stats(40)
+    if opts.profile:
+        prof.disable()  # type: ignore
+        s = io.StringIO()
+        ps = pstats.Stats(prof, stream=s).sort_stats('time', 'calls')
+        ps.print_stats(40)
+        print(s.getvalue())
 
 
 if __name__ == "__main__":

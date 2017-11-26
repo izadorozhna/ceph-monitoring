@@ -1,4 +1,4 @@
-.PHONY: mypy pylint pylint_e
+.PHONY: mypy pylint pylint_e prepare
 
 ALL_FILES=$(shell find ceph_monitoring/ -type f -name '*.py')
 # ALL_FILES=ceph_monitoring/collect_info.py
@@ -14,3 +14,6 @@ pylint:
 
 pylint_e:
 		python3 -m pylint -E '${PYLINT_FMT}' --rcfile=pylint.rc ${ALL_FILES}
+
+prepare:
+		bash prepare.sh

@@ -40,10 +40,10 @@ def plot_img(func: Callable, *args, **kwargs) -> Any:
     tl = kwargs.pop('tight_layout', True)
 
     if kwargs.pop('ax', False):
-        fig, ax = seaborn.plt.subplots(figsize=fs, tight_layout=tl)
+        fig, ax = pyplot.subplots(figsize=fs, tight_layout=tl)
         func(ax, *args, **kwargs)
     else:
-        fig = seaborn.plt.figure(figsize=fs, tight_layout=tl)
+        fig = pyplot.figure(figsize=fs, tight_layout=tl)
         func(fig, *args, **kwargs)
 
     return get_img(fig)
