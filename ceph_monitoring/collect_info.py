@@ -425,7 +425,7 @@ class CephDataCollector(Collector):
                         assert stor_type == 'bluestore'
                         data_dev = devs_for_osd[osd.id]["block_dev"]
                         db_dev = devs_for_osd[osd.id].get('block.db_dev', data_dev)
-                        wal_dev = devs_for_osd[osd.id].get('block.wal_dev', data_dev)
+                        wal_dev = devs_for_osd[osd.id].get('block.wal_dev', db_dev)
                         osd_dev_conf = {'data': data_dev,
                                         'wal': wal_dev,
                                         'db': db_dev,

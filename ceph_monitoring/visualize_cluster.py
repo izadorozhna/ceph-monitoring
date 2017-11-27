@@ -421,7 +421,7 @@ def show_osd_info(report, cluster):
     if has_bs and has_fs:
         headers.append("Type")
 
-    headers.extend(["Storage<br>dev type", "Storage<br>used", "Storage<br>free %"])
+    headers.extend(["Storage<br>dev type", "Storage<br>total", "Storage<br>free %"])
 
     if has_fs and has_bs:
         headers.extend(["Journal<br>or wal<br>colocated", "Journal<br>or wal<br>dev type",
@@ -445,17 +445,6 @@ def show_osd_info(report, cluster):
         else:
             daemon_msg = html_fail('no')
 
-        used_b = osd.used_space
-        avail_perc = osd.free_perc
-
-        if avail_perc < 20:
-            color = "red"
-        elif avail_perc < 40:
-            color = "yellow"
-        else:
-            color = "green"
-        avail_perc_str = H.font(avail_perc, color=color)
-
         table.add_cell(str(osd.id))
         table.add_cell(osd.host.name)
         table.add_cell(html_ok("up") if osd.status == 'up' else html_fail("down"))
@@ -477,6 +466,10 @@ def show_osd_info(report, cluster):
             table.add_cell("-")
             table.add_cell("-")
 
+        disks = cluster.hosts[osd.host.name].disks
+        storage_devs = cluster.hosts[osd.host.name].storage_devs
+        total_b = int(storage_devs[osd.data_partition].size)
+
         for root in cluster.crush.roots:
             nodes = cluster.crush.find_nodes([('root', root.name), ('osd', "osd.{0}".format(osd.id))])
             if not nodes:
@@ -484,9 +477,13 @@ def show_osd_info(report, cluster):
             elif len(nodes) > 1:
                 table.add_cell("+")
             else:
-                table.add_cell("{0:.2f}".format(nodes[0].weight))
+                expected_weight = float(total_b) / (1024 ** 4)
+                weight = "{0:.2f}".format(nodes[0].weight)
+                weight_s = html_fail(weight) if abs(1 - (nodes[0].weight / expected_weight)) > .2 else weight
+                table.add_cell(weight_s)
 
-        table.add_cell("{0:.2f}".format(osd.reweight))
+        rew = "{0:.2f}".format(osd.reweight)
+        table.add_cell(html_fail(rew) if abs(osd.reweight - 1.0) > .01 else rew)
 
         if osd.pg_count is None:
             table.add_cell(HTML_UNKNOWN, sorttable_customkey=0)
@@ -496,18 +493,21 @@ def show_osd_info(report, cluster):
         if has_fs and has_bs:
             table.add_cell(osd.storage_type)
 
-        disks = cluster.hosts[osd.host.name].disks
-        storage_devs = cluster.hosts[osd.host.name].storage_devs
-
         data_drive_type = disks[osd.data_dev].tp
         data_drive_type = (html_ok if data_drive_type in ('ssd', 'nvme') else lambda x: x)(data_drive_type)
         table.add_cell(data_drive_type)
 
-        if isinstance(used_b, str):
-            table.add_cell(used_b, sorttable_customkey='0')
-        else:
-            table.add_cell(b2ssize(used_b, False), sorttable_customkey=used_b)
+        avail_perc = osd.free_perc
 
+        if avail_perc < 20:
+            color = "red"
+        elif avail_perc < 40:
+            color = "yellow"
+        else:
+            color = "green"
+        avail_perc_str = H.font(avail_perc, color=color)
+
+        table.add_cell(b2ssize(total_b, False), sorttable_customkey=total_b)
         table.add_cell(avail_perc_str, sorttable_customkey=avail_perc)
 
         if osd.storage_type == 'filestore':
