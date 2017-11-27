@@ -540,8 +540,9 @@ def show_osd_info(report, cluster):
             wal_drive_type = (html_ok if wal_drive_type in ('ssd', 'nvme') else html_fail)(wal_drive_type)
 
             if osd.wal_partition not in (osd.db_partition, osd.data_partition):
-                wal_size = storage_devs[osd.wal_partition].size
-                wal_size = html_fail(str(wal_size)) if wal_size < 512 * 1024 * 1024 else str(wal_size)
+                wal_size = int(storage_devs[osd.wal_partition].size)
+                wal_size_s = b2ssize(wal_size) + 'B'
+                wal_size = html_fail(wal_size_s) if wal_size < 512 * 1024 * 1024 else wal_size_s
             else:
                 wal_size = '-'
 
@@ -555,9 +556,10 @@ def show_osd_info(report, cluster):
             db_drive_type = disks[osd.db_dev].tp
             db_drive_type = (html_ok if db_drive_type in ('ssd', 'nvme') else html_fail)(db_drive_type)
             if osd.db_partition != osd.data_partition:
-                db_size = storage_devs[osd.db_partition].size
-                data_size = storage_devs[osd.data_partition].size
-                db_size = html_fail(str(db_size)) if db_size < data_size * 0.0095 else str(db_size)
+                db_size = int(storage_devs[osd.db_partition].size)
+                data_size = int(storage_devs[osd.data_partition].size)
+                db_sz_s = b2ssize(db_size) + "B"
+                db_size = html_fail(db_sz_s) if db_size < data_size * 0.0095 else db_sz_s
             else:
                 db_size = '-'
 

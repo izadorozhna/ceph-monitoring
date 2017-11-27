@@ -384,9 +384,9 @@ class CephDataCollector(Collector):
             for part_info in dev_info.get('partitions', []):
                 if "cluster" in part_info and part_info.get('type') == 'data':
                     osd_id = int(part_info['whoami'])
-                    # TODO: extend with extra attrs for blustore
                     devs_for_osd[osd_id] = {attr: part_info[attr]
-                                            for attr in ("block_dev", "journal_dev", "path")
+                                            for attr in ("block_dev", "journal_dev", "path",
+                                                         "block.db_dev", "block.wal_dev")
                                             if attr in part_info}
 
         for osd in self.node.osds:
@@ -424,8 +424,8 @@ class CephDataCollector(Collector):
                     else:
                         assert stor_type == 'bluestore'
                         data_dev = devs_for_osd[osd.id]["block_dev"]
-                        db_dev = data_dev
-                        wal_dev = data_dev
+                        db_dev = devs_for_osd[osd.id].get('block.db_dev', data_dev)
+                        wal_dev = devs_for_osd[osd.id].get('block.wal_dev', data_dev)
                         osd_dev_conf = {'data': data_dev,
                                         'wal': wal_dev,
                                         'db': db_dev,
