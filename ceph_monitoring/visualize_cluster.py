@@ -863,8 +863,27 @@ def show_osd_pool_PG_distribution(report, cluster):
         report.add_block(6, "PG copy per OSD: No pg dump data. Probably too many PG", "")
         return
 
-    pools = sorted(cluster.sum_per_pool)
-    table = html.HTMLTable(headers=["OSD/pool"] + list(pools) + ['sum'])
+    pools_order_t = sorted((-count, name) for name, count in cluster.sum_per_pool.items())
+    # pools = sorted(cluster.sum_per_pool)
+    pools = [name for _, name in pools_order_t]
+
+    name_headers = []
+    for name in pools:
+        if len(name) > 10:
+            parts = name.split(".")
+            best_idx = 0
+            best_delta = len(name) + 1
+            for idx in range(len(parts)):
+                sz1 = len(".".join(parts[:idx]))
+                sz2 = len(".".join(parts[idx:]))
+                if abs(sz2 - sz1) < best_delta:
+                    best_idx = idx
+                    best_delta = abs(sz2 - sz1)
+            if best_idx != 0 and best_idx != len(parts):
+                name = ".".join(parts[:best_idx]) + '.' + '<br>' + ".".join(parts[best_idx:])
+        name_headers.append(name)
+
+    table = html.HTMLTable(headers=["OSD/pool"] + name_headers + ['sum'])
 
     for osd_id, row in sorted(cluster.osd_pool_pg_2d.items()):
         data = [osd_id] + [row.get(pool_name, 0) for pool_name in pools] + [cluster.sum_per_osd[osd_id]]

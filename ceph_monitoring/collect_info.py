@@ -601,6 +601,7 @@ class NodeCollector(Collector):
 
     def collect_interfaces_info(self) -> None:
         interfaces = {}
+        unknown_speed = []
         for is_phy, dev in get_host_interfaces(self.node):
             interface = {'dev': dev, 'is_phy': is_phy}
             interfaces[dev] = interface
@@ -637,8 +638,11 @@ class NodeCollector(Collector):
                         speed = int(float(speed.replace(name, '')) * mult)
                         break
                 else:
-                    logger.warning("Node %s - can't transform %s interface speed %r to Bps",
-                                   self.node.name, dev, speed)
+                    if speed == 'Unknown!':
+                        unknown_speed.append(dev)
+                    else:
+                        logger.warning("Node %s - can't transform %s interface speed %r to Bps",
+                                       self.node.name, dev, speed)
 
                 if isinstance(speed, int):
                     interface['speed'] = speed
@@ -646,6 +650,8 @@ class NodeCollector(Collector):
                     interface['speed_s'] = speed
 
         self.save('interfaces', 'json', 0, json.dumps(interfaces))
+        if unknown_speed:
+            logger.warning("Can't detect speed for interface(s): %s", ",".join(unknown_speed))
 
 
 class LoadCollector(Collector):
@@ -763,55 +769,44 @@ def collect(storage: IStorageNNP, opts: Any, executor: Executor) -> None:
                 ip, ssh_ip = line.split()
                 ip_mapping[ip] = ssh_ip
 
-    nmap = {}
-
-    inventory = {}
-    explicit_nodes = open(opts.inventory).read().splitlines() if opts.inventory else []
-    for line in explicit_nodes + opts.node:
-        line = line.strip()
-        if line:
-            if ':' in line:
-                name, roles_s = line.split(":")
-                roles = [role.strip() for role in roles_s.split(",")]
-            else:
-                name = line
-                roles = set()
-            inventory[name] = roles
-
-    for node_name_or_ip, roles in inventory.items():
-        if node_name_or_ip:
-            try:
-                ipaddress.ip_address(node_name_or_ip)
-            except ValueError:
-                ip = socket.gethostbyname(node_name_or_ip)
-                hostname = node_name_or_ip
-            else:
-                ip = node_name_or_ip
-                hostname = None
-                if not opts.dont_rev_resolve:
-                    try:
-                        hostname = socket.gethostbyaddr(node_name_or_ip)[0]
-                    except:
-                        pass
-
-            node = nmap.setdefault(ip, Node(ip, hostname))
-            node.roles.update(roles)
-
     if not opts.no_detect:
         detect_nodes = discover_nodes(opts, ip_mapping)
         all_nodes_dct = dict((node.ip, node) for node in detect_nodes)
     else:
         all_nodes_dct = {}
 
-    for node in nmap.values():
-        if node.ip not in all_nodes_dct:
-            all_nodes_dct[node.ip] = node
+    for node_name_or_ip in opts.node:
+        try:
+            ipaddress.ip_address(node_name_or_ip)
+        except ValueError:
+            ip = socket.gethostbyname(node_name_or_ip)
+            hostname = node_name_or_ip
         else:
-            logger.warning("Node %s present in both inventory and in detection results. Inventory ignored", node.ip)
+            ip = node_name_or_ip
+            hostname = None
+            if not opts.dont_rev_resolve:
+                try:
+                    hostname = socket.gethostbyaddr(node_name_or_ip)[0]
+                except:
+                    pass
+        all_nodes_dct.setdefault(ip, Node(ip, hostname))
 
     ips, nodes = zip(*all_nodes_dct.items())
 
     logger.info("Found %s hosts in total", len(nodes))
+
+    nodes_per_type = {}
+    no_role = []
+    for node in nodes:
+        for role in node.roles:
+            nodes_per_type.setdefault(role, []).append(node.name)
+        if not node.roles:
+            no_role.append(node.name)
+
+    for role, role_nodes in sorted(nodes_per_type.items()):
+        logger.info("Found %s nodes of role %s: %s", len(role_nodes), role, ",".join(sorted(role_nodes)))
+    if no_role:
+        logger.info("Found %s nodes without roles: %s", len(no_role), ",".join(sorted(no_role)))
 
     good_hosts = set(get_sshable_hosts(ips, ssh_opts))
     bad_hosts = set(ips) - good_hosts
@@ -947,13 +942,11 @@ def parse_args(argv: List[str]) -> Any:
     p.add_argument("--no-detect", action="store_true", help="Don't detect nodes. Inventory must be provided")
     p.add_argument("-g", "--save-to-git", metavar="DIR", help="Commit into git repo, cloned to folder")
     p.add_argument("-G", "--git-push", metavar="DIR", help="Commit into git repo, cloned to folder and run 'git push'")
-    p.add_argument("-i", "--inventory", metavar="FILE",
-                   help="File with node names/addrs in formal - ip_or_name[:role[,role..]]")
     p.add_argument("-I", "--node", nargs='+', default=[],
-                   help="pass additional nodes from cli. ip_or_name[:role[,role..]]")
+                   help="Pass additional nodes from cli. ip_or_name[,ip_or_name...]")
     p.add_argument("--ip-mapping", metavar='FILE',
                    help="File, which maps node ip to sshable ip of same node. Use if sshd don't listen on ceph " +
-                        "public ip or in other cases")
+                        "public ip or in other cases. Format: node_ceph_public_ip node_sshd_ip\\n... ")
     p.add_argument("-j", "--no-pretty-json", action="store_true", help="Don't prettify json data")
     p.add_argument("-l", "--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
                    default=None, help="Console log level")
