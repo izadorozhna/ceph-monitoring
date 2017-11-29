@@ -256,7 +256,9 @@ class CephDataCollector(Collector):
         Collector.__init__(self, *args, **kwargs)
         opt = self.opts.ceph_extra + " " if self.opts.ceph_extra else ""
         self.ceph_cmd = "ceph {0}--format json ".format(opt)
+        self.ceph_cmd_txt = "ceph {0} ".format(opt)
         self.rados_cmd = "rados {0}--format json ".format(opt)
+        self.rados_cmd_txt = "rados {0} ".format(opt)
 
     def collect(self, collect_roles_restriction: List[str]) -> None:
         if 'mon' in collect_roles_restriction:
@@ -335,6 +337,15 @@ class CephDataCollector(Collector):
 
             self.save_output("default_config", self.ceph_cmd + "--show-config", 'txt')
             self.save_output("rados_df", self.rados_cmd + "df", 'json')
+            self.save_output("rados_df", self.rados_cmd_txt + "df", 'txt')
+            self.save_output("ceph_s", self.ceph_cmd_txt + "-s", 'txt')
+            self.save_output("ceph_osd_dump", self.ceph_cmd_txt + "osd dump", 'txt')
+            self.save_output("time_sync_status", self.ceph_cmd_txt + 'time-sync-status', 'json')
+            self.save_output("report", self.ceph_cmd_txt + 'report', 'json')
+            self.save_output("osd_utilization", self.ceph_cmd_txt + 'osd utilization', 'txt')
+            self.save_output("osd_blocked_by", self.ceph_cmd_txt + "osd blocked_by", "txt")
+            self.save_output("node_ls", self.ceph_cmd_txt + "node ls", "json")
+            self.save_output("features", self.ceph_cmd_txt + "features", 'json')
 
             with tempfile.NamedTemporaryFile() as fd:
                 code, data = run_with_code(self.ceph_cmd + "osd getcrushmap -o " + fd.name)

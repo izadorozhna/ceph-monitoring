@@ -5,7 +5,7 @@ How to collect data:
 --------------------
 On ceph cluster:
 
-* Only Hammer(0.94) and more resent versions of ceph are supported
+* Only Jewel(10) and more resent versions of ceph are supported, for older ceph see 'master' branch
 * ssh to any node, which has ceph access (controller/compute/osd)
 * Passwordless ssh access need to be setup to all required ceph nodes. If you key are encrypted you need to decrypt it,
   put decrypted key as default ~/.ssh/id_rsa file, run tool and then remove decrypted key. Usually you can
