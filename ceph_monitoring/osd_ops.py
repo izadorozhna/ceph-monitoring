@@ -1,36 +1,10 @@
 import sys
-import glob
-import json
-import os.path
+import pathlib
 import itertools
 import collections
-from pprint import pprint
-from typing import Set, Tuple, Dict, List, Any, Iterator
+from typing import Set, Tuple, Dict, List, Iterator
 
-
-def main():
-    num_ops = collections.defaultdict(int)
-    num_evt_per_tp = collections.defaultdict(lambda: collections.defaultdict(int))
-
-    names = glob.glob(os.path.join(sys.argv[1], "perf_monitoring/*ceph-osd*/ceph.osd*.historic_js.json"))
-    all_loaded = {name: json.load(open(name)) for name in names}
-    show_all_ops_types(all_loaded)
-    # import IPython
-    # IPython.embed()
-    exit(1)
-        # for dct in curr:
-        #     for op in dct['Ops']:
-        #         tp = op['description'].split("(", 1)[0]
-        #         num_ops[tp] += 1
-        #         evt_mp = num_evt_per_tp[tp]
-        #         idx = 1 if tp in ('osd_repop', 'osd_repop_reply') else 2
-        #         for evt in op['type_data'][idx]:
-        #             evt_mp[evt['event']] += 1
-
-    # pprint.pprint(num_ops)
-    # pprint.pprint(num_evt_per_tp)
-
-    find_deps2(all_loaded, "osd_op")
+from cephlib.sensors_rpc_plugin import CephOp
 
 
 def find_closest_pars(pairs: Set[Tuple[str, str]]) -> Set[Tuple[str, str]]:
@@ -51,6 +25,17 @@ def find_closest_pars(pairs: Set[Tuple[str, str]]) -> Set[Tuple[str, str]]:
             close_pairs.add((e1, e2))
 
     return close_pairs
+
+ALL_STAGES = ['queued_for_pg', 'reached_pg', 'started', 'op_commit', 'sub_op_commit_rec', 'op_applied',
+              'commit_sent', 'done']
+
+prev_op = {'commit_sent': 'sub_op_commit_rec',
+           'done': 'commit_sent',
+           'op_applied': 'op_commit',
+           'op_commit': 'started',
+           'reached_pg': 'queued_for_pg',
+           'started': 'reached_pg',
+           'sub_op_commit_rec': 'started'}
 
 
 def detect_order(pairs: Set[Tuple[str, str]]) -> Iterator[Tuple[str, List[str]]]:
@@ -95,72 +80,95 @@ def get_uniq_evt_sets_counts(evts: List[Tuple[str, ...]]) -> Dict[Tuple[str], in
     return uniq
 
 
-def show_all_ops_types(all_loaded: Dict[str, Any]):
-    res = collections.defaultdict(int)
-    for dt in all_loaded.values():
-        for dct in dt:
-            try:
-                lst = dct['Ops']
-            except:
-                lst = dct
+def find_deps(ops: List[CephOp]):
+    # j depend on i,  i always appears before j
+    dependents = {(i, j) for i in CephOp.all_stages for j in CephOp.all_stages if i != j and 'initiated' not in (i, j)}
+    all_found_stages = set()
 
-            for op in lst:
-                op_tp = op['description'].split("(", 1)[0]
-                stps = op['description'].split()[-2]
-                evts = tuple(sorted(get_events_for_op(op['type_data'][-1])))
-                res[(op_tp, stps, evts)] += 1
-    pprint(dict(res.items()))
+    for op in ops:
+        prev_evts = []
+        for curr_evt, _ in op.iter_events():
+            for prev_evt in prev_evts:
+                try:
+                    # prev_evt appears before curr_evt, so prev_evt can't depend on curr_evt
+                    dependents.remove((curr_evt, prev_evt))
+                except KeyError:
+                    pass
+            prev_evts.append(curr_evt)
+            all_found_stages.add(curr_evt)
+
+    filtered_deps = set()
+    for i, j in dependents:
+        if i in all_found_stages and j in all_found_stages:
+            filtered_deps.add((i, j))
+
+    all_deps = {op: [] for op in all_found_stages}
+    for i, j in filtered_deps:
+        all_deps[i].append(j)
+
+    closest_pairs = list(find_closest_pars(filtered_deps))
+    prev_stage = dict((j, i) for (i, j) in closest_pairs)
+
+    # import pprint
+    # pprint.pprint(prev_stage)
+    # pprint.pprint(all_found_stages)
+
+    closest_pairs.sort(key=lambda x: -len(all_deps[x[0]]))
+    for p1, p2 in closest_pairs:
+        print("{} => {}".format(p1, p2))
 
 
-def find_deps2(all_loaded: Dict[str, Any], op_type: str):
-    ops = []
-    evts = []
-    for dt in all_loaded.values():
-        for dct in dt:
-            for op in dct['Ops']:
-                if op['description'].split("(", 1)[0] == op_type:
-                    ops.append(op)
-                    evts.append(get_events_for_op(op['type_data'][-1]))
+def iter_ceph_ops(fd):
+    data = fd.read()
+    offset = 0
+    while offset < len(data):
+        op, offset = CephOp.unpack(data, offset)
+        yield op
 
-    uniq = get_uniq_evt_sets_counts(evts)
-    uniq = list(sorted(uniq.items(), key=lambda x: -x[1]))
 
-    for idx, (evt_set, _) in enumerate(uniq[:1]):
-        all_evts = set()  # type: Set[str]
-        may_be_dependent = set()  # type: Set[Tuple[str, str]]
-        evts_without_dup = [names for names in evts if len(set(names)) == len(names)]
-        primary_evts = [evt for evt in evts_without_dup if set(evt) == set(evt_set)]
+def calc_stages_time(op: CephOp) -> Dict[str, int]:
+    all_ops = dict(op.iter_events())
+    res = {}
+    for name, vl in all_ops.items():
+        if vl != 0:
+            curr = name
+            dtime = vl
+            while curr in prev_op:
+                if prev_op[curr] in all_ops:
+                    dtime = vl - all_ops[prev_op[curr]]
+                    break
+                curr = prev_op[curr]
+            assert dtime >= 0, all_ops
+            res[name] = dtime
+    return res
 
-        if not primary_evts:
-            continue
 
-        for names in primary_evts:
-            all_evts.update(names)
-            may_be_dependent.update(itertools.combinations(names, 2))
+def main():
+    all_ops = []
+    for name in pathlib.Path(sys.argv[1]).glob("perf_monitoring/*/ceph.osd*.historic.bin"):
+        all_ops.extend(iter_ceph_ops(name.open("rb")))
 
-        always_ordered = set()
-        for e1, e2 in sorted(may_be_dependent):
-            if (e2, e1) not in may_be_dependent:
-                always_ordered.add((e1, e2))
+    # find_deps(all_ops)
+    stimes = {}
+    for op in all_ops:
+        for name, vl in calc_stages_time(op).items():
+            stimes.setdefault(name, []).append(vl)
 
-        try:
-            closest = find_closest_pars(always_ordered)
-        except:
-            print(may_be_dependent, always_ordered)
-            raise
 
-        for e1, e2 in closest:
-            if (e2, e1) in closest:
-                print((e1, e2))
+    for name, vals in sorted(stimes.items()):
+        print(f"{name:20s} {sum(vals) // len(vals):>10d} {len(vals):>10d}")
 
-        print("digraph G{} {{".format(idx))
-        for evt, deps in detect_order(closest):
-            for dep in deps:
-                print("    {} -> {};".format(evt, dep))
-            # sd = ",".join(deps) if deps else "STOP"
-            # print("{} => {{{}}}".format(evt, sd))
-        print("}")
+    import seaborn
+    from matplotlib import pyplot
+
+    names, vals = zip(*stimes.items())
+    ax = seaborn.boxplot(data=vals)
+    ax.set_xticklabels(names, size=14, rotation=20)
+    ax.set_yscale("log")
+    pyplot.show()
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    exit(main())

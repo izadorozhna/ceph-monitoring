@@ -205,7 +205,7 @@ class Report:
 
         try:
             if pretty_html:
-                import BeautifulSoup
+                from bs4 import BeautifulSoup
                 index = BeautifulSoup.BeautifulSoup(index).prettify()
         except:
             pass
@@ -1018,9 +1018,9 @@ def main(argv):
             show_osd_pg_histo(report, cluster)
             report.next_line()
 
-            if cluster.has_performance_data:
-                show_osd_load(report, cluster)
-                report.next_line()
+            # if cluster.has_performance_data:
+            #     show_osd_load(report, cluster)
+            #     report.next_line()
 
             if cluster.has_performance_data:
                 show_osd_lat_heatmaps(report, cluster)

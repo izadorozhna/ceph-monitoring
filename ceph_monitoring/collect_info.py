@@ -574,7 +574,7 @@ class NodeCollector(Collector):
                 if name.startswith(name_prefix):
                     del bdevs_info[name]
 
-        hdparm_exists, smartctl_exists, nvme_exists = self.node.rpc.fs.binarys_exists(['hdparm', 'smartctl', 'nvme'])
+        hdparm_exists, smartctl_exists, nvme_exists = self.node.rpc.fs.binarys_exists(['hdparm', 'smartctl', 'nvme'])   
 
         missing = []
         if not hdparm_exists:
@@ -677,7 +677,7 @@ class LoadCollector(Collector):
             "block-io": {},
             "net-io": {},
             "vm-io": {},
-            "ceph": {"sources": ['historic_js', 'perf_dump'], "osds": "all"}  # 'historic', 'perf_dump'
+            "ceph": {"sources": ['historic', 'perf_dump'], "osds": "all"}
         }
 
         # self.results = {}
@@ -706,9 +706,6 @@ class LoadCollector(Collector):
                 if metric == 'historic':
                     self.storage.put_raw(data, "perf_monitoring/{0}/{1}.bin".format(self.node.fs_name, sensor_path))
                 elif metric == 'perf_dump':
-                    self.storage.put_raw(data, "perf_monitoring/{0}/{1}.json".format(self.node.fs_name, sensor_path))
-                else:
-                    assert metric == 'historic_js', sensor_path
                     self.storage.put_raw(data, "perf_monitoring/{0}/{1}.json".format(self.node.fs_name, sensor_path))
 
 

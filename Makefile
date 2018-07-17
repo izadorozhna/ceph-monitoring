@@ -1,7 +1,8 @@
 .PHONY: mypy pylint pylint_e prepare archive
 
-ALL_FILES=$(shell find ceph_monitoring/ -type f -name '*.py')
+# ALL_FILES=$(shell find ceph_monitoring/ -type f -name '*.py')
 # ALL_FILES=ceph_monitoring/collect_info.py
+ALL_FILES=ceph_monitoring/cluster.py ceph_monitoring/visualize_cluster.py ceph_monitoring/osd_ops.py ceph_monitoring/hw_info.py ceph_monitoring/resource_usage.py
 STUBS="stubs:../venvs/wally/lib/python3.5/site-packages/"
 
 mypy:

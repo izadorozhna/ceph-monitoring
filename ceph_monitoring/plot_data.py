@@ -1,21 +1,23 @@
 import logging
 import warnings
 from io import BytesIO
-from typing import Callable, Any
+from typing import Callable, Any, AnyStr
+from typing_extensions import Protocol
 
 import numpy
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
     import seaborn
 
+import networkx
 from matplotlib import pyplot
 
-from .cluster import NO_VALUE
-from .perf_parser import (load_jsops_from_fd, OSD_OP_PRIMARY_STEPS, OSD_OP_PRIMARY_STEPS_PARENT,
-                          STAGES_PRINTABLE_NAMES, OSD_OP_PRIMARY_FSTEPS)
-from .resource_usage import get_resource_usage
-
 from cephlib.plot import plot_histo, hmap_from_2d, plot_hmap_with_histo
+
+from .cluster import NO_VALUE, CephCluster
+from .osd_ops import calc_stages_time, iter_ceph_ops, ALL_STAGES
+from .perf_parser import STAGES_PRINTABLE_NAMES
+from .resource_usage import get_resource_usage
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -24,7 +26,13 @@ logger = logging.getLogger('cephlib.report')
 
 # ----------------------------------------------------------------------------------------------------------------------
 
-def get_img(plt, format='svg'):
+
+class ReportProto(Protocol):
+    def add_block(self, width: int, name: str, img: AnyStr):
+        ...
+
+
+def get_img(plt: Any, format: str = 'svg') -> AnyStr:
     bio = BytesIO()
     if format in ('png', 'jpg'):
         plt.savefig(bio, format=format)
@@ -49,34 +57,20 @@ def plot_img(func: Callable, *args, **kwargs) -> Any:
     return get_img(fig)
 
 
-# def get_heatmap_img(heatmap, bins_ranges, clear=True, figsize=None):
-#     labels = ["{:.2e}".format((beg + end) / 2) for beg, end in bins_ranges]
-#     if figsize:
-#         _, ax = seaborn.plt.subplots(figsize=figsize)
-#     else:
-#         ax = None
-#     ax = seaborn.heatmap(heatmap[:,::-1].T, xticklabels=False, cmap="Blues", ax=ax)
-#     ax.set_yticklabels(labels, rotation='horizontal')
-#     res = get_img(seaborn.plt)
-#     if clear:
-#         seaborn.plt.clf()
-#     return res
-#
-#
-def show_osd_used_space_histo(report, cluster, min_osd=3):
+def show_osd_used_space_histo(report: ReportProto, cluster: CephCluster, min_osd: int = 3):
     vals = [(100 - osd.free_perc) for osd in cluster.osds if osd.free_perc is not None]
     if len(vals) >= min_osd:
         img = plot_img(plot_histo, numpy.array(vals), left=0, right=100, ax=True)
         report.add_block(6, "OSD used space (GiB)", img)
 
 
-def show_osd_pg_histo(report, cluster):
+def show_osd_pg_histo(report: ReportProto, cluster: CephCluster):
     vals = numpy.array([osd.pg_count for osd in cluster.osds if osd.pg_count is not None])
     img = plot_img(plot_histo, vals, left=min(vals) * 0.9, right=max(vals) * 1.1, ax=True)
     report.add_block(6, "OSD PG", img)
 
 
-def show_osd_load(report, cluster, max_xbins=25):
+def show_osd_load(report: ReportProto, cluster: CephCluster, max_xbins: int = 25):
     logger.info("Plot osd load")
     usage = get_resource_usage(cluster)
 
@@ -89,7 +83,7 @@ def show_osd_load(report, cluster, max_xbins=25):
     else:
         report.add_block(6, "OSD data write (MiBps)", img)
 
-    seaborn.plt.clf()
+    pyplot.clf()
     data, chunk_ranges = hmap_from_2d(usage.ceph_data_dev_wio, max_xbins=max_xbins)
     img = plot_img(plot_hmap_with_histo, data, chunk_ranges)
     msg = "OSD data/journal write IOPS" if usage.colocated_journals else "OSD data write IOPS"
@@ -110,13 +104,13 @@ def show_osd_load(report, cluster, max_xbins=25):
         img = plot_img(plot_hmap_with_histo, data, chunk_ranges)
         report.add_block(6, "OSD journal write IOPS", img)
 
-        seaborn.plt.clf()
+        pyplot.clf()
         data, chunk_ranges = hmap_from_2d(usage.ceph_j_dev_qd, max_xbins=max_xbins)
         img = plot_img(plot_hmap_with_histo, data, chunk_ranges)
         report.add_block(6, "OSD journal QD", img)
 
 
-def show_osd_lat_heatmaps(report, cluster, max_xbins=25):
+def show_osd_lat_heatmaps(report: ReportProto, cluster: CephCluster, max_xbins: int = 25):
     logger.info("Plot osd latency heatmaps")
     for field, header in (('journal_latency', "Journal latency, ms"),
                           ('apply_latency',  "Apply latency, ms"),
@@ -124,9 +118,6 @@ def show_osd_lat_heatmaps(report, cluster, max_xbins=25):
 
         if field not in cluster.osds[0].osd_perf:
             continue
-
-        import IPython
-        IPython.embed()
 
         min_perf_len = min(osd.osd_perf[field].size for osd in cluster.osds)
 
@@ -141,47 +132,40 @@ def show_osd_lat_heatmaps(report, cluster, max_xbins=25):
             report.add_block(6, header, img)
 
 
-def show_osd_ops_boxplot(report, cluster):
-    # logger.warning("show_osd_ops_boxplot skipped!")
-
-    steps = OSD_OP_PRIMARY_STEPS
-    fsteps = OSD_OP_PRIMARY_FSTEPS
-    ops = []
+def show_osd_ops_boxplot(report: ReportProto, cluster: CephCluster):
     logger.info("Loading ceph historic ops data")
+    ops = []
+
     for osd in cluster.osds:
-        fd = cluster.storage.raw.get_fd(osd.historicjs_ops_storage_path, mode='rt')
-        ops.extend(load_jsops_from_fd(fd, steps))
+        fd = cluster.storage.raw.get_fd(osd.historic_ops_storage_path, mode='rb')
+        ops.extend(iter_ceph_ops(fd))
+
+    stimes = {}
+    for op in ops:
+        for name, vl in calc_stages_time(op).items():
+            stimes.setdefault(name, []).append(vl)
+
     logger.info("Plotting historic boxplots")
 
-    stage_times_map = {name: numpy.array([op[name] for op in ops]) / 1000. for name in steps}
-    stage_times_map = {name: stage_times_map[name] - stage_times_map[parent]
-                       for name, parent in OSD_OP_PRIMARY_STEPS_PARENT.items()}
-
-    stage_times_map["sub_op_commit_rec"] = numpy.concatenate([stage_times_map["sub_op_commit_rec_0"],
-                                                              stage_times_map["sub_op_commit_rec_1"]])
-    del stage_times_map["sub_op_commit_rec_0"]
-    del stage_times_map["sub_op_commit_rec_1"]
+    stage_times_map = {name: numpy.array(values) / 1000. for name, values in stimes.items()}
 
     # cut upper 2%
     for arr in stage_times_map.values():
         numpy.clip(arr, 0, numpy.percentile(arr, 98), arr)
 
-    stage_names, stage_times = zip(*sorted(stage_times_map.items(), key=lambda x: fsteps.index(x[0])))
+    stage_names, stage_times = zip(*sorted(stage_times_map.items(), key=lambda x: ALL_STAGES.index(x[0])))
     pyplot.clf()
-    _, ax = pyplot.subplots(figsize=(12, 9))
+    plt, ax = pyplot.subplots(figsize=(12, 9))
 
-    ax.boxplot(stage_times, 0, '')
-    names = [STAGES_PRINTABLE_NAMES[name] for name in stage_names]
-    ax.set_xticklabels(names, rotation=35)
-    report.add_block(12, "Ceph OPS time", get_img(seaborn.plt))
+    seaborn.boxplot(data=stage_times, ax=ax)
+    ax.set_yscale("log")
+    ax.set_xticklabels([STAGES_PRINTABLE_NAMES[name] for name in stage_names], size=14, rotation=35)
+    report.add_block(12, "Ceph OPS time", get_img(plt))
     logger.info("Done")
 
 
-def plot_crush(report, cluster):
+def plot_crush(report: ReportProto, cluster: CephCluster):
     logger.info("Plot crushmap")
-
-    import networkx
-    import matplotlib.pyplot as plt
 
     G = networkx.DiGraph()
 
@@ -195,14 +179,7 @@ def plot_crush(report, cluster):
         G.add_edge("Child_%i" % i, "Grandchild_%i" % i)
         G.add_edge("Grandchild_%i" % i, "Greatgrandchild_%i" % i)
 
-    # write dot file to use with graphviz
-    # run "dot -Tpng test.dot >test.png"
-    # nx.write_dot(G,'test.dot')
-
-    # same layout using matplotlib with no labels
-    # plt.title('draw_networkx')
-    plt.clf()
+    pyplot.clf()
     pos = networkx.fruchterman_reingold_layout(G)
     networkx.draw(G, pos, with_labels=False, arrows=False)
-    # plt.savefig('nx_test.png')
-    report.add_block(4, "nodes", get_img(plt))
+    report.add_block(4, "nodes", get_img(pyplot))

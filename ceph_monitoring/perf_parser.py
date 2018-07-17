@@ -8,7 +8,7 @@ import numpy
 import seaborn
 seaborn.set()
 
-from cephlib.sensors_rpc_plugin import parse_ops_timings, CephOp
+from cephlib.sensors_rpc_plugin import CephOp
 from cephlib.plot import auto_edges
 
 

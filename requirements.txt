@@ -1,3 +1,8 @@
 ipaddr
 logging_tree
 ifparser
+pandas
+dataclasses
+typing_extensions
+networkx
+beautifulsoup4
