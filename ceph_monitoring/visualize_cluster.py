@@ -6,49 +6,46 @@ import pstats
 import shutil
 import bisect
 import logging
-import os.path
 import tempfile
 import cProfile
 import argparse
 import subprocess
 import collections
 import logging.config
-from typing import Dict, Optional, List
+from pathlib import Path
+from typing import Dict, Optional, List, Tuple, Any, Union, Set, Sequence
 
-from cephlib.storage import make_storage, make_attr_storage
+import numpy
+import dataclasses
+
+from cephlib.storage import make_storage, TypedStorage
+from cephlib.units import b2ssize, b2ssize_10
 
 from . import html
-from .hw_info import b2ssize, b2ssizei
-from .cluster import CephCluster, NO_VALUE, CephOSD
+from .cluster import (NO_VALUE, CephInfo, Cluster, OSDStoreType,
+                      FileStoreInfo, BlueStoreInfo, load_all, DiskLoad, OSDStatus)
 
 
 H = html.rtag
 logger = logging.getLogger('cephlib.report')
 
 
-class TypedStorage:
-    def __init__(self, storage):
-        self.txt = make_attr_storage(storage.sstorage, 'txt')
-        self.json = make_attr_storage(storage.sstorage, 'json')
-        self.xml = make_attr_storage(storage.sstorage, 'xml')
-        self.raw = storage
-
-    def substorage(self, path):
-        return self.__class__(self.raw.substorage(path))
-
-
 HTML_UNKNOWN = H.font('???', color="orange")
 
 
-def html_ok(text):
+def html_ok(text: str) -> html.TagProxy:
     return H.font(text, color="green")
 
 
-def html_fail(text):
+def html_fail(text: str) -> html.TagProxy:
     return H.font(text, color="red")
 
 
-def_color_map = [
+CMap = List[Tuple[float, Tuple[float, float, float]]]
+
+
+# replace with hvs mapping
+def_color_map: CMap = [
     (0.0, (0.500, 0.000, 1.000)),
     (0.1, (0.304, 0.303, 0.988)),
     (0.2, (0.100, 0.588, 0.951)),
@@ -63,12 +60,12 @@ def_color_map = [
 ]
 
 
-def val_to_color(val, color_map=def_color_map):
+def val_to_color(val: float, color_map: CMap = def_color_map) -> str:
     idx = [i[0] for i in color_map]
     assert idx == sorted(idx)
     pos = bisect.bisect_left(idx, val)
     if pos <= 0:
-        ncolor = color_map[0][1]
+        ncolor: Sequence[float] = color_map[0][1]
     elif pos >= len(idx):
         ncolor = color_map[-1][1]
     else:
@@ -81,37 +78,32 @@ def val_to_color(val, color_map=def_color_map):
         ncolor = [(v1 * dx2 + v2 * dx1)
                   for v1, v2 in zip(color1, color2)]
 
-    ncolor = [(channel * 255 + 255) / 2 for channel in ncolor]
-    return "#%02X%02X%02X" % tuple(map(int, ncolor))
+    ncolor = [int((channel * 255 + 255) / 2) for channel in ncolor]
+    return f"#{ncolor[0]:02X}{ncolor[1]:02X}{ncolor[2]:02X}"
 
 
 class Report:
-    def __init__(self, cluster_name, output_file):
+    def __init__(self, cluster_name: str, output_file_name: str) -> None:
         self.cluster_name = cluster_name
-        self.output_file = output_file
-        self.style = []
-        self.style_links = []
-        self.script_links = []
-        self.scripts = []
-        self.onload = []
-        self.divs = []
+        self.output_file_name = output_file_name
+        self.style: List[str] = []
+        self.style_links: List[str] = []
+        self.script_links: List[str] = []
+        self.scripts: List[str] = []
+        self.onload: List[str] = []
+        self.divs: List[Union[None, Tuple[float, str, str, str]]] = []
 
     def next_line(self):
-        self.add_block(None, None, None)
+        self.divs.append(None)
 
-    def add_block(self, weight, header, block_obj, menu_item=None):
+    def add_block(self, weight: float, header: str, block_obj: Any, menu_item: str = None):
         if menu_item is None:
             menu_item = header
+        self.divs.append((weight, header, menu_item, str(block_obj)))
 
-        self.divs.append((weight, header, menu_item,
-                         str(block_obj) if block_obj is not None else None))
-
-    def add_hidden(self, block_obj):
-        self.add_block(None, None, block_obj)
-
-    def save_to(self, output_dir, pretty_html=False):
-        pt = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        static_files_dir = os.path.join(pt, "html_js_css")
+    def save_to(self, output_dir: Path, pretty_html: bool = False):
+        pt = Path(__file__).absolute().parent.parent
+        static_files_dir = pt / "html_js_css"
 
         self.style_links.append("http://getbootstrap.com/examples/dashboard/dashboard.css")
 
@@ -137,13 +129,13 @@ class Report:
 
         self.style.append(css)
 
-        links = []
+        links: List[str] = []
         for link in self.style_links + self.script_links:
             fname = link.rsplit('/', 1)[-1]
-            src_path = os.path.join(static_files_dir, fname)
-            dst_path = os.path.join(output_dir, fname)
-            if os.path.exists(src_path):
-                if not os.path.exists(dst_path):
+            src_path = static_files_dir / fname
+            dst_path = output_dir / fname
+            if src_path.exists():
+                if not dst_path.is_dir():
                     shutil.copyfile(src_path, dst_path)
                 link = fname
             links.append(link)
@@ -173,35 +165,38 @@ class Report:
                         with doc.div(_class="col-md-2 sidebar-offcanvas", id="sidebar", role="navigation"):
                             with doc.div(data_spy="affix", data_offset_top="45", data_offset_bottom="90"):
                                 with doc.ul(_class="nav", id="sidebar-nav"):
-                                    for sid, (_, _, menu, data) in enumerate(self.divs):
-                                        if menu is None or data is None or data == "":
+                                    for sid, div_cnt in enumerate(self.divs):
+                                        if div_cnt is None:
                                             continue
 
+                                        _, _, menu, data = div_cnt
                                         if menu.endswith(":"):
                                             menu = menu[:-1]
-                                        doc.li.a(menu, href="#section" + str(sid))
+                                        doc.li.a(menu, href=f"#section{sid}")
 
                         with doc.div(_class="col-md-10", data_spy="scroll", data_target="#sidebar-nav"):
                             doc("\n")
                             doc._enter("div", _class="row")
-                            for sid, (w, header, _, block) in enumerate(self.divs):
-                                if block is None:
+                            for sid, div_cnt in enumerate(self.divs):
+                                if div_cnt is None:
                                     doc._exit()
                                     doc("\n")
                                     doc._enter("div", _class="row")
-                                elif w is None:
-                                    doc(block)
                                 else:
-                                    with doc.div(_class="col-md-" + str(w)):
-                                        doc.H3.center(header, id="section" + str(sid))
-                                        doc.br
+                                    w, header, _, block = div_cnt
+                                    if w is None:
+                                        doc(block)
+                                    else:
+                                        with doc.div(_class=f"col-md-{w}"):
+                                            doc.H3.center(header, id=f"section{sid}")
+                                            doc.br
 
-                                        if block != "":
-                                            doc.center(block)
+                                            if block != "":
+                                                doc.center(block)
                             doc._exit()
 
-        index = "<!doctype html>" + str(doc)
-        index_path = os.path.join(output_dir, self.output_file)
+        index = f"<!doctype html>{doc}"
+        index_path = output_dir / self.output_file_name
 
         try:
             if pretty_html:
@@ -210,64 +205,70 @@ class Report:
         except:
             pass
 
-        open(index_path, "w").write(index)
+        index_path.open("w").write(index)
 
 
-def show_summary(report, cluster):
+def show_summary(report: Report, cluster: Cluster, ceph: CephInfo):
     t = html.HTMLTable(["Setting", "Value"])
     t.add_cells("Collected at", cluster.report_collected_at_local)
     t.add_cells("Collected at GMT", cluster.report_collected_at_gmt)
-    t.add_cells("Status", cluster.overall_status)
-    t.add_cells("PG count", cluster.num_pgs)
-    t.add_cells("Pool count", len(cluster.pools))
-    t.add_cells("Used", b2ssize(cluster.bytes_used, False))
-    t.add_cells("Avail", b2ssize(cluster.bytes_avail, False))
-    t.add_cells("Data", b2ssize(cluster.data_bytes, False))
+    t.add_cells("Status", str(ceph.status.overall_status))
+    t.add_cells("PG count", str(ceph.status.num_pgs))
+    t.add_cells("Pool count", str(len(ceph.pools)))
+    t.add_cells("Used", b2ssize(ceph.status.bytes_used))
+    t.add_cells("Avail", b2ssize(ceph.status.bytes_avail))
+    t.add_cells("Data", b2ssize(ceph.status.data_bytes))
 
-    avail_perc = cluster.bytes_avail * 100 / cluster.bytes_total
-    t.add_cells("Free %", int(avail_perc))
+    avail_perc = ceph.status.bytes_avail * 100 / ceph.status.bytes_total
+    t.add_cells("Free %", str(int(avail_perc)))
 
-    osd_count = len(cluster.osds)
-    t.add_cells("Mon count", len(cluster.mons))
+    osd_count = len(ceph.osds)
+    t.add_cells("Mon count", str(len(ceph.mons)))
 
     report.add_block(3, "Status:", t)
 
-    stor_set = set(osd.storage_type for osd in cluster.osds)
-    has_bs = 'bluestore' in stor_set
-    has_fs = 'filestore' in stor_set
+    stor_set = set(osd.storage_type for osd in ceph.osds)
+    has_bs = OSDStoreType.bluestore in stor_set
+    has_fs = OSDStoreType.filestore in stor_set
 
-    if cluster.settings is None:
+    if ceph.settings is None:
         t = H.font("No live OSD found!", color="red")
     else:
         t = html.HTMLTable(["Setting", "Value"])
-        t.add_cells("Count", osd_count)
-        t.add_cells("Average PG per OSD", cluster.num_pgs // osd_count)
-        t.add_cells("Cluster net", cluster.cluster_net)
-        t.add_cells("Public net", cluster.public_net)
-        t.add_cells("Near full ratio", "%0.3f" % (float(cluster.settings.mon_osd_nearfull_ratio,)))
-        t.add_cells("Full ratio", "%0.3f" % (float(cluster.settings.mon_osd_full_ratio,)))
-        t.add_cells("Backfill full ratio", getattr(cluster.settings, "osd_backfill_full_ratio", "?"))
-        t.add_cells("Filesafe full ratio", "%0.3f" % (float(cluster.settings.osd_failsafe_full_ratio,)))
-        t.add_cells("Storage types", list(stor_set)[0] if len(stor_set) == 1 else html_fail(",".join(stor_set)))
+        t.add_cells("Count", str(osd_count))
+        t.add_cells("Average PG per OSD", str(ceph.status.num_pgs // osd_count))
+        t.add_cells("Cluster net", str(ceph.cluster_net))
+        t.add_cells("Public net", str(ceph.public_net))
+        t.add_cells("Near full ratio", "%0.3f" % (float(ceph.settings.mon_osd_nearfull_ratio,)))
+        t.add_cells("Full ratio", "%0.3f" % (float(ceph.settings.mon_osd_full_ratio,)))
+        t.add_cells("Backfill full ratio", getattr(ceph.settings, "osd_backfill_full_ratio", "?"))
+        t.add_cells("Filesafe full ratio", "%0.3f" % (float(ceph.settings.osd_failsafe_full_ratio,)))
+        t.add_cells("Storage types", list(stor_set)[0]
+                                     if len(stor_set) == 1
+                                     else html_fail(",".join(map(str, stor_set))))
 
         if has_fs:
-            t.add_cells("Journal aio", cluster.settings.journal_aio)
-            t.add_cells("Journal dio", cluster.settings.journal_dio)
-            t.add_cells("Filestorage sync", str(int(float(cluster.settings.filestore_max_sync_interval))) + 's')
-        t.add_cells("Monmap version", str(cluster.monmap_stat['epoch']))
+            t.add_cells("Journal aio", ceph.settings.journal_aio)
+            t.add_cells("Journal dio", ceph.settings.journal_dio)
+            t.add_cells("Filestorage sync", str(int(float(ceph.settings.filestore_max_sync_interval))) + 's')
+        elif has_bs:
+            # TODO: add BS info
+            pass
 
-        mon_tm = time.mktime(time.strptime(cluster.monmap_stat['modified'], "%Y-%m-%d %H:%M:%S.%f"))
+        t.add_cells("Monmap version", str(ceph.status.monmap_stat['epoch']))
+
+        mon_tm = time.mktime(time.strptime(ceph.status.monmap_stat['modified'], "%Y-%m-%d %H:%M:%S.%f"))
         collect_tm = time.mktime(time.strptime(cluster.report_collected_at_local, "%Y-%m-%d %H:%M:%S"))
         diff = int(collect_tm - mon_tm)
         h = diff // 3600
         m = (diff % 3600) % 60
         s = diff % 60
-        t.add_cells("Monmap modified in", '{0}:{1:<02d}:{2:<02d}'.format(h, m, s))
+        t.add_cells("Monmap modified in", f'{h}:{m:<02d}:{s:<02d}')
     report.add_block(3, "OSD:", t)
 
     t = html.HTMLTable(["Setting", "Value"])
-    t.add_cells("Client IO Bps", b2ssize(cluster.write_bytes_sec, False))
-    t.add_cells("Client IO IOPS", b2ssize(cluster.op_per_sec, False))
+    t.add_cells("Client IO Bps", b2ssize(ceph.status.write_bytes_sec))
+    t.add_cells("Client IO IOPS", b2ssize(ceph.status.op_per_sec))
     report.add_block(2, "Activity:", t)
 
     colors = {
@@ -275,16 +276,16 @@ def show_summary(report, cluster):
         "HEALTH_ERR": "red"
     }
 
-    if len(cluster.health_summary) != 0:
+    if len(ceph.status.health_summary) != 0:
         t = html.Doc()
 
-        if cluster.is_luminous:
-            for check in cluster.health_summary.values():
+        if ceph.is_luminous:
+            for check in ceph.status.health_summary.values():
                 color = colors.get(check["severity"], "black")
                 t.font(check['summary']['message'].capitalize(), color=color)
                 t.br
         else:
-            for msg in cluster.health_summary:
+            for msg in ceph.status.health_summary:
                 color = colors.get(msg['severity'], "black")
                 t.font(msg['summary'].capitalize(), color=color)
                 t.br
@@ -292,53 +293,52 @@ def show_summary(report, cluster):
         report.add_block(2, "Status messages:", t)
 
 
-def show_mons_info(report, cluster):
+def show_mons_info(report: Report, ceph: CephInfo):
     table = html.HTMLTable(headers=["Name", "Health", "Role", "Disk free<br>B (%)"])
 
-    for mon in cluster.mons:
-        if mon.health is None:
+    for mon in ceph.mons:
+        if mon.status is None:
             health = "Unknown"
         else:
-            health = html_ok("HEALTH_OK") if mon.health == "HEALTH_OK" else html_fail(mon.health)
+            health = html_ok("HEALTH_OK") if mon.status == "HEALTH_OK" else html_fail(mon.status)
 
-        perc = ("Unknown" if cluster.is_luminous else
-                "{0} ({1})".format(b2ssize(mon.kb_avail * 1024, False), mon.avail_percent))
+        perc = ("Unknown" if ceph.is_luminous else f"{b2ssize(mon.kb_avail * 1024)} ({mon.avail_percent})")
         table.add_row(map(str, [mon.name, health, "Unknown" if mon.role is None else mon.role, perc]))
 
     report.add_block(3, "Monitors info:", table)
 
 
-def show_pg_state(report, cluster):
-    statuses = collections.defaultdict(lambda: 0)
+def show_pg_state(report: Report, ceph: CephInfo):
+    statuses: Dict[str, int] = collections.Counter()
 
-    for pg_group in cluster.pgmap_stat['pgs_by_state']:
+    for pg_group in ceph.status.pgmap_stat['pgs_by_state']:
         for state_name in pg_group['state_name'].split('+'):
             statuses[state_name] += pg_group["count"]
 
     table = html.HTMLTable(headers=["Status", "Count", "%"])
-    table.add_row(["any", str(cluster.num_pgs), "100.00"])
+    table.add_row(["any", str(ceph.status.num_pgs), "100.00"])
     for status, count in sorted(statuses.items()):
-        table.add_row([status, str(count), "%.2f" % (100.0 * count / cluster.num_pgs)])
+        table.add_row([status, str(count), f"{100.0 * count / ceph.status.num_pgs:.2f}"])
 
     report.add_block(2, "PG's status:", table)
 
 
-def show_osd_state(report, cluster):
-    statuses = collections.defaultdict(lambda: [])
+def show_osd_state(report: Report, ceph: CephInfo):
+    statuses: Dict[OSDStatus, List[str]] = collections.defaultdict(list)
 
-    for osd in cluster.osds:
-        statuses[osd.status].append("{0.host.name}:{0.id}".format(osd))
+    for osd in ceph.osds:
+        statuses[osd.status].append(f"{osd.host.name}:{osd.id}")
 
     table = html.HTMLTable(headers=["Status", "Count", "ID's"])
 
     for status, osds in sorted(statuses.items()):
         table.add_row([status, len(osds), "" if status == "up" else
-            ("<br>".join(osds) if len(osds) < 5 else "<br>".join(osds[:4]) + "<br>and {} more".format(len(osds) - 4))])
+            ("<br>".join(osds) if len(osds) < 5 else "<br>".join(osds[:4]) + f"<br>and {len(osds) - 4} more")])
 
     report.add_block(2, "OSD's state:", table)
 
 
-def show_pools_info(report, cluster):
+def show_pools_info(report: Report, ceph: CephInfo):
     table = html.HTMLTable(headers=["Pool",
                                      "Id",
                                      "size",
@@ -354,21 +354,21 @@ def show_pools_info(report, cluster):
                                      "Objs/PR",
                                      "PG per OSD<br>Dev %"])
 
-    for _, pool in sorted(cluster.pools.items()):
+    for _, pool in sorted(ceph.pools.items()):
         table.add_cell(pool.name)
         table.add_cell(str(pool.id))
         table.add_cell(str(pool.size))
         table.add_cell(str(pool.min_size))
-        table.add_cell(b2ssize(int(pool.num_objects), base=1000), sorttable_customkey=str(int(pool.num_objects)))
-        table.add_cell(b2ssize(int(pool.size_bytes), False), sorttable_customkey=str(int(pool.size_bytes)))
+        table.add_cell(b2ssize_10(int(pool.num_objects)), sorttable_customkey=str(int(pool.num_objects)))
+        table.add_cell(b2ssize(int(pool.size_bytes)), sorttable_customkey=str(int(pool.size_bytes)))
         table.add_cell('---')
-        table.add_cell(b2ssize(int(pool.read_bytes), False), sorttable_customkey=str(int(pool.read_bytes)))
-        table.add_cell(b2ssize(int(pool.write_bytes), False), sorttable_customkey=str(int(pool.write_bytes)))
+        table.add_cell(b2ssize(int(pool.read_bytes)), sorttable_customkey=str(int(pool.read_bytes)))
+        table.add_cell(b2ssize(int(pool.write_bytes)), sorttable_customkey=str(int(pool.write_bytes)))
         table.add_cell(str(pool.crush_rule))
 
         if pool.pgp != pool.pg:
-            table.add_cell("{0}({1})".format(pool.pg, H.font(str(pool.pgp), color="red")),
-                                             sorttable_customkey=str(pool.pg))
+            table.add_cell(f"{pool.pg}({H.font(str(pool.pgp), color='red')})",
+                           sorttable_customkey=str(pool.pg))
         else:
             table.add_cell(str(pool.pg), sorttable_customkey=str(pool.pg))
 
@@ -377,13 +377,13 @@ def show_pools_info(report, cluster):
         table.add_cell(bytes_per_pg_s, sorttable_customkey=str(bytes_per_pg))
 
         obj_per_pg = int(pool.num_objects) // int(pool.pg)
-        obj_per_pg_s = b2ssize(obj_per_pg, base=1000)
+        obj_per_pg_s = b2ssize_10(obj_per_pg)
         table.add_cell(obj_per_pg_s, sorttable_customkey=str(obj_per_pg))
 
-        if cluster.sum_per_osd is None:
+        if ceph.sum_per_osd is None:
             table.add_cell('-')
         else:
-            row = [osd_pg.get(pool.name, 0) for osd_pg in cluster.osd_pool_pg_2d.values()]
+            row = [osd_pg.get(pool.name, 0) for osd_pg in ceph.osd_pool_pg_2d.values()]
             avg = float(sum(row)) / len(row)
             if len(row) < 2:
                 dev = None
@@ -398,21 +398,21 @@ def show_pools_info(report, cluster):
                 else:
                     dev_perc = str(int(dev * 100. / avg))
 
-                table.add_cell("{0:.1f} ~ {1}%".format(avg, dev_perc), sorttable_customkey=str(int(avg * 1000)))
+                table.add_cell(f"{avg:.1f} ~ {dev_perc}%", sorttable_customkey=str(int(avg * 1000)))
 
         table.next_row()
 
     report.add_block(8, "Pool's stats:", table)
 
 
-def show_osd_info(report, cluster):
+def show_osd_info(report: Report, cluster: Cluster, ceph: CephInfo):
     # osds_info = [get_osd_info(cluster, osd) for osd in cluster.osds]  # type: List[OSDInfo]
 
-    w_headers = ["weight<br>" + root.name for root in cluster.crush.roots]
+    w_headers = ["weight<br>" + root.name for root in ceph.crush.roots]
 
-    stor_set = set(osd.storage_type for osd in cluster.osds)
-    has_bs = 'bluestore' in stor_set
-    has_fs = 'filestore' in stor_set
+    stor_set = set(osd.storage_type for osd in ceph.osds)
+    has_bs = OSDStoreType.bluestore in stor_set
+    has_fs = OSDStoreType.filestore in stor_set
     assert has_fs or has_bs
 
     headers=["OSD", "node", "status", "version [hash]", "daemon<br>run", "open<br>files", "ip<br>conn", "threads"] + \
@@ -437,7 +437,7 @@ def show_osd_info(report, cluster):
 
     table = html.HTMLTable(headers)
 
-    for osd in sorted(cluster.osds, key=lambda x: x.id):
+    for osd in sorted(ceph.osds, key=lambda x: x.id):
         if osd.daemon_runs is None:
             daemon_msg = HTML_UNKNOWN
         elif osd.daemon_runs:
@@ -452,15 +452,16 @@ def show_osd_info(report, cluster):
             table.add_cell("Unknown")
         else:
             ver, hash = osd.version
-            table.add_cell("{0}  [{1}]".format(ver, hash[:8]))
+            table.add_cell(f"{ver}  [{hash[:8]}]")
         table.add_cell(daemon_msg)
 
-        if osd.procinfo:
-            table.add_cell(str(osd.procinfo["fd_count"]))
-            socks = sum(int(tp.get('inuse', 0)) for tp in osd.procinfo.get('ipv4', {}).values())
-            socks += sum(int(tp.get('inuse', 0)) for tp in osd.procinfo.get('ipv6', {}).values())
+        if osd.run_info is not None:
+            pinfo = osd.run_info.procinfo
+            table.add_cell(str(pinfo["fd_count"]))
+            socks = sum(int(tp.get('inuse', 0)) for tp in pinfo.get('ipv4', {}).values())
+            socks += sum(int(tp.get('inuse', 0)) for tp in pinfo.get('ipv6', {}).values())
             table.add_cell(str(socks))
-            table.add_cell(str(osd.procinfo["th_count"]))
+            table.add_cell(str(pinfo["th_count"]))
         else:
             table.add_cell("-")
             table.add_cell("-")
@@ -468,52 +469,47 @@ def show_osd_info(report, cluster):
 
         disks = cluster.hosts[osd.host.name].disks
         storage_devs = cluster.hosts[osd.host.name].storage_devs
-        total_b = int(storage_devs[osd.data_partition].size)
+        total_b = int(storage_devs[osd.storage_info.data_partition].size)
 
-        for root in cluster.crush.roots:
-            nodes = cluster.crush.find_nodes([('root', root.name), ('osd', "osd.{0}".format(osd.id))])
+        for root in ceph.crush.roots:
+            nodes = ceph.crush.find_nodes([('root', root.name), ('osd', f"osd.{osd.id}")])
             if not nodes:
                 table.add_cell("-")
             elif len(nodes) > 1:
                 table.add_cell("+")
             else:
                 expected_weight = float(total_b) / (1024 ** 4)
-                weight = "{0:.2f}".format(nodes[0].weight)
+                weight = f"{nodes[0].weight:.2f}"
                 weight_s = html_fail(weight) if abs(1 - (nodes[0].weight / expected_weight)) > .2 else weight
                 table.add_cell(weight_s)
 
-        rew = "{0:.2f}".format(osd.reweight)
+        rew = f"{osd.reweight:.2f}"
         table.add_cell(html_fail(rew) if abs(osd.reweight - 1.0) > .01 else rew)
 
         if osd.pg_count is None:
-            table.add_cell(HTML_UNKNOWN, sorttable_customkey=0)
+            table.add_cell(HTML_UNKNOWN, sorttable_customkey="0")
         else:
             table.add_cell(str(osd.pg_count))
 
         if has_fs and has_bs:
-            table.add_cell(osd.storage_type)
+            table.add_cell(str(osd.storage_type))
 
-        data_drive_type = disks[osd.data_dev].tp
+        data_drive_type = disks[osd.storage_info.data_dev].tp
         data_drive_type = (html_ok if data_drive_type in ('ssd', 'nvme') else lambda x: x)(data_drive_type)
         table.add_cell(data_drive_type)
 
         avail_perc = osd.free_perc
-
-        if avail_perc < 20:
-            color = "red"
-        elif avail_perc < 40:
-            color = "yellow"
-        else:
-            color = "green"
+        color = "red" if avail_perc < 20 else ( "yellow" if avail_perc < 40 else "green")
         avail_perc_str = H.font(avail_perc, color=color)
 
-        table.add_cell(b2ssize(total_b, False), sorttable_customkey=total_b)
-        table.add_cell(avail_perc_str, sorttable_customkey=avail_perc)
+        table.add_cell(b2ssize(total_b), sorttable_customkey=str(total_b))
+        table.add_cell(avail_perc_str, sorttable_customkey=str(avail_perc))
 
-        if osd.storage_type == 'filestore':
-            j_on_same_drive = html_ok("no") if osd.journal_dev != osd.data_dev else html_fail("yes")
-            j_on_file = html_ok("no") if osd.journal_partition != osd.data_partition else html_fail("yes")
-            j_drive_type = disks[osd.journal_dev].tp
+        sinfo = osd.storage_info
+        if isinstance(sinfo, FileStoreInfo):
+            j_on_same_drive = html_ok("no") if sinfo.journal_dev != sinfo.data_dev else html_fail("yes")
+            j_on_file = html_ok("no") if sinfo.journal_partition != sinfo.data_partition else html_fail("yes")
+            j_drive_type = disks[sinfo.journal_dev].tp
             j_drive_type = (html_ok if j_drive_type in ('ssd', 'nvme') else html_fail)(j_drive_type)
 
             table.add_cell(j_on_same_drive)
@@ -523,9 +519,9 @@ def show_osd_info(report, cluster):
             if j_on_same_drive:
                 j_size_s = '-'
             else:
-                j_size = storage_devs[osd.journal_partition].size
+                j_size = storage_devs[sinfo.journal_partition].size
                 j_size_s = b2ssize(j_size)
-                osd_sync = float(osd.config['filestore_max_sync_interval'])
+                osd_sync = float(osd.run_info.config['filestore_max_sync_interval'])
                 j_size_s = j_size_s if j_size >= osd_sync * 100 * (1024 ** 2) else html_fail(j_size_s)
             table.add_cell(j_size_s)
 
@@ -534,13 +530,13 @@ def show_osd_info(report, cluster):
                 table.add_cell('-')
                 table.add_cell('-')
         else:
-            assert osd.storage_type == 'bluestore'
-            wal_on_same_drive = html_ok("no") if osd.wal_dev != osd.data_dev else html_fail("yes")
-            wal_drive_type = disks[osd.wal_dev].tp
+            assert isinstance(sinfo, BlueStoreInfo)
+            wal_on_same_drive = html_ok("no") if sinfo.wal_dev != sinfo.data_dev else html_fail("yes")
+            wal_drive_type = disks[sinfo.wal_dev].tp
             wal_drive_type = (html_ok if wal_drive_type in ('ssd', 'nvme') else html_fail)(wal_drive_type)
 
-            if osd.wal_partition not in (osd.db_partition, osd.data_partition):
-                wal_size = int(storage_devs[osd.wal_partition].size)
+            if sinfo.wal_partition not in (sinfo.db_partition, sinfo.data_partition):
+                wal_size = int(storage_devs[sinfo.wal_partition].size)
                 wal_size_s = b2ssize(wal_size) + 'B'
                 wal_size = html_fail(wal_size_s) if wal_size < 512 * 1024 * 1024 else wal_size_s
             else:
@@ -552,12 +548,12 @@ def show_osd_info(report, cluster):
                 table.add_cell('-')
             table.add_cell(wal_size)
 
-            db_on_same_drive = html_ok("no") if osd.db_dev != osd.data_dev else html_fail("yes")
-            db_drive_type = disks[osd.db_dev].tp
+            db_on_same_drive = html_ok("no") if sinfo.db_dev != sinfo.data_dev else html_fail("yes")
+            db_drive_type = disks[sinfo.db_dev].tp
             db_drive_type = (html_ok if db_drive_type in ('ssd', 'nvme') else html_fail)(db_drive_type)
-            if osd.db_partition != osd.data_partition:
-                db_size = int(storage_devs[osd.db_partition].size)
-                data_size = int(storage_devs[osd.data_partition].size)
+            if sinfo.db_partition != sinfo.data_partition:
+                db_size = int(storage_devs[sinfo.db_partition].size)
+                data_size = int(storage_devs[sinfo.data_partition].size)
                 db_sz_s = b2ssize(db_size) + "B"
                 db_size = html_fail(db_sz_s) if db_size < data_size * 0.0095 else db_sz_s
             else:
@@ -571,7 +567,7 @@ def show_osd_info(report, cluster):
     report.add_block(10, "OSD's info:", table)
 
 
-def show_osd_perf_info(report, cluster):
+def show_osd_perf_info(report: Report, ceph: CephInfo):
     table = html.HTMLTable(headers=["OSD",
                                     "node",
                                     "journal<br>lat, ms",
@@ -587,35 +583,35 @@ def show_osd_perf_info(report, cluster):
                                     "J lat<br>ms",
                                     "J IO<br>time %"])
 
-    for osd in cluster.osds:
-        perf_info = []
+    for osd in ceph.osds:
+        perf_info: List[Tuple[Union[int, str], Union[float, None, int]]] = []
 
-        if osd.data_stor_stats is None:
+        if osd.storage_info.data_stor_stats is None:
             perf_info.extend([('-', 0)] * 5)
         else:
-            load = osd.data_stor_stats.load
-
-            perf_info.extend([
-                (os.path.basename(osd.data_stor_stats.root_dev), None),
-                (b2ssizei(load.read_bytes, False) + " / " + b2ssizei(load.read_iops, False), load.read_bytes),
-                (b2ssizei(load.write_bytes, False) + " / " + b2ssizei(load.write_iops, False), load.write_bytes),
+            load = osd.storage_info.data_stor_stats
+            perf_info.extend([  # type: ignore
+                (str(Path(osd.storage_info.data_dev).parent), None),
+                (f"{b2ssize(load.read_bytes)} / {b2ssize(load.read_iops)}", load.read_bytes),
+                (f"{b2ssize(load.write_bytes)} / {b2ssize(load.write_iops)}", load.write_bytes),
                 (int(load.lat * 1000), load.lat) if load.lat is not None else ('-', 0),
                 (int(load.io_time * 100), load.io_time)
             ])
 
-        if osd.j_stor_stats is None:
-            perf_info.extend([('-', 0)] * 3)
-        else:
-            if osd.j_stor_stats.root_dev != osd.data_stor_stats.root_dev:
-                load = osd.j_stor_stats.load
-                perf_info.extend([
-                    (os.path.basename(osd.j_stor_stats.root_dev), None),
-                    (b2ssizei(load.write_bytes, False) + " / " + b2ssizei(load.write_iops, False), load.write_bytes),
+        sinfo = osd.storage_info
+        if isinstance(sinfo, FileStoreInfo):
+            if sinfo.j_stor_stats.root_dev != sinfo.data_stor_stats.root_dev:
+                load = sinfo.j_stor_stats.load
+                perf_info.extend([  # type: ignore
+                    (str(Path(sinfo.j_stor_stats.root_dev).parent), None),
+                    (f"{b2ssize(load.write_bytes)}  / {b2ssize(load.write_iops)}", load.write_bytes),
                     (int(load.lat * 1000), load.lat) if load.lat is not None else ('-', 0),
                     (int(load.io_time * 100), load.io_time)
                 ])
             else:
                 perf_info.extend([("<--", None), ('-', 0), ('-', 0), ('-', 0)])
+        else:
+            perf_info.extend([('-', 0)] * 3)
 
         table.add_cell(str(osd.id))
         table.add_cell(osd.host.name)
@@ -624,9 +620,9 @@ def show_osd_perf_info(report, cluster):
             if val is None or val < 1e-6:
                 return HTML_UNKNOWN
             elif val < 1e-3:
-                return "{0:.3f}".format(val * 1000)
+                return f"{val * 1000:.3f}"
             else:
-                return "{0}".format(int(val * 1000))
+                return f"{int(val * 1000)}"
 
         lats = (("journal_latency", None), ("apply_latency", "apply_latency_s"),
                 ("commitcycle_latency", "commitcycle_latency_s"))
@@ -649,13 +645,13 @@ def show_osd_perf_info(report, cluster):
                         v_val = HTML_UNKNOWN
 
                 if s_val:
-                    table.add_cell("{} / {}".format(v_val, s_val))
+                    table.add_cell(f"{v_val} / {s_val}")
                 else:
                     table.add_cell(v_val)
         else:
             for name, name_s in lats:
                 if name_s:
-                    table.add_cell("{0} / {0}".format(HTML_UNKNOWN))
+                    table.add_cell(f"{HTML_UNKNOWN} / {HTML_UNKNOWN}")
                 else:
                     table.add_cell(HTML_UNKNOWN)
 
@@ -669,15 +665,17 @@ def show_osd_perf_info(report, cluster):
     report.add_block(10, "OSD's current load:", table)
 
 
-def show_host_network_load_in_color(report, cluster):
-    send_net_io = collections.defaultdict(list)
-    recv_net_io = collections.defaultdict(list)
+def show_host_network_load_in_color(report: Report, cluster: Cluster, ceph: CephInfo):
+    send_net_io: Dict[str, List[Tuple]] = collections.defaultdict(list)
+    recv_net_io: Dict[str, List[Tuple]] = collections.defaultdict(list)
 
     max_net_count = 0
     for host in cluster.hosts.values():
-        nets = [('cluster', host.ceph_cluster_adapter), ('public', host.ceph_public_adapter)]
+        cl_if = host.find_interface(ceph.cluster_net)
+        pb_if = host.find_interface(ceph.public_net)
+        nets = [('cluster', cl_if), ('public', pb_if)]
         nets += sorted((net.name, net) for net in host.net_adapters.values()
-                       if net.is_phy and net not in (host.ceph_cluster_adapter, host.ceph_cluster_adapter))
+                       if net.is_phy and net != pb_if and net != cl_if )
 
         max_net_count = max(max_net_count, len(nets))
         for name, net in nets:
@@ -707,7 +705,7 @@ def show_host_network_load_in_color(report, cluster):
                     load_bps = int(load_bps) // 1024
                     load_pps = int(load_pps)
                     color = "#FFFFFF" if speed is None else val_to_color(float(load_bps) / speed)
-                    load_text = "{0}/{1}".format(b2ssize(load_bps, False), b2ssize(load_pps, base=1000))
+                    load_text = f"{b2ssize(load_bps)}/{b2ssize_10(load_pps)}"
 
                     if net_name in std_nets:
                         text = load_text
@@ -724,89 +722,122 @@ def show_host_network_load_in_color(report, cluster):
         report.add_block(6, name, table, "Network - " + name)
 
 
-def show_host_io_load_in_color(report, cluster):
-    rbts = collections.defaultdict(dict)
-    wbts = collections.defaultdict(dict)
-    bts = collections.defaultdict(dict)
+@dataclasses.dataclass
+class CephHDDInfo:
+    hostname: str
+    name: str
 
-    wiops = collections.defaultdict(dict)
-    riops = collections.defaultdict(dict)
-    iops = collections.defaultdict(dict)
+    wbts: float
+    rbts: float
+    bts: float
+    wiops: float
+    riops: float
+    iops: float
+    queue_depth: float
+    lat: Optional[float]
+    io_time: float
+    w_io_time: float
 
-    queue_depth = collections.defaultdict(dict)
-    lat = collections.defaultdict(dict)
-    io_time = collections.defaultdict(dict)
-    w_io_time = collections.defaultdict(dict)
+    roles: Set[str]
 
-    for osd in cluster.osds:
-        for dev_stat in (osd.data_stor_stats, osd.j_stor_stats):
-            if dev_stat is not None:
-                hname = osd.host.name
-                load_stats = dev_stat.load
-                dev = dev_stat.root_dev
+    @classmethod
+    def from_disk_info(cls, hostname: str, name: str, load: DiskLoad) -> 'CephHDDInfo':
+        return cls(hostname=hostname,
+                   name=name,
+                   wbts=load.write_bytes,
+                   rbts=load.read_bytes,
+                   bts=load.write_bytes + load.read_bytes,
+                   wiops=load.write_iops,
+                   riops=load.read_iops,
+                   iops=load.write_iops + load.read_iops,
+                   queue_depth=load.w_io_time,
+                   lat=None if load.lat is None else load.lat * 1000,
+                   io_time=int(load.io_time * 100),
+                   w_io_time=load.w_io_time,
+                   roles=set())
 
-                wbts[hname][dev] = load_stats.write_bytes
-                rbts[hname][dev] = load_stats.read_bytes
-                bts[hname][dev] = load_stats.write_bytes + load_stats.read_bytes
 
-                wiops[hname][dev] = load_stats.write_iops
-                riops[hname][dev] = load_stats.read_iops
-                iops[hname][dev] = load_stats.write_iops + load_stats.read_iops
+def show_host_io_load_in_color(report: Report, ceph: CephInfo):
+    devs: Dict[str, Dict[str, CephHDDInfo]] = collections.defaultdict(dict)
 
-                queue_depth[hname][dev] = load_stats.w_io_time
-                lat[hname][dev] = None if load_stats.lat is None else load_stats.lat * 1000
-                io_time[hname][dev] = int(load_stats.io_time * 100)
-                w_io_time[hname][dev] = load_stats.w_io_time
+    for osd in ceph.osds:
+        sinfo = osd.storage_info
+        assert sinfo.data_stor_stats is not None
+        osd_devs: List[Tuple[str, DiskLoad]] = [(sinfo.data_dev, sinfo.data_stor_stats)]
+        roles = {"data"}
 
-    if len(wbts) == 0:
+        if isinstance(sinfo, FileStoreInfo):
+            assert sinfo.j_stor_stats is not None
+            osd_devs.append((sinfo.journal_dev, sinfo.j_stor_stats))
+            roles.add("journal")
+        else:
+            assert isinstance(sinfo, BlueStoreInfo)
+            assert sinfo.db_stor_stats is not None
+            assert sinfo.wal_stor_stats is not None
+
+            osd_devs.append((sinfo.db_dev, sinfo.db_stor_stats))
+            roles.add("db")
+            osd_devs.append((sinfo.wal_dev, sinfo.wal_stor_stats))
+            roles.add("wal")
+
+        hset = devs[osd.host.name]
+        for dev, stat in osd_devs:
+            if dev not in hset:
+                hset[dev] = CephHDDInfo.from_disk_info(osd.host.name, dev, stat.load)
+            hset[dev].roles.update(roles)
+
+    if len(devs) == 0:
         report.add_block(1, "No current IO load awailable", "")
         return
 
     loads = [
-        (iops, 1000, 'IOPS', 50),
-        (riops, 1000, 'Read IOPS', 30),
-        (wiops, 1000, 'Write IOPS', 30),
+        ('iops', b2ssize_10, 'IOPS', 50),
+        ('riops', b2ssize_10, 'Read IOPS', 30),
+        ('wiops', b2ssize_10, 'Write IOPS', 30),
 
-        (bts, 1024, 'Bps', 100 * 1024 ** 2),
-        (rbts, 1024, 'Read Bps', 100 * 1024 ** 2),
-        (wbts, 1024, 'Write Bps', 100 * 1024 ** 2),
+        ('bts', b2ssize, 'Bps', 100 * 1024 ** 2),
+        ('rbts', b2ssize, 'Read Bps', 100 * 1024 ** 2),
+        ('wbts', b2ssize, 'Write Bps', 100 * 1024 ** 2),
 
-        (lat, None, 'Latency, ms', 20),
-        (queue_depth, None, 'Average QD', 3),
-        (io_time, None, 'Active time %', 100),
-        # (w_io_time, None, 'W. time share', 5.0),
+        ('lat', None, 'Latency, ms', 20),
+        ('queue_depth', None, 'Average QD', 3),
+        ('io_time', None, 'Active time %', 100),
     ]
 
     report.add_block(12, "Current disk IO load", "")
 
-    for pos, (target, base, tp, min_max_val) in enumerate(loads, 1):
-        if target is lat:
+    for pos, (target_attr, tostrfunc, tp, min_max_val) in enumerate(loads, 1):
+        if target_attr == 'lat':
             max_val = 300.0
         else:
-            max_val = max(map(max, [data.values() for data in target.values()]))
+            max_val = max(map(max, [getattr(dev, target_attr)  # type: ignore
+                                    for all_host_devs in devs.values()
+                                    for dev in all_host_devs.values()]))
             max_val = max(min_max_val, max_val)
 
-        max_len = max(map(len, target.values()))
+        max_len = max(map(len, devs.values()))
 
         table = html.HTMLTable(['host'] + ['load'] * max_len, zebra=False)
-        for host_name, data in sorted(target.items()):
+        for host_name, devices in sorted(devs.items()):
+            # TODO: mark devices with data/journal/wal/db tags
             table.add_cell(host_name)
-            for dev, val in sorted(data.items()):
+            for dev_name, dev_info in sorted(devices.items()):
+                val = getattr(dev_info, target_attr)
                 color = "#FFFFFF" if val is None or max_val == 0 else val_to_color(float(val) / max_val)
 
-                if target is lat:
+                if target_attr == 'lat':
                     s_val = '-' if val is None else str(int(val))
-                elif target is queue_depth:
+                elif target_attr == 'queue_depth':
                     s_val = "%.1f" % (val,)
-                elif base is None:
+                elif tostrfunc is None:
                     s_val = "%.1f" % (val,)
                 else:
-                    s_val = b2ssize(val, False, base=base)
+                    s_val = tostrfunc(val)
 
-                cell_data = H.div(dev, _class="left") + H.div(s_val, _class="right")
+                cell_data = H.div(dev_name, _class="left") + H.div(s_val, _class="right")
                 table.add_cell(cell_data, bgcolor=color, sorttable_customkey=str(val))
 
-            for i in range(max_len - len(data)):
+            for i in range(max_len - len(devices)):
                 table.add_cell("-", sorttable_customkey='0')
             table.next_row()
 
@@ -825,9 +856,9 @@ def show_hosts_info(report, cluster):
                   "Conn<br>tcp/udp"]
     table = html.HTMLTable(headers=header_row)
     for host in sorted(cluster.hosts.values(), key=lambda x: x.name):
-        services = ["osd-{0}".format(osd_id) for osd_id in host.osd_ids]
+        services = [f"osd-{osd_id}" for osd_id in host.osd_ids]
         if host.mon_name:
-            services.append("mon({0.mon_name})".format(host))
+            services.append(f"mon({host.mon_name})")
 
         table.add_cell(host.name)
         srv_strs = []
@@ -841,7 +872,7 @@ def show_hosts_info(report, cluster):
             table.next_row()
             continue
 
-        if host.hw_info.cores == []:
+        if not host.hw_info.cores:
             table.add_cell("Error", sorttable_customkey='0')
         else:
             table.add_cell(sum(count for _, count in host.hw_info.cores))
@@ -852,7 +883,7 @@ def show_hosts_info(report, cluster):
         table.add_cell(b2ssize(host.swap_total - host.swap_free),
                        sorttable_customkey=str(host.swap_total - host.swap_free))
         table.add_cell(host.load_5m)
-        table.add_cell("{0}/{1}".format(host.open_tcp_sock, host.open_udp_sock))
+        table.add_cell(f"{host.open_tcp_sock}/{host.open_udp_sock}")
         table.next_row()
 
     report.add_block(6, "Host's info:", table)
@@ -914,8 +945,7 @@ def parse_args(argv):
 
 
 def setup_logging(opts):
-    lconf_path = os.path.join(os.path.dirname(__file__), 'logging.json')
-    log_config = json.load(open(lconf_path))
+    log_config = json.load((Path(__file__).parent / 'logging.json').open())
 
     del log_config["handlers"]['log_file']
 
@@ -928,7 +958,7 @@ def setup_logging(opts):
     logging.config.dictConfig(log_config)
 
 
-def main(argv):
+def main(argv: List[str]):
     opts = parse_args(argv)
     setup_logging(opts)
     remove_folder = False
@@ -939,32 +969,30 @@ def main(argv):
         prof = cProfile.Profile()
         prof.enable()
 
-    if os.path.isfile(opts.data_folder):
+    if Path(opts.data_folder).is_file():
         arch_name = opts.data_folder
         folder = tempfile.mkdtemp()
         logger.info("Unpacking %r to temporary folder %r", opts.data_folder, folder)
         remove_folder = True
-        subprocess.call("tar -zxvf {0} -C {1} >/dev/null 2>&1".format(arch_name, folder), shell=True)
-    elif not os.path.isdir(opts.data_folder):
+        subprocess.call(f"tar -zxvf {arch_name} -C {folder} >/dev/null 2>&1", shell=True)
+    elif not Path(opts.data_folder).is_dir():
         logger.error("Path argument (%r) should be a folder with data or path to archive", opts.data_folder)
         return 1
     else:
         folder = opts.data_folder
 
-    index_path = os.path.join(opts.out, 'index.html')
-    if os.path.exists(index_path):
+    out_p = Path(opts.out)
+    index_path = out_p / 'index.html'
+    if index_path.exists():
         if not opts.overwrite:
             logger.error("%r already exists. Pass -w/--overwrite to overwrite files", index_path)
             return 1
-    elif not os.path.exists(opts.out):
-        os.makedirs(opts.out)
+    elif not out_p.exists():
+        out_p.mkdir(parents=True, exist_ok=True)
 
     try:
-        storage = make_storage(folder, existing=True)
-        storage = TypedStorage(storage)
-        cluster = CephCluster(storage)
         logger.info("Loading cluster info into RAM")
-        cluster.load()
+        cluster, ceph = load_all(TypedStorage(make_storage(folder, existing=True)))
         logger.info("Done")
 
         report = Report(opts.name, "index.html")
@@ -977,34 +1005,34 @@ def main(argv):
         else:
             report.script_links.append("http://www.kryogenix.org/code/browser/sorttable/sorttable.js")
 
-        show_summary(report, cluster)
+        show_summary(report, cluster, ceph)
         report.next_line()
 
         show_hosts_info(report, cluster)
-        show_mons_info(report, cluster)
-        show_osd_state(report, cluster)
+        show_mons_info(report, ceph)
+        show_osd_state(report, ceph)
         report.next_line()
 
-        show_osd_info(report, cluster)
+        show_osd_info(report, cluster, ceph)
 
         if cluster.has_performance_data:
-            show_osd_perf_info(report, cluster)
+            show_osd_perf_info(report, ceph)
 
         report.next_line()
 
-        show_pools_info(report, cluster)
-        show_pg_state(report, cluster)
+        show_pools_info(report, ceph)
+        show_pg_state(report, ceph)
         report.next_line()
 
-        show_osd_pool_PG_distribution(report, cluster)
+        show_osd_pool_PG_distribution(report, ceph)
         report.next_line()
 
         if cluster.has_performance_data:
-            show_host_io_load_in_color(report, cluster)
+            show_host_io_load_in_color(report, ceph)
             report.next_line()
 
         if cluster.has_performance_data:
-            show_host_network_load_in_color(report, cluster)
+            show_host_network_load_in_color(report, cluster, ceph)
             report.next_line()
 
         if not opts.no_plots:
@@ -1015,7 +1043,7 @@ def main(argv):
                                     show_osd_pg_histo)
 
             show_osd_used_space_histo(report, cluster)
-            show_osd_pg_histo(report, cluster)
+            show_osd_pg_histo(report, ceph)
             report.next_line()
 
             # if cluster.has_performance_data:

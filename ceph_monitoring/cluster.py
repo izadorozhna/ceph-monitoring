@@ -4,7 +4,7 @@ import logging
 import weakref
 import collections
 from ipaddress import IPv4Network, IPv4Address
-from typing import List, Dict, Any, Iterable, Tuple, Union, Set, Callable, Optional, TypeVar, Iterator
+from typing import List, Dict, Any, Iterable, Tuple, Union, Set, Callable, Optional, Iterator
 from enum import Enum
 
 import numpy
@@ -12,10 +12,10 @@ from dataclasses import dataclass, field
 
 from cephlib.crush import load_crushmap, Crush
 from cephlib.common import AttredDict
-from cephlib.units import unit_conversion_coef_f
-from cephlib.storage import AttredStorage
+from cephlib.units import unit_conversion_coef_f, ssize2b
+from cephlib.storage import AttredStorage, TypedStorage
 
-from .hw_info import get_hw_info, ssize2b, get_dev_file_name
+from .hw_info import parse_hw_info, get_dev_file_name, HWInfo
 
 
 logger = logging.getLogger("cephlib.parse")
@@ -65,10 +65,10 @@ class Pool:
 
 @dataclass
 class NetLoad:
-    send_bytes: numpy.ndarray
-    recv_bytes: numpy.ndarray
-    send_packets: numpy.ndarray
-    recv_packets: numpy.ndarray
+    send_bytes: numpy.ndarray[int]
+    recv_bytes: numpy.ndarray[int]
+    send_packets: numpy.ndarray[int]
+    recv_packets: numpy.ndarray[int]
 
     send_bytes_avg: float = 0.0
     recv_bytes_avg: float = 0.0
@@ -110,17 +110,26 @@ class DiskLoad:
     w_io_time: float
     iops: float
     queue_depth: float
-    lat: float
+    lat: Optional[float]
+
+    read_bytes_v: numpy.ndarray
+    write_bytes_v: numpy.ndarray
+    read_iops_v: numpy.ndarray
+    write_iops_v: numpy.ndarray
+    io_time_v: numpy.ndarray
+    w_io_time_v: numpy.ndarray
+    iops_v: numpy.ndarray
+    queue_depth_v: numpy.ndarray
 
 
 @dataclass
 class Mountable:
     name: str
     size: int
-    mountpoint: str = None
-    fs: str = None
-    free_space: int = None
-    parent: Callable[[], Optional['Disk']] = None
+    mountpoint: Optional[str] = None
+    fs: Optional[str] = None
+    free_space: Optional[int] = None
+    parent: Optional[Callable[[], Optional['Disk']]] = None
 
 
 @dataclass
@@ -132,11 +141,17 @@ class CephVersion:
 
 
 @dataclass
-class Disk(Mountable):
+class Disk:
     tp: str
     extra: Dict[str, Any]
-    load: DiskLoad = None
+    name: str
+    size: int
+    load: Optional[DiskLoad] = None
     partitions: Dict[str, Mountable] = field(default_factory=dict)
+    mountpoint: Optional[str] = None
+    fs: Optional[str] = None
+    free_space: Optional[int] = None
+    parent: Optional[Callable[[], Optional['Disk']]] = None
 
 
 @dataclass
@@ -146,26 +161,34 @@ class Host:
     net_adapters: Dict[str, NetworkAdapter]
     disks: Dict[str, Disk]
     storage_devs: Dict[str, Mountable]
+    hw_info: Optional[HWInfo]
+
     uptime: float
     perf_monitoring: Any
     open_tcp_sock: int
     open_udp_sock: int
+    mem_total: int
+    mem_free: int
+    swap_total: int
+    swap_free: int
+    load_5m: Optional[float]
 
-    # ceph info, have to be removed to separated class
-    ceph_cluster_adapter: str = None
-    ceph_public_adapter: str = None
-    osd_ids: Set[int] = field(default_factory=set)
-    mon_name: str = None
+    def find_interface(self, net: IPv4Network) -> Optional[NetworkAdapter]:
+        for adapter in self.net_adapters.values():
+            for ip in adapter.ips:
+                if ip.ip in net:
+                    return adapter
+        return None
 
 
 @dataclass
 class CephMonitor:
     name: str
-    status: str
+    status: Optional[str]
     host: Host
     role: MonRole
-    version: CephVersion
 
+    version: Optional[CephVersion] = None
     kb_avail: Optional[int] = None
     avail_percent: Optional[int] = None
 
@@ -179,9 +202,9 @@ class BlueStoreInfo:
     wal_dev: str
     wal_partition: str
 
-    data_stor_stats: Optional[Any] = None
-    wal_stor_stats: Optional[Any] = None
-    db_stor_stats: Optional[Any] = None
+    data_stor_stats: Optional[DiskLoad] = None
+    wal_stor_stats: Optional[DiskLoad] = None
+    db_stor_stats: Optional[DiskLoad] = None
 
 
 @dataclass
@@ -191,8 +214,8 @@ class FileStoreInfo:
     journal_dev: str
     journal_partition: str
 
-    data_stor_stats: Optional[Any] = None
-    j_stor_stats: Optional[Any] = None
+    data_stor_stats: Optional[DiskLoad] = None
+    j_stor_stats: Optional[DiskLoad] = None
 
 
 class OSDStatus(Enum):
@@ -282,7 +305,65 @@ class CephStatusCode(Enum):
     err = 2
 
 
-def parse_ipa(data) -> Dict[str, IPANetDevInfo]:
+@dataclass
+class Cluster:
+    hosts: Dict[str, Host]
+    ip2host: Dict[str, Host]
+    report_collected_at_local: str
+    report_collected_at_gmt: str
+    perf_data: Any = None
+
+    @property
+    def has_performance_data(self) -> bool:
+        return self.perf_data is not None
+
+
+@dataclass
+class CephStatus:
+    overall_status: CephStatusCode
+    health_summary: Any
+    num_pgs: int
+
+    bytes_used: int
+    bytes_total: int
+    bytes_avail: int
+
+    data_bytes: int
+    write_bytes_sec: int
+    op_per_sec: int
+    pgmap_stat: Any
+    monmap_stat: Any
+
+
+@dataclass
+class CephInfo:
+    osds: List[CephOSD]
+    mons: List[CephMonitor]
+    pools: Dict[str, Pool]
+    osd_map: Dict[int, CephOSD]
+
+    # pg distribution
+    osd_pool_pg_2d: Dict[int, Dict[str, int]]
+    sum_per_pool: Dict[str, int]
+    sum_per_osd: Dict[int, int]
+
+    is_luminous: bool
+
+    crush: Crush
+    cluster_net: IPv4Network
+    public_net: IPv4Network
+    settings: AttredDict
+
+    status: CephStatus
+
+
+# -----  parse functions -----------------------------------------------------------------------------------------------
+
+
+def parse_ipa(data: str) -> Dict[str, IPANetDevInfo]:
+    """
+    parse 'ip a' output
+    """
     res = {}
     for line in data.split("\n"):
         if line.strip() != '' and not line[0].isspace():
@@ -294,7 +375,7 @@ def parse_ipa(data) -> Dict[str, IPANetDevInfo]:
 
 
 def parse_netdev(netdev: str) -> Dict[str, NetStats]:
-    info = {}
+    info: Dict[str, NetStats] = {}
     for line in netdev.strip().split("\n")[2:]:
         adapter, data = line.split(":")
         adapter = adapter.strip()
@@ -319,16 +400,6 @@ def parse_meminfo(meminfo: str) -> Dict[str, int]:
             val = int(data)
         info[name] = val
     return info
-
-
-Tp = TypeVar('Tp')
-
-
-def find(lst: List[Tp], check: Callable[[Tp], bool], default: Tp = None) -> Tp:
-    for obj in lst:
-        if check(obj):
-            return obj
-    return default
 
 
 def parse_txt_ceph_config(data: str) -> Dict[str, str]:
@@ -380,30 +451,32 @@ def parse_lsblkjs(data: List[Dict[str, Any]], hostname: str) -> Iterable[Disk]:
         yield dsk
 
 
-
 def parse_df(data: str) -> Iterator[DFInfo]:
     lines = data.strip().split("\n")
     assert lines[0].split() == ["Filesystem", "1K-blocks", "Used", "Available", "Use%", "Mounted", "on"]
-    keys = ("name", "size", None, "free", None, "mountpoint")
-
     for ln in lines[1:]:
         name, size, _, free, _, mountpoint = ln.split()
         yield DFInfo(name, int(size), int(free), mountpoint)
 
 
-def load_interfaces(host: Host, jstor_node: AttredStorage, stor_node: AttredStorage,
-                    dtime: float = None) -> Dict[str, NetworkAdapter]:
+# --- load functions ---------------------------------------------------------------------------------------------------
+
+def load_interfaces(dtime: float,
+                    hostname: str,
+                    perf_monitoring: Any,
+                    jstor_node: AttredStorage,
+                    stor_node: AttredStorage) -> Dict[str, NetworkAdapter]:
     # net_stats = parse_netdev(stor_node.netdev)
     ifs_info = parse_ipa(stor_node.ipa)
     net_adapters = {}
 
     for name, adapter_dct in jstor_node.interfaces.items():
-        if dtime and dtime > 1.0 and host.perf_monitoring:
-            params: Dict[str, float] = {}
-            load_node = host.perf_monitoring.get('net-io', {}).get(adapter_dct['dev'], {})
+        if dtime > 1.0 and perf_monitoring:
+            params: Dict[str, numpy.ndarray[int]] = {}
+            load_node = perf_monitoring.get('net-io', {}).get(adapter_dct['dev'], {})
             for metric in 'send_bytes send_packets recv_packets recv_bytes'.split():
                 params[metric] = numpy.array(load_node[metric])
-            load = NetLoad(**params)
+            load: Optional[NetLoad] = NetLoad(**params)  # type: ignore
         else:
             load = None
 
@@ -412,7 +485,7 @@ def load_interfaces(host: Host, jstor_node: AttredStorage, stor_node: AttredStor
         try:
             adapter.mtu = ifs_info[adapter.dev].mtu
         except KeyError:
-            logger.warning("Can't get mtu for interface %s on node %s", adapter.dev, host.name)
+            logger.warning("Can't get mtu for interface %s on node %s", adapter.dev, hostname)
 
         net_adapters[adapter.dev] = adapter
 
@@ -433,32 +506,30 @@ def load_interfaces(host: Host, jstor_node: AttredStorage, stor_node: AttredStor
     return net_adapters
 
 
-def load_hdds(host: Host, jstor_node: AttredStorage, stor_node: AttredStorage) -> \
-            Tuple[Dict[str, Disk], Dict[str, Mountable]]:
+def load_hdds(hostname: str,
+              jstor_node: AttredStorage,
+              stor_node: AttredStorage) -> Tuple[Dict[str, Disk], Dict[str, Mountable]]:
 
     disks: Dict[str, Disk] = {}
     storage_devs: Dict[str, Mountable] = {}
     df_info = {info.name: info for info in parse_df(stor_node.df)}
 
-    for dsk in parse_lsblkjs(jstor_node.lsblkjs['blockdevices'], host.name):
+    for dsk in parse_lsblkjs(jstor_node.lsblkjs['blockdevices'], hostname):
         disks[dsk.name] = dsk
-        for part in [dsk] + list(dsk.partitions.values()):
-            part.free_space = df_info.get(part.name, {}).get('free', None)
-        storage_devs[dsk.name] = dsk
+        for part in [dsk] + list(dsk.partitions.values()):  # type: ignore
+            if part.name in df_info:
+                part.free_space = df_info[part.name].free
+        storage_devs[dsk.name] = dsk  # type: ignore
         storage_devs.update(dsk.partitions)
     return disks, storage_devs
 
 
-def fill_io_devices_usage_stats(host: Host):
-    if 'block-io' not in host.perf_monitoring:
+def fill_io_devices_usage_stats(dtime: float, perf_monitoring: Any, disks: Dict[str, Disk]):
+    if 'block-io' not in perf_monitoring or dtime < 1.0:
         return
 
-    dtime = host.perf_monitoring['collected_at'][-1] - host.perf_monitoring['collected_at'][0]
-    if dtime < 1.0:
-        return
-
-    for dev, data in host.perf_monitoring['block-io'].items():
-        if dev in host.disks:
+    for dev, data in perf_monitoring['block-io'].items():
+        if dev in disks:
             MS2S = 0.001
             read_iops = sum(data['reads_completed']) / dtime
             write_iops = sum(data['writes_completed']) / dtime
@@ -472,13 +543,21 @@ def fill_io_devices_usage_stats(host: Host):
                             w_io_time=w_io_time,
                             iops=iops,
                             queue_depth=w_io_time,
-                            lat=w_io_time / iops if iops > 1E-5 else None)
-            host.disks[dev].load = load
+                            lat=w_io_time / iops if iops > 1E-5 else None,
+                            read_bytes_v=data['sectors_read'],
+                            write_bytes_v=data['sectors_written'],
+                            read_iops_v=data['reads_completed'],
+                            write_iops_v=data['writes_completed'],
+                            io_time_v=MS2S * data['io_time'],
+                            w_io_time_v=MS2S * data['weighted_io_time'],
+                            iops_v=data['reads_completed'] + data['writes_completed'],
+                            queue_depth_v=data['weighted_io_time'])
+            disks[dev].load = load
         else:
             logger.warning("No load info for %s", dev)
 
 
-def load_pools(storage: AttredStorage, is_luminous: bool):
+def load_pools(storage: TypedStorage, is_luminous: bool) -> Dict[int, Pool]:
     df_info: Dict[int, PoolDF] = {}
 
     for df_dict in storage.json.master.rados_df['pools']:
@@ -503,17 +582,18 @@ def load_pools(storage: AttredStorage, is_luminous: bool):
                                                   else info['crush_ruleset']),
                               extra=info,
                               df=df_info[pool_id])
+    return pools
 
 
-def load_perf_monitoring(storage: AttredStorage) \
+def load_perf_monitoring(storage: TypedStorage) \
         -> Tuple[Optional[Dict[str, Dict]], Optional[Dict[int, Dict]], Optional[Dict[int, str]]]:
 
     if 'perf_monitoring' not in storage.txt:
         return None, None, None
 
-    all_data = {}
-    osd_perf_dump = {}
-    osd_historic_ops_paths = {}
+    all_data: Dict[str, Dict] = {}
+    osd_perf_dump: Dict[int, Any] = {}
+    osd_historic_ops_paths: Dict[int, str] = {}
     osd_rr = re.compile(r"osd(\d+)$")
     for is_file, host_id in storage.txt.perf_monitoring:
         if is_file:
@@ -565,14 +645,13 @@ def load_perf_monitoring(storage: AttredStorage) \
     return all_data, osd_perf_dump, osd_historic_ops_paths
 
 
-def load_PG_distribution(storage: AttredStorage) -> Tuple[Dict[int, Dict[str, int]], Dict[str, int], Dict[int, int]]:
+def load_PG_distribution(storage: TypedStorage) -> Tuple[Dict[int, Dict[str, int]], Dict[str, int], Dict[int, int]]:
     try:
         pg_dump = storage.json.master.pg_dump
     except AttributeError:
         pg_dump = None
 
-    pool_id2name: Dict[Tuple[int, str]] = \
-        dict((dt['poolnum'], dt['poolname']) for dt in storage.json.master.osd_lspools)
+    pool_id2name: Dict[int, str] = {dt['poolnum']: dt['poolname'] for dt in storage.json.master.osd_lspools}
 
     pg_missing_reported = False
     osd_pool_pg_2d: Dict[int, Dict[str, int]] = collections.defaultdict(lambda: collections.Counter())
@@ -610,7 +689,7 @@ def load_PG_distribution(storage: AttredStorage) -> Tuple[Dict[int, Dict[str, in
             dict(sum_per_pool.items()), dict(sum_per_osd.items())
 
 
-def load_monitors(storage: AttredStorage, is_luminous: bool) -> List[CephMonitor]:
+def load_monitors(storage: TypedStorage, is_luminous: bool) -> List[CephMonitor]:
     if is_luminous:
         mons = storage.json.master.status['monmap']['mons']
         # mon_status = self.storage.json.master.mon_status
@@ -630,107 +709,7 @@ def load_monitors(storage: AttredStorage, is_luminous: bool) -> List[CephMonitor
     return mons
 
 
-@dataclass
-class Cluster:
-    hosts: Dict[str, Host]
-    ip2host: Dict[str, Host]
-    report_collected_at_local: str
-    report_collected_at_gmt: str
-    perf_data: Any = None
-
-    @property
-    def has_performance_data(self) -> bool:
-        return self.perf_data is not None
-
-
-@dataclass
-class CephStatus:
-    overall_status: CephStatusCode
-    health_summary: str
-    num_pgs: int
-
-    bytes_used: int
-    bytes_total: int
-    bytes_avail: int
-
-    data_bytes: int
-    write_bytes_sec: int
-    op_per_sec: int
-    pgmap_stat: Any
-    monmap_stat: Any
-
-
-@dataclass
-class CephInfo:
-    osds: List[CephOSD]
-    mons: List[CephMonitor]
-    pools: Dict[str, Pool]
-    osd_map: Dict[int, CephOSD]
-
-    # pg distribution
-    osd_pool_pg_2d: Dict[int, Dict[str, int]]
-    sum_per_pool: Dict[str, int]
-    sum_per_osd: Dict[int, int]
-
-    is_luminous: bool
-
-    crush: Crush
-    cluster_net: IPv4Network
-    public_net: IPv4Network
-    settings: AttredDict
-
-    status: CephStatus
-
-
-version_rr = re.compile(r'osd.(?P<osd_id>\d+)\s*:\s*' +
-                        r'\{"version":"ceph version\s+(?P<version>[^ ]*)\s+\((?P<hash>[^)]*?)\).*?"\}\s*$')
-
-
-def load_cluster(storage: AttredStorage) -> Cluster:
-    load_hosts()
-    coll_time = storage.txt['master/collected_at'].strip()
-    report_collected_at_local, report_collected_at_gmt, _ = coll_time.split("\n")
-    pass
-
-
-def load_ceph(storage: AttredStorage, cluster: Cluster) -> CephInfo:
-    settings = AttredDict(**parse_txt_ceph_config(storage.txt.master.default_config))
-    cluster_net = IPv4Network(settings['cluster_network'])
-    public_net = IPv4Network(settings['public_network'])
-
-    try:
-        info = storage.json.master.mon_status['feature_map']['mon']['group']
-        is_luminous = info['release'] == 'luminous'
-    except KeyError:
-        is_luminous = False
-
-    crush = load_crushmap(content=storage.txt.master.crushmap)
-    perf_data, osd_perf_dump, osd_historic_ops_paths = load_perf_monitoring(storage)
-    has_performance_data = perf_data is not None
-
-    status = load_ceph_status(storage, is_luminous)
-
-    osd_pool_pg_2d, sum_per_pool, sum_per_osd = load_PG_distribution(storage)
-
-    self.load_osds()
-
-    pools = load_pools(storage, is_luminous)
-    mons = load_monitors(storage, is_luminous)
-
-    for mon in mons:
-        try:
-            cluster.hosts[mon.host].mon_name = mon.name
-        except KeyError:
-            msg = "Can't found host for monitor {0!r}".format(mon.name)
-            logger.error(msg)
-            raise ValueError(msg)
-
-    logger.info("Cluster loaded")
-
-    return CephInfo()
-
-
-def load_ceph_status(storage: AttredStorage, is_luminous: bool) -> CephStatus:
+def load_ceph_status(storage: TypedStorage, is_luminous: bool) -> CephStatus:
     mstorage = storage.json.master
     pgmap = mstorage.status['pgmap']
     health = mstorage.status['health']
@@ -747,218 +726,291 @@ def load_ceph_status(storage: AttredStorage, is_luminous: bool) -> CephStatus:
                       monmap_stat=mstorage.status['monmap'])
 
 
-def load_hosts(self):
-    hosts = self.storage.txt.hosts
-    tcp_sock_re = re.compile('(?im)^tcp6?\\b')
-    udp_sock_re = re.compile('(?im)^udp6?\\b')
-
-    for is_file, host_ip_name in hosts:
-        assert not is_file
-        ip, host_name = host_ip_name.split("-", 1)
-
-        stor_node = hosts[host_ip_name]
-        jstor_node = self.storage.json.hosts[host_ip_name]
-
-        host = self.hosts[host.name] = Host(host_name, stor_id=host_ip_name)
-
-        lshw_xml = stor_node.get('lshw', ext='xml')
-
-        if lshw_xml is None:
-            host.hw_info = None
-        else:
-            try:
-                host.hw_info = get_hw_info(lshw_xml)
-            except:
-                host.hw_info = None
-
-        info = parse_meminfo(stor_node.meminfo)
-        host.mem_total = info['MemTotal']
-        host.mem_free = info['MemFree']
-        host.swap_total = info['SwapTotal']
-        host.swap_free = info['SwapFree']
-
-        loadavg = stor_node.get('loadavg')
-        host.load_5m = None if loadavg is None else float(loadavg.strip().split()[1])
-        host.open_tcp_sock = len(tcp_sock_re.findall(stor_node.netstat))
-        host.open_udp_sock = len(udp_sock_re.findall(stor_node.netstat))
-
-        host.uptime = float(stor_node.uptime.split()[0])
-        host.disks, host.storage_devs = load_hdds(host, jstor_node, stor_node)
-
-        if self.has_performance_data:
-            host.perf_monitoring = self.perf_data.get(host.stor_id)
-            host.perf_monitoring['collected_at'] = host.perf_monitoring['collected_at']
-        else:
-            host.perf_monitoring = None
-
-        if host.perf_monitoring:
-            dtime = (host.perf_monitoring['collected_at'][-1] - host.perf_monitoring['collected_at'][0])
-            fill_io_devices_usage_stats(host)
-        else:
-            dtime = None
-
-        host.net_adapters = load_interfaces(host, jstor_node, stor_node, dtime)
-
-        for adapter in host.net_adapters.values():
-            for ip in adapter.ips:
-                ip_s = str(ip.ip)
-                if not ip_s.startswith('127.'):
-                    if ip_s in self.ip2host:
-                        logger.error("Ip %s beelong to both %s and %s. Skipping new host",
-                                     ip_s, host.name, self.ip2host[ip_s].name)
-                        continue
-
-                    self.ip2host[ip_s] = host
-                    if ip.ip in self.cluster_net:
-                        host.ceph_cluster_adapter = adapter
-
-                    if ip.ip in self.public_net:
-                        host.ceph_public_adapter = adapter
+version_rr = re.compile(r'osd.(?P<osd_id>\d+)\s*:\s*' +
+                        r'\{"version":"ceph version\s+(?P<version>[^ ]*)\s+\((?P<hash>[^)]*?)\).*?"\}\s*$')
 
 
-def load_osds(self):
-    osd_rw_dict = dict((node['id'], node['reweight'])
-                       for node in self.storage.json.master.osd_tree['nodes']
-                       if node['id'] >= 0)
+def avg_counters(counts: List[int], values: List[float]) -> numpy.ndarray:
+    counts_a = numpy.array(counts, dtype=numpy.float32)
+    values_a = numpy.array(values, dtype=numpy.float32)
 
-    try:
-        fc = self.storage.txt.master.osd_versions
-    except:
-        fc = self.storage.raw.get_raw('master/osd_versions.err').decode("utf8")
+    with numpy.errstate(divide='ignore', invalid='ignore'):  # type: ignore
+        avg_vals = (values_a[1:] - values_a[:-1]) / (counts_a[1:] - counts_a[:-1])
 
-    osd_versions: Dict[int, CephVersion] = {}
-    for line in fc.split("\n"):
-        line = line.strip()
-        if line:
-            rr = self.version_rr.match(line.strip())
-            if rr:
+    avg_vals[avg_vals == numpy.inf] = NO_VALUE
+    avg_vals[numpy.isnan(avg_vals)] = NO_VALUE  # type: ignore
+
+    return avg_vals  # type: ignore
+
+
+def load_osd_perf_data(osd_id: int,
+                       storage_type: OSDStoreType,
+                       osd_perf_dump: Dict[int, Dict]) -> Dict[str, numpy.ndarray]:
+    osd_perf_dump = osd_perf_dump[osd_id]
+    osd_perf: Dict[str,numpy.ndarray] = {}
+
+    if storage_type == OSDStoreType.filestore:
+        fstor = [obj["filestore"] for obj in osd_perf_dump.values()]
+        for field in ("apply_latency", "commitcycle_latency", "journal_latency"):
+            count = [obj[field]["avgcount"] for obj in fstor]
+            values = [obj[field]["sum"] for obj in fstor]
+            osd_perf[field] = avg_counters(count, values)
+
+        arr = numpy.array([obj['journal_wr_bytes']["avgcount"] for obj in fstor], dtype=numpy.float32)
+        osd_perf["journal_ops"] = arr[1:] - arr[:-1]  # type: ignore
+        arr = numpy.array([obj['journal_wr_bytes']["sum"] for obj in fstor], dtype=numpy.float32)
+        osd_perf["journal_bytes"] = arr[1:] - arr[:-1]  # type: ignore
+    else:
+        bstor = [obj["bluestore"] for obj in osd_perf_dump.values()]
+        for field in ("commit_lat",):
+            count = [obj[field]["avgcount"] for obj in bstor]
+            values = [obj[field]["sum"] for obj in bstor]
+            osd_perf[field] = avg_counters(count, values)
+
+    return osd_perf
+
+
+class Loader:
+    def __init__(self, storage: TypedStorage) -> None:
+        self.storage = storage
+        self.ip2host: Dict[str, Host] = {}
+        self.perf_data: Any = None
+
+    def load_cluster(self) -> Cluster:
+        coll_time = self.storage.txt['master/collected_at'].strip()
+        report_collected_at_local, report_collected_at_gmt, _ = coll_time.split("\n")
+        hosts, self.ip2host = self.load_hosts()
+        return Cluster(hosts=hosts,
+                       ip2host=self.ip2host,
+                       report_collected_at_local=report_collected_at_local,
+                       report_collected_at_gmt=report_collected_at_gmt,
+                       perf_data=self.perf_data)
+
+    def load_ceph(self) -> CephInfo:
+        settings = AttredDict(**parse_txt_ceph_config(self.storage.txt.master.default_config))
+        cluster_net = IPv4Network(settings['cluster_network'])
+        public_net = IPv4Network(settings['public_network'])
+
+        try:
+            info = self.storage.json.master.mon_status['feature_map']['mon']['group']
+            is_luminous = info['release'] == 'luminous'
+        except KeyError:
+            is_luminous = False
+
+        crush = load_crushmap(content=self.storage.txt.master.crushmap)
+        perf_data, osd_perf_dump, osd_historic_ops_paths = load_perf_monitoring(self.storage)
+
+        status = load_ceph_status(self.storage, is_luminous)
+
+        osd_pool_pg_2d, sum_per_pool, sum_per_osd = load_PG_distribution(self.storage)
+
+        osd_map = self.load_osds(sum_per_osd, osd_perf_dump, osd_historic_ops_paths)
+
+        pools = load_pools(self.storage, is_luminous)
+        mons = load_monitors(self.storage, is_luminous)
+
+        return CephInfo(osds=sorted(osd_map.values(), key=lambda x: x.id),
+                        mons=mons,
+                        status=status,
+                        pools={pool.name: pool for pool in pools.values()},
+                        osd_map=osd_map,
+                        osd_pool_pg_2d=osd_pool_pg_2d,
+                        sum_per_pool=sum_per_pool,
+                        sum_per_osd=sum_per_osd,
+                        is_luminous=is_luminous,
+                        crush=crush,
+                        cluster_net=cluster_net,
+                        public_net=public_net,
+                        settings=settings)
+
+    def load_hosts(self) -> Tuple[Dict[str, Host], Dict[str, Host]]:
+        hosts: Dict[str, Host] = {}
+        tcp_sock_re = re.compile('(?im)^tcp6?\\b')
+        udp_sock_re = re.compile('(?im)^udp6?\\b')
+        ip2host: Dict[str, Host] = {}
+
+        for is_file, host_ip_name in self.storage.txt.hosts:
+            assert not is_file
+            _, hostname = host_ip_name.split("-", 1)
+
+            stor_node = self.storage.txt.hosts[host_ip_name]
+            jstor_node = self.storage.json.hosts[host_ip_name]
+
+            lshw_xml = stor_node.get('lshw', ext='xml')
+            hw_info = None
+            if lshw_xml is not None:
+                try:
+                    hw_info = parse_hw_info(lshw_xml)
+                except:
+                    pass
+
+            loadavg = stor_node.get('loadavg')
+            disks, storage_devs = load_hdds(hostname, jstor_node, stor_node)
+
+            if self.perf_data is not None:
+                perf_monitoring = self.perf_data.get(host_ip_name)
+                dtime = perf_monitoring['collected_at'][-1] - perf_monitoring['collected_at'][0]
+                fill_io_devices_usage_stats(dtime, perf_monitoring, disks)
+            else:
+                perf_monitoring = None
+                dtime = None
+
+            net_adapters = load_interfaces(dtime, hostname, perf_monitoring, jstor_node, stor_node)
+
+            info = parse_meminfo(stor_node.meminfo)
+            host = Host(name=hostname,
+                        stor_id=host_ip_name,
+                        net_adapters=net_adapters,
+                        disks=disks,
+                        storage_devs=storage_devs,
+                        uptime=float(stor_node.uptime.split()[0]),
+                        perf_monitoring=perf_monitoring,
+                        open_tcp_sock=len(tcp_sock_re.findall(stor_node.netstat)),
+                        open_udp_sock=len(udp_sock_re.findall(stor_node.netstat)),
+                        mem_total=info['MemTotal'],
+                        mem_free=info['MemFree'],
+                        swap_total=info['SwapTotal'],
+                        swap_free=info['SwapFree'],
+                        load_5m=None if loadavg is None else float(loadavg.strip().split()[1]),
+                        hw_info=hw_info)
+
+            hosts[host.name] = host
+
+            for adapter in net_adapters.values():
+                for ip in adapter.ips:
+                    ip_s = str(ip.ip)
+                    if not ip_s.startswith('127.'):
+                        if ip_s in ip2host:
+                            logger.error("Ip %s beelong to both %s and %s. Skipping new host",
+                                         ip_s, hostname, ip2host[ip_s].name)
+                            continue
+                        ip2host[ip_s] = host
+
+        return hosts, ip2host
+
+    def load_osds(self,
+                  sum_per_osd: Optional[Dict[int, int]],
+                  osd_perf_dump: Optional[Dict[int, Dict]],
+                  osd_historic_ops_paths: Optional[Dict[int, str]]) -> Dict[int, CephOSD]:
+
+        osd_rw_dict = dict((node['id'], node['reweight'])
+                           for node in self.storage.json.master.osd_tree['nodes']
+                           if node['id'] >= 0)
+
+        try:
+            fc = self.storage.txt.master.osd_versions
+        except:
+            fc = self.storage.raw.get_raw('master/osd_versions.err').decode("utf8")
+
+        osd_versions: Dict[int, CephVersion] = {}
+        for line in fc.split("\n"):
+            line = line.strip()
+            if line:
+                rr = version_rr.match(line.strip())
+                if not rr:
+                    raise ValueError(f"Can't parse OSD version {line.strip()}")
                 major, minor, bugfix = map(int, rr.group('version').split('.'))
                 osd_versions[int(rr.group('osd_id'))] = CephVersion(major, minor, bugfix, rr.group('hash'))
 
-    osd_perf_scalar = {}
-    for node in self.storage.json.master.osd_perf['osd_perf_infos']:
-        osd_perf_scalar[node['id']] = {"apply_latency_s": node["perf_stats"]["apply_latency_ms"],
-                                       "commitcycle_latency_s": node["perf_stats"]["commit_latency_ms"]}
+        osd_perf_scalar = {}
+        for node in self.storage.json.master.osd_perf['osd_perf_infos']:
+            osd_perf_scalar[node['id']] = {"apply_latency_s": node["perf_stats"]["apply_latency_ms"],
+                                           "commitcycle_latency_s": node["perf_stats"]["commit_latency_ms"]}
 
-    osd_df_map = {node['id']: node for node in self.storage.json.master.osd_df['nodes']}
+        osd_df_map = {node['id']: node for node in self.storage.json.master.osd_df['nodes']}
+        osd_map: Dict[int, CephOSD] = {}
 
-    for osd_data in self.storage.json.master.osd_dump['osds']:
-        osd_id = osd_data['osd']
-        osd_df_data = osd_df_map[osd_id]
-        used_space = osd_df_data['kb_used'] * 1024
-        free_space = osd_df_data['kb_avail']  * 1024
-        cluster_ip = osd_data['cluster_addr'].split(":", 1)[0]
+        for osd_data in self.storage.json.master.osd_dump['osds']:
+            osd_id = osd_data['osd']
+            osd_df_data = osd_df_map[osd_id]
+            used_space = osd_df_data['kb_used'] * 1024
+            free_space = osd_df_data['kb_avail']  * 1024
+            cluster_ip = osd_data['cluster_addr'].split(":", 1)[0]
 
-        try:
-            host = self.ip2host[cluster_ip]
-        except KeyError:
-            logger.exception("Can't found host for osd %s, as no host own %r ip addr", osd_id, cluster_ip)
-            raise
+            try:
+                host = self.ip2host[cluster_ip]
+            except KeyError:
+                logger.exception("Can't found host for osd %s, as no host own %r ip addr", osd_id, cluster_ip)
+                raise
 
-        osd = CephOSD(
-                id=osd_id,
-                cluster_ip=cluster_ip,
-                public_ip=osd_data['public_addr'].split(":", 1)[0],
-                reweight=osd_rw_dict[osd_id],
-                status=OSDStatus.up if osd_data['up'] else OSDStatus.down,
-                version=osd_versions.get(osd_id),
-                pg_count=None if self.sum_per_osd is None else self.sum_per_osd[osd_id],
-                used_space=used_space,
-                free_space=free_space,
-                free_perc=int((free_space * 100.0) / (free_space + used_space) + 0.5),
-                host=host)
+            osd = CephOSD(
+                    id=osd_id,
+                    cluster_ip=cluster_ip,
+                    public_ip=osd_data['public_addr'].split(":", 1)[0],
+                    reweight=osd_rw_dict[osd_id],
+                    status=OSDStatus.up if osd_data['up'] else OSDStatus.down,
+                    version=osd_versions[osd_id],
+                    pg_count=None if sum_per_osd is None else sum_per_osd[osd_id],
+                    used_space=used_space,
+                    free_space=free_space,
+                    free_perc=int((free_space * 100.0) / (free_space + used_space) + 0.5),
+                    host=host)
 
-        self.osds.append(osd)
-        self.osd_map[osd.id] = osd
-        osd.host.osd_ids.add(osd.id)
+            osd_map[osd.id] = osd
 
-        if osd.status == 'down':
-            continue
+            if osd.status != OSDStatus.down:
+                config = AttredDict(**parse_txt_ceph_config(self.storage.txt.osd[str(osd_id)].config))
 
-        config = AttredDict(**parse_txt_ceph_config(self.storage.txt.osd[str(osd_id)].config))
+                osd_stor_node = self.storage.json.osd[str(osd.id)]
+                osd_disks_info = osd_stor_node.devs_cfg
 
-        osd_stor_node = self.storage.json.osd[str(osd.id)]
-        osd_disks_info = osd_stor_node.devs_cfg
+                if osd_disks_info['type'] == 'filestore':
+                    osd.storage_type = OSDStoreType.filestore
+                elif osd_disks_info['type'] == 'bluestore':
+                    osd.storage_type = OSDStoreType.bluestore
+                else:
+                    raise ValueError(f"Unknown storage type {osd_disks_info['type']} for osd {osd_id}")
 
-        if osd_disks_info['type'] == 'filestore':
-            osd.storage_type = OSDStoreType.filestore
-        elif osd_disks_info['type'] == 'bluestore':
-            osd.storage_type = OSDStoreType.bluestore
-        else:
-            raise ValueError("Unknown storage type {} for osd {}".format(osd_disks_info['type'], osd_id))
+                osd.run_info = OSDRunInfo(
+                    config=config,
+                    procinfo=self.storage.json.osd[str(osd.id)].procinfo,
+                    cmdline=self.storage.raw.get_raw('osd/{0}/cmdline'.format(osd.id)).split("\x00")
+                )
 
-        osd.run_info = OSDRunInfo(
-            config=config,
-            procinfo=self.storage.json.osd[str(osd.id)].procinfo,
-            cmdline=self.storage.raw.get_raw('osd/{0}/cmdline'.format(osd.id)).split("\x00")
-        )
+                if osd.storage_type == OSDStoreType.filestore:
+                    stor_info: Union[FileStoreInfo, BlueStoreInfo] = FileStoreInfo(
+                        data_dev = osd_disks_info['r_data'],
+                        data_partition = osd_disks_info['data'],
+                        journal_dev=osd_disks_info['r_journal'],
+                        journal_partition=osd_disks_info['journal'],
+                    )
 
-        if osd.storage_type == OSDStoreType.filestore:
-            stor_info = FileStoreInfo(
-                data_dev = osd_disks_info['r_data'],
-                data_partition = osd_disks_info['data'],
-                journal_dev=osd_disks_info['r_journal'],
-                journal_partition=osd_disks_info['journal'],
-            )
+                    if self.perf_data is not None:
+                        assert isinstance(stor_info, FileStoreInfo)  # make mypy happy
+                        j_dev = get_dev_file_name(stor_info.journal_dev)
+                        stor_info.j_stor_stats = osd.host.disks[j_dev].load
+                else:
+                    assert osd.storage_type == OSDStoreType.bluestore
 
-            if self.has_performance_data:
-                stor_info.j_stor_stats = osd.host.disks[get_dev_file_name(stor_info.journal_dev)].load
-        else:
-            assert osd.storage_type == OSDStoreType.bluestore
+                    stor_info = BlueStoreInfo(
+                        data_dev=osd_disks_info['r_data'],
+                        data_partition=osd_disks_info['data'],
+                        db_dev=osd_disks_info['r_db'],
+                        db_partition=osd_disks_info['db'],
+                        wal_dev=osd_disks_info['r_wal'],
+                        wal_partition=osd_disks_info['wal']
+                    )
 
-            stor_info = BlueStoreInfo(
-                data_dev = osd_disks_info['r_data'],
-                data_partition = osd_disks_info['data'],
-                db_dev = osd_disks_info['r_db'],
-                db_partition = osd_disks_info['db'],
-                wal_dev = osd_disks_info['r_wal'],
-                wal_partition = osd_disks_info['wal']
-            )
+                    if self.perf_data is not None:
+                        assert isinstance(stor_info, BlueStoreInfo)  # make mypy happy
+                        w_dev = get_dev_file_name(stor_info.wal_dev)
+                        stor_info.wal_stor_stats = osd.host.disks[w_dev].load
+                        db_dev = get_dev_file_name(stor_info.db_dev)
+                        stor_info.db_stor_stats = osd.host.disks[db_dev].load
 
-            if self.has_performance_data:
-                stor_info.wal_stor_stats = osd.host.disks[get_dev_file_name(stor_info.wal_dev)].load
-                stor_info.db_stor_stats = osd.host.disks[get_dev_file_name(stor_info.db_dev)].load
+                if osd_perf_dump is not None and osd.id in osd_perf_dump:
+                    osd.osd_perf = load_osd_perf_data(osd.id, osd.storage_type, osd_perf_dump)  # type: ignore
+                    osd.osd_perf.update(osd_perf_scalar[osd_id])  # type: ignore
+                    stor_info.data_stor_stats = osd.host.disks[get_dev_file_name(stor_info.data_dev)].load
 
-        if self.has_performance_data:
-            stor_info.data_stor_stats = osd.host.disks[get_dev_file_name(stor_info.data_dev)].load
+                    if osd_historic_ops_paths is not None:
+                        osd.historic_ops_storage_path = osd_historic_ops_paths.get(osd.id)
 
-        osd.storage_info = stor_info
+                osd.storage_info = stor_info
 
-        def avg_counters(counts: List[int], values: List[float]):
-            counts_a = numpy.array(counts, dtype=numpy.float32)
-            values_a = numpy.array(values, dtype=numpy.float32)
+        return osd_map
 
-            with numpy.errstate(divide='ignore', invalid='ignore'):
-                avg_vals = (values_a[1:] - values_a[:-1]) / (counts_a[1:] - counts_a[:-1])
 
-            avg_vals[avg_vals == numpy.inf] = NO_VALUE
-            avg_vals[numpy.isnan(avg_vals)] = NO_VALUE
-
-            return avg_vals
-
-        if self.has_performance_data and osd.id in self.osd_perf_dump:
-            osd_perf_dump = self.osd_perf_dump[osd.id]
-
-            if osd.storage_type == OSDStoreType.filestore:
-                fstor = [obj["filestore"] for obj in osd_perf_dump]
-                for field in ("apply_latency", "commitcycle_latency", "journal_latency"):
-                    count = [obj[field]["avgcount"] for obj in fstor]
-                    values = [obj[field]["sum"] for obj in fstor]
-                    osd.osd_perf[field] = avg_counters(count, values)
-
-                arr = numpy.array([obj['journal_wr_bytes']["avgcount"] for obj in fstor], dtype=numpy.float32)
-                osd.osd_perf["journal_ops"] = arr[1:] - arr[:-1]
-                arr = numpy.array([obj['journal_wr_bytes']["sum"] for obj in fstor], dtype=numpy.float32)
-                osd.osd_perf["journal_bytes"] = arr[1:] - arr[:-1]
-            else:
-                bstor = [obj["bluestore"] for obj in osd_perf_dump]
-                for field in ("commit_lat",):
-                    count = [obj[field]["avgcount"] for obj in bstor]
-                    values = [obj[field]["sum"] for obj in bstor]
-                    osd.osd_perf[field] = avg_counters(count, values)
-
-            osd.osd_perf.update(osd_perf_scalar[osd.id])
-            if self.osd_historic_ops_paths is not None:
-                osd.historic_ops_storage_path = self.osd_historic_ops_paths.get(osd.id)
-
-    self.osds.sort(key=lambda x: x.id)
+def load_all(storage: TypedStorage) -> Tuple[Cluster, CephInfo]:
+    l = Loader(storage)
+    return l.load_cluster(), l.load_ceph()

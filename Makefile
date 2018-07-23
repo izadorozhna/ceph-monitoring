@@ -2,8 +2,8 @@
 
 # ALL_FILES=$(shell find ceph_monitoring/ -type f -name '*.py')
 # ALL_FILES=ceph_monitoring/collect_info.py
-ALL_FILES=ceph_monitoring/cluster.py ceph_monitoring/visualize_cluster.py ceph_monitoring/osd_ops.py ceph_monitoring/hw_info.py ceph_monitoring/resource_usage.py
-STUBS="stubs:../venvs/wally/lib/python3.5/site-packages/"
+ALL_FILES=ceph_monitoring/visualize_cluster.py ceph_monitoring/resource_usage.py ceph_monitoring/osd_ops.py ceph_monitoring/hw_info.py ceph_monitoring/cluster.py
+STUBS="/home/koder/workspace/typeshed"
 
 mypy:
 		MYPYPATH=${STUBS} python -m mypy --ignore-missing-imports --follow-imports=skip ${ALL_FILES}

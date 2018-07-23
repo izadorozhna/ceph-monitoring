@@ -14,10 +14,10 @@ from matplotlib import pyplot
 
 from cephlib.plot import plot_histo, hmap_from_2d, plot_hmap_with_histo
 
-from .cluster import NO_VALUE, CephCluster
+from .cluster import NO_VALUE, CephInfo
 from .osd_ops import calc_stages_time, iter_ceph_ops, ALL_STAGES
 from .perf_parser import STAGES_PRINTABLE_NAMES
-from .resource_usage import get_resource_usage
+from .resource_usage import get_hdd_resource_usage
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -57,22 +57,22 @@ def plot_img(func: Callable, *args, **kwargs) -> Any:
     return get_img(fig)
 
 
-def show_osd_used_space_histo(report: ReportProto, cluster: CephCluster, min_osd: int = 3):
+def show_osd_used_space_histo(report: ReportProto, cluster: CephInfo, min_osd: int = 3):
     vals = [(100 - osd.free_perc) for osd in cluster.osds if osd.free_perc is not None]
     if len(vals) >= min_osd:
         img = plot_img(plot_histo, numpy.array(vals), left=0, right=100, ax=True)
         report.add_block(6, "OSD used space (GiB)", img)
 
 
-def show_osd_pg_histo(report: ReportProto, cluster: CephCluster):
+def show_osd_pg_histo(report: ReportProto, cluster: CephInfo):
     vals = numpy.array([osd.pg_count for osd in cluster.osds if osd.pg_count is not None])
     img = plot_img(plot_histo, vals, left=min(vals) * 0.9, right=max(vals) * 1.1, ax=True)
     report.add_block(6, "OSD PG", img)
 
 
-def show_osd_load(report: ReportProto, cluster: CephCluster, max_xbins: int = 25):
+def show_osd_load(report: ReportProto, cluster: CephInfo, max_xbins: int = 25):
     logger.info("Plot osd load")
-    usage = get_resource_usage(cluster)
+    usage = get_hdd_resource_usage(cluster)
 
     hm_vals, ranges = hmap_from_2d(usage.ceph_data_dev_wbytes, max_xbins=max_xbins)
     hm_vals /= 1024. ** 2
@@ -110,7 +110,7 @@ def show_osd_load(report: ReportProto, cluster: CephCluster, max_xbins: int = 25
         report.add_block(6, "OSD journal QD", img)
 
 
-def show_osd_lat_heatmaps(report: ReportProto, cluster: CephCluster, max_xbins: int = 25):
+def show_osd_lat_heatmaps(report: ReportProto, cluster: CephInfo, max_xbins: int = 25):
     logger.info("Plot osd latency heatmaps")
     for field, header in (('journal_latency', "Journal latency, ms"),
                           ('apply_latency',  "Apply latency, ms"),
@@ -132,7 +132,7 @@ def show_osd_lat_heatmaps(report: ReportProto, cluster: CephCluster, max_xbins: 
             report.add_block(6, header, img)
 
 
-def show_osd_ops_boxplot(report: ReportProto, cluster: CephCluster):
+def show_osd_ops_boxplot(report: ReportProto, cluster: CephInfo):
     logger.info("Loading ceph historic ops data")
     ops = []
 
@@ -164,7 +164,7 @@ def show_osd_ops_boxplot(report: ReportProto, cluster: CephCluster):
     logger.info("Done")
 
 
-def plot_crush(report: ReportProto, cluster: CephCluster):
+def plot_crush(report: ReportProto, cluster: CephInfo):
     logger.info("Plot crushmap")
 
     G = networkx.DiGraph()

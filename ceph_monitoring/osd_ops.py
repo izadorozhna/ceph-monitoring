@@ -1,8 +1,7 @@
 import sys
 import pathlib
-import itertools
 import collections
-from typing import Set, Tuple, Dict, List, Iterator
+from typing import Set, Tuple, Dict, List, Iterator, IO
 
 from cephlib.sensors_rpc_plugin import CephOp
 
@@ -26,6 +25,7 @@ def find_closest_pars(pairs: Set[Tuple[str, str]]) -> Set[Tuple[str, str]]:
 
     return close_pairs
 
+
 ALL_STAGES = ['queued_for_pg', 'reached_pg', 'started', 'op_commit', 'sub_op_commit_rec', 'op_applied',
               'commit_sent', 'done']
 
@@ -40,7 +40,7 @@ prev_op = {'commit_sent': 'sub_op_commit_rec',
 
 def detect_order(pairs: Set[Tuple[str, str]]) -> Iterator[Tuple[str, List[str]]]:
     next_evts = {e1 for e1, _ in pairs}.difference({e2 for _, e2 in pairs})
-    processed = set()
+    processed: Set[str] = set()
     while next_evts:
         new_next = set()
         for evt in next_evts:
@@ -73,8 +73,8 @@ def get_events_for_op(op_events: List[Dict[str, str]]) -> List[str]:
     return names
 
 
-def get_uniq_evt_sets_counts(evts: List[Tuple[str, ...]]) -> Dict[Tuple[str], int]:
-    uniq = collections.defaultdict(int)  # type: Dict[Tuple[str], int]
+def get_uniq_evt_sets_counts(evts: List[Tuple[str, ...]]) -> Dict[Tuple[str, ...], int]:
+    uniq: Dict[Tuple[str, ...], int] = collections.defaultdict(int)
     for names in evts:
         uniq[tuple(sorted(names))] += 1
     return uniq
@@ -83,10 +83,10 @@ def get_uniq_evt_sets_counts(evts: List[Tuple[str, ...]]) -> Dict[Tuple[str], in
 def find_deps(ops: List[CephOp]):
     # j depend on i,  i always appears before j
     dependents = {(i, j) for i in CephOp.all_stages for j in CephOp.all_stages if i != j and 'initiated' not in (i, j)}
-    all_found_stages = set()
+    all_found_stages: Set[str] = set()
 
     for op in ops:
-        prev_evts = []
+        prev_evts: List[str] = []
         for curr_evt, _ in op.iter_events():
             for prev_evt in prev_evts:
                 try:
@@ -102,7 +102,7 @@ def find_deps(ops: List[CephOp]):
         if i in all_found_stages and j in all_found_stages:
             filtered_deps.add((i, j))
 
-    all_deps = {op: [] for op in all_found_stages}
+    all_deps: Dict[str, List] = {op: [] for op in all_found_stages}
     for i, j in filtered_deps:
         all_deps[i].append(j)
 
@@ -118,7 +118,7 @@ def find_deps(ops: List[CephOp]):
         print("{} => {}".format(p1, p2))
 
 
-def iter_ceph_ops(fd):
+def iter_ceph_ops(fd: IO):
     data = fd.read()
     offset = 0
     while offset < len(data):
