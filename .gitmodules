@@ -1,9 +1,0 @@
-[submodule "modules/cephlib"]
-	path = modules/cephlib
-	url = https://github.com/koder-ua/cephlib.git
-[submodule "modules/agent"]
-	path = modules/agent
-	url = https://github.com/koder-ua/agent.git
-[submodule "modules/xmlbuilder3"]
-	path = modules/xmlbuilder3
-	url = https://github.com/koder-ua/xmlbuilder3.git
