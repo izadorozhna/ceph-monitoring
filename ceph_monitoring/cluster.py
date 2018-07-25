@@ -65,10 +65,10 @@ class Pool:
 
 @dataclass
 class NetLoad:
-    send_bytes: numpy.ndarray[int]
-    recv_bytes: numpy.ndarray[int]
-    send_packets: numpy.ndarray[int]
-    recv_packets: numpy.ndarray[int]
+    send_bytes: numpy.ndarray
+    recv_bytes: numpy.ndarray
+    send_packets: numpy.ndarray
+    recv_packets: numpy.ndarray
 
     send_bytes_avg: float = 0.0
     recv_bytes_avg: float = 0.0
@@ -92,11 +92,11 @@ class NetAdapterAddr:
 class NetworkAdapter:
     dev: str
     is_phy: bool
-    speed: str
-    duplex: bool
-    mtu: int
+    duplex: Optional[bool] = None
+    mtu: Optional[int] = None
+    speed: Optional[str] = None
     ips: List[NetAdapterAddr] = field(default_factory=list)
-
+    speed_s: Optional[str] = None
     load: Optional[NetLoad] = None
 
 
@@ -227,7 +227,7 @@ class OSDStatus(Enum):
 @dataclass
 class OSDRunInfo:
     procinfo: Any
-    cmdline: str
+    cmdline: List[str]
     config: Dict[str, str]
 
 
@@ -461,17 +461,18 @@ def parse_df(data: str) -> Iterator[DFInfo]:
 
 # --- load functions ---------------------------------------------------------------------------------------------------
 
-def load_interfaces(dtime: float,
+def load_interfaces(dtime: Optional[float],
                     hostname: str,
                     perf_monitoring: Any,
                     jstor_node: AttredStorage,
                     stor_node: AttredStorage) -> Dict[str, NetworkAdapter]:
+
     # net_stats = parse_netdev(stor_node.netdev)
     ifs_info = parse_ipa(stor_node.ipa)
     net_adapters = {}
 
     for name, adapter_dct in jstor_node.interfaces.items():
-        if dtime > 1.0 and perf_monitoring:
+        if dtime is not None and dtime > 1.0 and perf_monitoring:
             params: Dict[str, numpy.ndarray[int]] = {}
             load_node = perf_monitoring.get('net-io', {}).get(adapter_dct['dev'], {})
             for metric in 'send_bytes send_packets recv_packets recv_bytes'.split():
@@ -586,13 +587,13 @@ def load_pools(storage: TypedStorage, is_luminous: bool) -> Dict[int, Pool]:
 
 
 def load_perf_monitoring(storage: TypedStorage) \
-        -> Tuple[Optional[Dict[str, Dict]], Optional[Dict[int, Dict]], Optional[Dict[int, str]]]:
+        -> Tuple[Optional[Dict[str, Dict]], Optional[Dict[int, List[Dict]]], Optional[Dict[int, str]]]:
 
     if 'perf_monitoring' not in storage.txt:
         return None, None, None
 
     all_data: Dict[str, Dict] = {}
-    osd_perf_dump: Dict[int, Any] = {}
+    osd_perf_dump: Dict[int, List[Dict]] = {}
     osd_historic_ops_paths: Dict[int, str] = {}
     osd_rr = re.compile(r"osd(\d+)$")
     for is_file, host_id in storage.txt.perf_monitoring:
@@ -698,6 +699,7 @@ def load_monitors(storage: TypedStorage, is_luminous: bool) -> List[CephMonitor]
         assert len(srv_health) == 1
         mons = srv_health[0]['mons']
 
+    result: List[CephMonitor] = []
     for srv in mons:
         health = None if is_luminous else srv["health"]
         mon = CephMonitor(srv["name"], health, srv["name"], MonRole.unknown)
@@ -705,8 +707,8 @@ def load_monitors(storage: TypedStorage, is_luminous: bool) -> List[CephMonitor]
         if not is_luminous:
             mon.kb_avail = srv["kb_avail"]
             mon.avail_percent = srv["avail_percent"]
-        mons.append(mon)
-    return mons
+        result.append(mon)
+    return result
 
 
 def load_ceph_status(storage: TypedStorage, is_luminous: bool) -> CephStatus:
@@ -745,12 +747,12 @@ def avg_counters(counts: List[int], values: List[float]) -> numpy.ndarray:
 
 def load_osd_perf_data(osd_id: int,
                        storage_type: OSDStoreType,
-                       osd_perf_dump: Dict[int, Dict]) -> Dict[str, numpy.ndarray]:
+                       osd_perf_dump: Dict[int, List[Dict]]) -> Dict[str, numpy.ndarray]:
     osd_perf_dump = osd_perf_dump[osd_id]
     osd_perf: Dict[str,numpy.ndarray] = {}
 
     if storage_type == OSDStoreType.filestore:
-        fstor = [obj["filestore"] for obj in osd_perf_dump.values()]
+        fstor = [obj["filestore"] for obj in osd_perf_dump]
         for field in ("apply_latency", "commitcycle_latency", "journal_latency"):
             count = [obj[field]["avgcount"] for obj in fstor]
             values = [obj[field]["sum"] for obj in fstor]
@@ -761,7 +763,7 @@ def load_osd_perf_data(osd_id: int,
         arr = numpy.array([obj['journal_wr_bytes']["sum"] for obj in fstor], dtype=numpy.float32)
         osd_perf["journal_bytes"] = arr[1:] - arr[:-1]  # type: ignore
     else:
-        bstor = [obj["bluestore"] for obj in osd_perf_dump.values()]
+        bstor = [obj["bluestore"] for obj in osd_perf_dump]
         for field in ("commit_lat",):
             count = [obj[field]["avgcount"] for obj in bstor]
             values = [obj[field]["sum"] for obj in bstor]
@@ -890,7 +892,7 @@ class Loader:
 
     def load_osds(self,
                   sum_per_osd: Optional[Dict[int, int]],
-                  osd_perf_dump: Optional[Dict[int, Dict]],
+                  osd_perf_dump: Optional[Dict[int, List[Dict]]],
                   osd_historic_ops_paths: Optional[Dict[int, str]]) -> Dict[int, CephOSD]:
 
         osd_rw_dict = dict((node['id'], node['reweight'])
@@ -961,10 +963,13 @@ class Loader:
                 else:
                     raise ValueError(f"Unknown storage type {osd_disks_info['type']} for osd {osd_id}")
 
+                cmdln = [i.decode("utf8")
+                         for i in self.storage.raw.get_raw('osd/{0}/cmdline.bin'.format(osd.id)).split(b'\x00')]
+
                 osd.run_info = OSDRunInfo(
                     config=config,
                     procinfo=self.storage.json.osd[str(osd.id)].procinfo,
-                    cmdline=self.storage.raw.get_raw('osd/{0}/cmdline'.format(osd.id)).split("\x00")
+                    cmdline=cmdln
                 )
 
                 if osd.storage_type == OSDStoreType.filestore:
@@ -1001,7 +1006,7 @@ class Loader:
                 if osd_perf_dump is not None and osd.id in osd_perf_dump:
                     osd.osd_perf = load_osd_perf_data(osd.id, osd.storage_type, osd_perf_dump)  # type: ignore
                     osd.osd_perf.update(osd_perf_scalar[osd_id])  # type: ignore
-                    stor_info.data_stor_stats = osd.host.disks[get_dev_file_name(stor_info.data_dev)].load
+                    stor_info.data_stor_stats = osd.host.disks[stor_info.data_dev].load
 
                     if osd_historic_ops_paths is not None:
                         osd.historic_ops_storage_path = osd_historic_ops_paths.get(osd.id)

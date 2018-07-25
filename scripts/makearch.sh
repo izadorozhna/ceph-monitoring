@@ -22,6 +22,8 @@ URL=https://pypi.python.org/packages/44/88/d09c6a7fe1af4a02f16d2f1766212bec752aa
 
 gh_dep koder-ua/cephlib
 gh_dep koder-ua/agent
+gh_dep koder-ua/xmlbuilder3
+
 wget $URL
 
 cp "${cdir}/ceph_monitoring/collect_info.py" .

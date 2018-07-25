@@ -6,6 +6,7 @@ import json
 import zlib
 import array
 import socket
+import random
 import shutil
 import logging
 import os.path
@@ -141,7 +142,10 @@ class Collector:
             self.storage = saved
 
     def run(self, cmd):
-        return run_rpc_with_code(self.node.rpc, cmd, node_name=self.node.name)
+        if self.node is None:
+            return run_with_code(cmd)
+        else:
+            return run_rpc_with_code(self.node.rpc, cmd, node_name=self.node.name)
 
     def save(self, path: str, frmt: str, code: int, data: Union[str, bytes, array.array],
              check: bool = True, extra: List[str] = None) -> Optional[str]:
@@ -255,6 +259,7 @@ class CephDataCollector(Collector):
     def __init__(self, *args, **kwargs) -> None:
         Collector.__init__(self, *args, **kwargs)
         opt = self.opts.ceph_extra + " " if self.opts.ceph_extra else ""
+        self.radosgw_admin_cmd = "radosgw-admin {0} ".format(opt)
         self.ceph_cmd = "ceph {0}--format json ".format(opt)
         self.ceph_cmd_txt = "ceph {0} ".format(opt)
         self.rados_cmd = "rados {0}--format json ".format(opt)
@@ -274,7 +279,7 @@ class CephDataCollector(Collector):
             self.collect_master()
 
     def collect_master(self) -> None:
-        assert self.node is None, "Master data can only be collected from local node"
+        # assert self.node is None, "Master data can only be collected from local node"
 
         with self.chdir("master"):
             curr_data = "{0}\n{1}\n{2}".format(
@@ -282,7 +287,7 @@ class CephDataCollector(Collector):
                 time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
                 time.time())
 
-            code, out = run_with_code(self.ceph_cmd + "osd versions")
+            code, out = self.run(self.ceph_cmd + "osd versions")
             is_luminous = (code == 0)
             if is_luminous:
                 self.save("osd_versions2", 'txt', 0, out)
@@ -346,25 +351,50 @@ class CephDataCollector(Collector):
             self.save_output("osd_blocked_by", self.ceph_cmd_txt + "osd blocked_by", "txt")
             self.save_output("node_ls", self.ceph_cmd_txt + "node ls", "json")
             self.save_output("features", self.ceph_cmd_txt + "features", 'json')
+            self.save_output("realm_list", self.radosgw_admin_cmd + "realm list", "txt")
+            self.save_output("zonegroup_list", self.radosgw_admin_cmd + "zonegroup list", "txt")
+            self.save_output("zone_list", self.radosgw_admin_cmd + "zone list", "txt")
 
-            with tempfile.NamedTemporaryFile() as fd:
-                code, data = run_with_code(self.ceph_cmd + "osd getcrushmap -o " + fd.name)
-                if code == 0:
-                    data = open(fd.name, "rb").read()
-
-                self.save('crushmap', 'bin', code, data)
-                with tempfile.NamedTemporaryFile() as fd_txt:
-                    code, data = run_with_code("crushtool -d {0} -o {1}".format(fd.name, fd_txt.name))
+            if self.node is None:
+                with tempfile.NamedTemporaryFile() as fd:
+                    code, data = run_with_code(self.ceph_cmd + "osd getcrushmap -o " + fd.name)
                     if code == 0:
-                        data = open(fd_txt.name, "rb").read()
-                    self.save('crushmap', 'txt', code, data)
+                        data = open(fd.name, "rb").read()
 
-            with tempfile.NamedTemporaryFile() as fd:
-                code, res = run_with_code(self.ceph_cmd + "osd getmap -o " + fd.name)
-                if code == 0:
-                    data = open(fd.name, "rb").read()
-                self.save('osdmap', 'bin', code, data)
-                self.save_output('osdmap', "osdmaptool --print {0}".format(fd.name), "txt")
+                    self.save('crushmap', 'bin', code, data)
+                    with tempfile.NamedTemporaryFile() as fd_txt:
+                        code, data = run_with_code("crushtool -d {0} -o {1}".format(fd.name, fd_txt.name))
+                        if code == 0:
+                            data = open(fd_txt.name, "rb").read()
+                        self.save('crushmap', 'txt', code, data)
+
+                with tempfile.NamedTemporaryFile() as fd:
+                    code, res = run_with_code(self.ceph_cmd + "osd getmap -o " + fd.name)
+                    if code == 0:
+                        data = open(fd.name, "rb").read()
+                    self.save('osdmap', 'bin', code, data)
+                    self.save_output('osdmap', "osdmaptool --print {0}".format(fd.name), "txt")
+            else:
+                temp_fl = "%08X" % random.randint(0, 2 << 64)
+                cr_fname = "/tmp/ceph_collect." + temp_fl + ".cr"
+                code, _ = self.run(self.ceph_cmd + "osd getcrushmap -o " + cr_fname)
+                if code != 0:
+                    logger.error("Fail to get crushmap")
+                else:
+                    self.save_file('crushmap', cr_fname, 'bin')
+                    code, data = self.run("crushtool -d {0} -o {0}.txt".format(cr_fname))
+                    if code != 0:
+                        logger.error("Fail to decompile crushmap")
+                    else:
+                        self.save_file('crushmap', cr_fname + ".txt", 'txt')
+
+                osd_fname = "/tmp/ceph_collect." + temp_fl + ".osd"
+                code, _ = self.run(self.ceph_cmd + "osd getmap -o " + osd_fname)
+                if code != 0:
+                    logger.error("Fail to get osdmap")
+                else:
+                    self.save_file('osdmap', osd_fname, 'bin')
+                    self.save_output('osdmap', "osdmaptool --print " + osd_fname, "txt")
 
     def collect_osd(self) -> None:
         # check OSD process status
@@ -522,6 +552,7 @@ class NodeCollector(Collector):
         ("netstat_stat", "txt", "netstat -s"),
         ("sysctl", "txt", "sysctl -a"),
         ("uname", "txt", "uname -a"),
+        ("bonds", "txt", "cat /proc/net/bonding/*")
     ]
 
     node_files = [
@@ -709,11 +740,19 @@ class LoadCollector(Collector):
                     self.storage.put_raw(data, "perf_monitoring/{0}/{1}.json".format(self.node.fs_name, sensor_path))
 
 
-def discover_nodes(opts: Any, ip_mapping: Dict[str, str] = None) -> List[Node]:
+ALL_COLLECTORS = [CephDataCollector, NodeCollector, LoadCollector]  # type: List[Type[Collector]]
+
+
+def discover_nodes(opts: Any, ip_mapping: Dict[str, str] = None, master_node: Node = None) -> List[Node]:
     nodes = {}
     ip_mapping = {} if not ip_mapping else ip_mapping
 
-    mons = get_mons_nodes(lambda x: run_locally(x).decode('utf8'), opts.ceph_extra)
+    if master_node:
+        exec_func = lambda x: rpc_run(master_node.rpc, x, node_name=master_node.name).decode('utf8')
+    else:
+        exec_func = lambda x: run_locally(x).decode('utf8')
+
+    mons = get_mons_nodes(exec_func, opts.ceph_extra)
     for mon_id, (ip, name) in mons.items():
         ip = ip_mapping.get(ip, ip)
         node = Node(ip)
@@ -721,7 +760,7 @@ def discover_nodes(opts: Any, ip_mapping: Dict[str, str] = None) -> List[Node]:
         node.roles.add('mon')
         nodes[ip] = node
 
-    osd_nodes = get_osds_nodes(lambda x: run_locally(x).decode('utf8'), opts.ceph_extra)
+    osd_nodes = get_osds_nodes(exec_func, opts.ceph_extra)
     for ip, osds in osd_nodes.items():
         ip = ip_mapping.get(ip, ip)
         node = nodes.setdefault(ip, Node(ip))
@@ -731,7 +770,6 @@ def discover_nodes(opts: Any, ip_mapping: Dict[str, str] = None) -> List[Node]:
     return list(nodes.values())
 
 
-ALL_COLLECTORS = [CephDataCollector, NodeCollector, LoadCollector]  # type: List[Type[Collector]]
 ALL_COLLECTORS_MAP = dict((collector.name, collector)
                           for collector in ALL_COLLECTORS)  # type: Dict[str, Type[Collector]]
 
@@ -750,10 +788,6 @@ def set_node_name(node: SimpleRPCClient) -> None:
 
 
 def collect(storage: IStorageNNP, opts: Any, executor: Executor) -> None:
-    if run_with_code('which ceph')[0] != 0:
-        logger.error("No 'ceph' command available. Run this script from node, which has ceph access")
-        return
-
     # This variable is updated from main function
     ssh_opts = "-o LogLevel=quiet -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
     ssh_opts += "-o ConnectTimeout={0} -o ConnectionAttempts=2".format(opts.ssh_conn_timeout)
@@ -767,6 +801,11 @@ def collect(storage: IStorageNNP, opts: Any, executor: Executor) -> None:
     allowed_path_checker = get_allowed_paths_checker(opts.disable)
     allowed_collectors = opts.collectors.split(',')
 
+    for collector in allowed_collectors:
+        if collector not in ALL_COLLECTORS_MAP:
+            logger.error(f"Can't found collector {collector}. Only {','.join(ALL_COLLECTORS_MAP)} are available")
+            return
+
     ip_mapping = {}
     if opts.ip_mapping:
         with open(opts.ip_mapping) as fd:
@@ -777,8 +816,29 @@ def collect(storage: IStorageNNP, opts: Any, executor: Executor) -> None:
                 ip, ssh_ip = line.split()
                 ip_mapping[ip] = ssh_ip
 
-    if not opts.no_detect:
-        detect_nodes = discover_nodes(opts, ip_mapping)
+    if opts.ceph_master:
+        logger.info(f"Connecting to ceph-master: {opts.ceph_master}")
+        try:
+            rpc_conn, _ = init_node(opts.ceph_master, ssh_opts=ssh_opts, with_sudo=opts.sudo)
+            master_node = Node(ip=socket.gethostbyname(opts.ceph_master),
+                               hostname=opts.ceph_master)
+            master_node.rpc = rpc_conn
+            set_node_name(master_node)
+        except:
+            logger.error(f"Can't connect to ceph-master: {opts.ceph_master}")
+            raise
+    else:
+        master_conn = None
+
+    code = run_with_code('which ceph')[0] if master_node is None \
+            else run_rpc_with_code(master_node.rpc, 'which ceph', node_name=master_node.name)[0]
+
+    if code != 0:
+        logger.error("No 'ceph' command available. Run this script from node, which has ceph access")
+        return
+
+    if not opts.no_detect and not opts.ceph_master_only:
+        detect_nodes = discover_nodes(opts, ip_mapping, master_node)
         all_nodes_dct = dict((node.ip, node) for node in detect_nodes)
     else:
         all_nodes_dct = {}
@@ -799,9 +859,12 @@ def collect(storage: IStorageNNP, opts: Any, executor: Executor) -> None:
                     pass
         all_nodes_dct.setdefault(ip, Node(ip, hostname))
 
-    ips, nodes = zip(*all_nodes_dct.items())
-
-    logger.info("Found %s hosts in total", len(nodes))
+    if all_nodes_dct:
+        ips, nodes = zip(*all_nodes_dct.items())
+        logger.info("Found %s hosts in total", len(nodes))
+    else:
+        ips = []
+        nodes = []
 
     nodes_per_type = {}
     no_role = []
@@ -817,6 +880,7 @@ def collect(storage: IStorageNNP, opts: Any, executor: Executor) -> None:
         logger.info("Found %s nodes without roles: %s", len(no_role), ",".join(sorted(no_role)))
 
     good_hosts = set(get_sshable_hosts(ips, ssh_opts))
+
     bad_hosts = set(ips) - good_hosts
 
     if len(bad_hosts) != 0:
@@ -884,14 +948,15 @@ def collect(storage: IStorageNNP, opts: Any, executor: Executor) -> None:
 
         futures = []
         if CephDataCollector.name in allowed_collectors:
-            for node in nodes:
-                func = CephDataCollector(allowed_path_checker, storage, opts, node,
-                                         pretty_json=not opts.no_pretty_json).collect
-                roles = ["mon"] if node.mon else []
-                if node.osds:
-                    roles.append("osd")
-                futures.append(executor.submit(func, roles))
-            func = CephDataCollector(allowed_path_checker, storage, opts, None,
+            if not opts.ceph_master_only:
+                for node in nodes:
+                    func = CephDataCollector(allowed_path_checker, storage, opts, node,
+                                             pretty_json=not opts.no_pretty_json).collect
+                    roles = ["mon"] if node.mon else []
+                    if node.osds:
+                        roles.append("osd")
+                    futures.append(executor.submit(func, roles))
+            func = CephDataCollector(allowed_path_checker, storage, opts, master_node,
                                      pretty_json=not opts.no_pretty_json).collect
             futures.append(executor.submit(func, ('ceph-master',)))
 
@@ -926,7 +991,7 @@ def collect(storage: IStorageNNP, opts: Any, executor: Executor) -> None:
         raise
     finally:
         logger.info("Collecting logs and teardown RPC servers")
-        for node in nodes:
+        for node in nodes + [master_node]:
             if node.rpc is not None:
                 try:
                     storage.put_raw(node.rpc.server.get_logs().encode('utf8'), "rpc_logs/{0}.txt".format(node.fs_name))
@@ -943,6 +1008,9 @@ def parse_args(argv: List[str]) -> Any:
     p.add_argument("-c", "--collectors", default="ceph,node,load",
                    help="Comma separated list of collectors. Select from : " +
                    ",".join(coll.name for coll in ALL_COLLECTORS))
+    p.add_argument("--ceph-master", default=None, help="Run all ceph cluster commands from NODE")
+    p.add_argument("--ceph-master-only", action="store_true", help="Run only ceph master data collection, " +
+                   "no osd data collections")
     p.add_argument("-C", "--ceph-extra", default="", help="Extra opts to pass to 'ceph' command")
     p.add_argument("-d", "--disable", default=[], nargs='*', help="Disable collect pattern")
     p.add_argument("-D", "--detect-only", action="store_true", help="Don't collect any data, only detect cluster nodes")
@@ -961,7 +1029,7 @@ def parse_args(argv: List[str]) -> Any:
     p.add_argument("-L", "--log-config", help="json file with logging config")
     p.add_argument("-m", "--max-pg-dump-count", default=2 ** 15, type=int,
                    help="maximum PG count to by dumped with 'pg dump' cmd")
-    p.add_argument("-M", "--ceph-log-max-lines", default=1000, type=int, help="Max lines from osd/mon log")
+    p.add_argument("-M", "--ceph-log-max-lines", default=10000, type=int, help="Max lines from osd/mon log")
     p.add_argument("-n", "--dont-remove-unpacked", action="store_true", help="Keep unpacked data")
     p.add_argument("-N", "--dont-pack-result", action="store_true", help="Don't create archive")
     p.add_argument("-o", "--result", default=None, help="Result file")

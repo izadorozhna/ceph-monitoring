@@ -15,7 +15,6 @@ import logging.config
 from pathlib import Path
 from typing import Dict, Optional, List, Tuple, Any, Union, Set, Sequence
 
-import numpy
 import dataclasses
 
 from cephlib.storage import make_storage, TypedStorage
@@ -208,6 +207,165 @@ class Report:
         index_path.open("w").write(index)
 
 
+class Report2:
+    def __init__(self, cluster_name: str, output_file_name: str) -> None:
+        self.cluster_name = cluster_name
+        self.output_file_name = output_file_name
+        self.style: List[str] = []
+        self.style_links: List[str] = []
+        self.script_links: List[str] = []
+        self.scripts: List[str] = []
+        self.onload: List[str] = []
+        self.divs: List[Union[None, Tuple[float, str, str, str]]] = []
+
+    def next_line(self):
+        self.divs.append(None)
+
+    def add_block(self, weight: float, header: str, block_obj: Any, menu_item: str = None):
+        if menu_item is None:
+            menu_item = header
+        self.divs.append((weight, header, menu_item, str(block_obj)))
+
+    def save_to(self, output_dir: Path, pretty_html: bool = False):
+        pt = Path(__file__).absolute().parent.parent
+        static_files_dir = pt / "html_js_css"
+
+        self.style_links.append("http://getbootstrap.com/examples/dashboard/dashboard.css")
+
+        css = """
+        table.zebra-table tr:nth-child(even) {background-color: #E0E0FF;}
+        table th {background: #ededed;}
+        .right{
+            position:relative;
+            margin:0;
+            padding:0;
+            float:right;
+        }
+        .left{
+            position:relative   ;
+            margin:0;
+            padding:0;
+            float:left;
+        }
+        th {text-align: center;}
+        td {text-align: right;}
+        tr td:first-child {text-align: left;}
+        
+        .menu-ceph {
+            width: 10%;
+            margin-left: 0%;
+            float: left;
+            background-color: aquamarine;
+            text-align: left;
+            top:0px;
+            /*position:absolute;*/
+            position:fixed;
+        }
+        
+        .main-ceph {
+            position:absolute;
+            top:0px;
+            margin-left: 10%;
+            width: 90%;
+            float: right;
+            background-color: antiquewhite;
+            text-align: center;
+        }
+        
+        .data-ceph {
+            visibility: hidden;
+        }
+        
+        .menu-ceph ul {
+            padding: 25px 30px;
+        }
+        
+        a:hover {
+            cursor: pointer;
+        }
+        """
+
+        code = """
+        function clicked(el_id) {
+            for(const old of document.getElementsByClassName("main-ceph")) {
+                old.classList.remove('main-ceph');
+                old.classList.add('data-ceph');
+            }
+            const el = document.getElementById(el_id);
+            el.classList.remove('data-ceph');
+            el.classList.add('main-ceph');
+        }
+        """
+        self.style.append(css)
+        self.scripts.append(code)
+
+        links: List[str] = []
+        for link in self.style_links + self.script_links:
+            fname = link.rsplit('/', 1)[-1]
+            src_path = static_files_dir / fname
+            dst_path = output_dir / fname
+            if src_path.exists():
+                if not dst_path.is_dir():
+                    shutil.copyfile(src_path, dst_path)
+                link = fname
+            links.append(link)
+
+        css_links = links[:len(self.style_links)]
+        js_links = links[len(self.style_links):]
+
+        doc = html.Doc()
+        with doc.html:
+            with doc.head:
+                doc.title("Ceph cluster report: " + self.cluster_name)
+
+                for url in css_links:
+                    doc.link(href=url, rel="stylesheet", type="text/css")
+
+                doc.style("\n".join(self.style), type="text/css")
+
+                for url in js_links:
+                    doc.script(type="text/javascript", src=url)
+
+                for script in self.scripts:
+                    doc.script(script, type="text/javascript")
+
+            with doc.body(onload=";".join(self.onload)):
+                with doc.div(_class="menu-ceph"):
+                    with doc.ul():
+                        for sid, div_cnt in enumerate(self.divs):
+                            if div_cnt is not None:
+                                _, _, menu, data = div_cnt
+                                if menu.endswith(":"):
+                                    menu = menu[:-1]
+                                doc.li.a(menu, onclick=f"clicked('{sid}')")
+
+                for sid, div_cnt in enumerate(self.divs):
+                    doc("\n")
+                    if div_cnt is not None:
+                        with doc.div(_class="main-ceph" if sid == 0 else "data-ceph", id=f"{sid}"):
+                            w, header, _, block = div_cnt
+                            if w is None:
+                                doc(block)
+                            else:
+                                doc.H3.center(header)
+                                doc.br
+
+                                if block != "":
+                                    doc.center(block)
+
+        index = f"<!doctype html>{doc}"
+        index_path = output_dir / self.output_file_name
+
+        try:
+            if pretty_html:
+                from bs4 import BeautifulSoup
+                index = BeautifulSoup.BeautifulSoup(index).prettify()
+        except:
+            pass
+
+        index_path.open("w").write(index)
+
+
 def show_summary(report: Report, cluster: Cluster, ceph: CephInfo):
     t = html.HTMLTable(["Setting", "Value"])
     t.add_cells("Collected at", cluster.report_collected_at_local)
@@ -359,11 +517,11 @@ def show_pools_info(report: Report, ceph: CephInfo):
         table.add_cell(str(pool.id))
         table.add_cell(str(pool.size))
         table.add_cell(str(pool.min_size))
-        table.add_cell(b2ssize_10(int(pool.num_objects)), sorttable_customkey=str(int(pool.num_objects)))
-        table.add_cell(b2ssize(int(pool.size_bytes)), sorttable_customkey=str(int(pool.size_bytes)))
+        table.add_cell(b2ssize_10(int(pool.df.num_objects)), sorttable_customkey=str(int(pool.df.num_objects)))
+        table.add_cell(b2ssize(int(pool.df.size_bytes)), sorttable_customkey=str(int(pool.df.size_bytes)))
         table.add_cell('---')
-        table.add_cell(b2ssize(int(pool.read_bytes)), sorttable_customkey=str(int(pool.read_bytes)))
-        table.add_cell(b2ssize(int(pool.write_bytes)), sorttable_customkey=str(int(pool.write_bytes)))
+        table.add_cell(b2ssize(int(pool.df.read_bytes)), sorttable_customkey=str(int(pool.df.read_bytes)))
+        table.add_cell(b2ssize(int(pool.df.write_bytes)), sorttable_customkey=str(int(pool.df.write_bytes)))
         table.add_cell(str(pool.crush_rule))
 
         if pool.pgp != pool.pg:
@@ -372,11 +530,11 @@ def show_pools_info(report: Report, ceph: CephInfo):
         else:
             table.add_cell(str(pool.pg), sorttable_customkey=str(pool.pg))
 
-        bytes_per_pg = int(pool.size_bytes) // int(pool.pg)
+        bytes_per_pg = int(pool.df.size_bytes) // int(pool.pg)
         bytes_per_pg_s = b2ssize(bytes_per_pg)
         table.add_cell(bytes_per_pg_s, sorttable_customkey=str(bytes_per_pg))
 
-        obj_per_pg = int(pool.num_objects) // int(pool.pg)
+        obj_per_pg = int(pool.df.num_objects) // int(pool.pg)
         obj_per_pg_s = b2ssize_10(obj_per_pg)
         table.add_cell(obj_per_pg_s, sorttable_customkey=str(obj_per_pg))
 
@@ -451,8 +609,8 @@ def show_osd_info(report: Report, cluster: Cluster, ceph: CephInfo):
         if osd.version is None:
             table.add_cell("Unknown")
         else:
-            ver, hash = osd.version
-            table.add_cell(f"{ver}  [{hash[:8]}]")
+            table.add_cell(
+                f"{osd.version.major}.{osd.version.minor}.{osd.version.bugfix}  [{osd.version.commit_hash[:8]}]")
         table.add_cell(daemon_msg)
 
         if osd.run_info is not None:
@@ -469,6 +627,7 @@ def show_osd_info(report: Report, cluster: Cluster, ceph: CephInfo):
 
         disks = cluster.hosts[osd.host.name].disks
         storage_devs = cluster.hosts[osd.host.name].storage_devs
+        assert osd.storage_info is not None
         total_b = int(storage_devs[osd.storage_info.data_partition].size)
 
         for root in ceph.crush.roots:
@@ -521,6 +680,7 @@ def show_osd_info(report: Report, cluster: Cluster, ceph: CephInfo):
             else:
                 j_size = storage_devs[sinfo.journal_partition].size
                 j_size_s = b2ssize(j_size)
+                assert osd.run_info is not None
                 osd_sync = float(osd.run_info.config['filestore_max_sync_interval'])
                 j_size_s = j_size_s if j_size >= osd_sync * 100 * (1024 ** 2) else html_fail(j_size_s)
             table.add_cell(j_size_s)
@@ -538,15 +698,15 @@ def show_osd_info(report: Report, cluster: Cluster, ceph: CephInfo):
             if sinfo.wal_partition not in (sinfo.db_partition, sinfo.data_partition):
                 wal_size = int(storage_devs[sinfo.wal_partition].size)
                 wal_size_s = b2ssize(wal_size) + 'B'
-                wal_size = html_fail(wal_size_s) if wal_size < 512 * 1024 * 1024 else wal_size_s
+                wal_size_s = html_fail(wal_size_s) if wal_size < 512 * 1024 * 1024 else wal_size_s
             else:
-                wal_size = '-'
+                wal_size_s = '-'
 
             table.add_cell(wal_on_same_drive)
             table.add_cell(wal_drive_type)
             if has_fs:
                 table.add_cell('-')
-            table.add_cell(wal_size)
+            table.add_cell(wal_size_s)
 
             db_on_same_drive = html_ok("no") if sinfo.db_dev != sinfo.data_dev else html_fail("yes")
             db_drive_type = disks[sinfo.db_dev].tp
@@ -554,14 +714,14 @@ def show_osd_info(report: Report, cluster: Cluster, ceph: CephInfo):
             if sinfo.db_partition != sinfo.data_partition:
                 db_size = int(storage_devs[sinfo.db_partition].size)
                 data_size = int(storage_devs[sinfo.data_partition].size)
-                db_sz_s = b2ssize(db_size) + "B"
-                db_size = html_fail(db_sz_s) if db_size < data_size * 0.0095 else db_sz_s
+                db_size_s = b2ssize(db_size) + "B"
+                db_size_s = html_fail(db_size_s) if db_size < data_size * 0.0095 else db_size_s
             else:
-                db_size = '-'
+                db_size_s = '-'
 
             table.add_cell(db_on_same_drive)
             table.add_cell(db_drive_type)
-            table.add_cell(db_size)
+            table.add_cell(db_size_s)
         table.next_row()
 
     report.add_block(10, "OSD's info:", table)
@@ -586,6 +746,8 @@ def show_osd_perf_info(report: Report, ceph: CephInfo):
     for osd in ceph.osds:
         perf_info: List[Tuple[Union[int, str], Union[float, None, int]]] = []
 
+        assert osd.storage_info is not None
+
         if osd.storage_info.data_stor_stats is None:
             perf_info.extend([('-', 0)] * 5)
         else:
@@ -600,10 +762,12 @@ def show_osd_perf_info(report: Report, ceph: CephInfo):
 
         sinfo = osd.storage_info
         if isinstance(sinfo, FileStoreInfo):
-            if sinfo.j_stor_stats.root_dev != sinfo.data_stor_stats.root_dev:
-                load = sinfo.j_stor_stats.load
+            assert sinfo.j_stor_stats is not None
+            assert sinfo.data_stor_stats is not None
+            if sinfo.journal_dev != sinfo.data_dev:
+                load = sinfo.j_stor_stats
                 perf_info.extend([  # type: ignore
-                    (str(Path(sinfo.j_stor_stats.root_dev).parent), None),
+                    (str(Path(sinfo.journal_dev).parent), None),
                     (f"{b2ssize(load.write_bytes)}  / {b2ssize(load.write_iops)}", load.write_bytes),
                     (int(load.lat * 1000), load.lat) if load.lat is not None else ('-', 0),
                     (int(load.io_time * 100), load.io_time)
@@ -637,7 +801,7 @@ def show_osd_perf_info(report: Report, ceph: CephInfo):
                     v_val = str(osd.osd_perf[name])
                 else:
                     # scan for latest available value
-                    for val in osd.osd_perf[name][::-1]:
+                    for val in osd.osd_perf[name][::-1]:  # type: ignore
                         if val != NO_VALUE:
                             v_val = lat2s(val)
                             break
@@ -674,8 +838,8 @@ def show_host_network_load_in_color(report: Report, cluster: Cluster, ceph: Ceph
         cl_if = host.find_interface(ceph.cluster_net)
         pb_if = host.find_interface(ceph.public_net)
         nets = [('cluster', cl_if), ('public', pb_if)]
-        nets += sorted((net.name, net) for net in host.net_adapters.values()
-                       if net.is_phy and net != pb_if and net != cl_if )
+        nets += sorted((net.dev, net) for net in host.net_adapters.values()  # type: ignore
+                       if net is not None and net.is_phy and net != pb_if and net != cl_if )
 
         max_net_count = max(max_net_count, len(nets))
         for name, net in nets:
@@ -762,6 +926,7 @@ def show_host_io_load_in_color(report: Report, ceph: CephInfo):
 
     for osd in ceph.osds:
         sinfo = osd.storage_info
+        assert sinfo is not None
         assert sinfo.data_stor_stats is not None
         osd_devs: List[Tuple[str, DiskLoad]] = [(sinfo.data_dev, sinfo.data_stor_stats)]
         roles = {"data"}
@@ -783,11 +948,11 @@ def show_host_io_load_in_color(report: Report, ceph: CephInfo):
         hset = devs[osd.host.name]
         for dev, stat in osd_devs:
             if dev not in hset:
-                hset[dev] = CephHDDInfo.from_disk_info(osd.host.name, dev, stat.load)
+                hset[dev] = CephHDDInfo.from_disk_info(osd.host.name, dev, stat)
             hset[dev].roles.update(roles)
 
     if len(devs) == 0:
-        report.add_block(1, "No current IO load awailable", "")
+        report.add_block(1, "No current IO load available", "")
         return
 
     loads = [
@@ -845,7 +1010,7 @@ def show_host_io_load_in_color(report: Report, ceph: CephInfo):
         report.add_block(weight, tp, table, "Disk IO - " + tp)
 
 
-def show_hosts_info(report, cluster):
+def show_hosts_info(report: Report, cluster: Cluster, ceph: CephInfo):
     header_row = ["Name",
                   "Services",
                   "CPU's",
@@ -856,9 +1021,10 @@ def show_hosts_info(report, cluster):
                   "Conn<br>tcp/udp"]
     table = html.HTMLTable(headers=header_row)
     for host in sorted(cluster.hosts.values(), key=lambda x: x.name):
-        services = [f"osd-{osd_id}" for osd_id in host.osd_ids]
-        if host.mon_name:
-            services.append(f"mon({host.mon_name})")
+        services = [f"osd-{osd.id}" for osd in ceph.osds if osd.host is host]
+        for mon in ceph.mons:
+            if mon.host is host:
+                services.append(f"mon({host.name})")
 
         table.add_cell(host.name)
         srv_strs = []
@@ -872,29 +1038,29 @@ def show_hosts_info(report, cluster):
             table.next_row()
             continue
 
-        if not host.hw_info.cores:
+        if not host.hw_info.cpu_info:
             table.add_cell("Error", sorttable_customkey='0')
         else:
-            table.add_cell(sum(count for _, count in host.hw_info.cores))
+            table.add_cell(str(sum(inf.cores for inf in host.hw_info.cpu_info)))
 
         table.add_cell(b2ssize(host.mem_total), sorttable_customkey=str(host.mem_total))
         table.add_cell(b2ssize(host.mem_free), sorttable_customkey=str(host.mem_free))
 
         table.add_cell(b2ssize(host.swap_total - host.swap_free),
                        sorttable_customkey=str(host.swap_total - host.swap_free))
-        table.add_cell(host.load_5m)
+        table.add_cell(str(host.load_5m))
         table.add_cell(f"{host.open_tcp_sock}/{host.open_udp_sock}")
         table.next_row()
 
     report.add_block(6, "Host's info:", table)
 
 
-def show_osd_pool_PG_distribution(report, cluster):
-    if cluster.sum_per_osd is None:
+def show_osd_pool_PG_distribution(report: Report, ceph: CephInfo):
+    if ceph.sum_per_osd is None:
         report.add_block(6, "PG copy per OSD: No pg dump data. Probably too many PG", "")
         return
 
-    pools_order_t = sorted((-count, name) for name, count in cluster.sum_per_pool.items())
+    pools_order_t = sorted((-count, name) for name, count in ceph.sum_per_pool.items())
     # pools = sorted(cluster.sum_per_pool)
     pools = [name for _, name in pools_order_t]
 
@@ -916,14 +1082,14 @@ def show_osd_pool_PG_distribution(report, cluster):
 
     table = html.HTMLTable(headers=["OSD/pool"] + name_headers + ['sum'])
 
-    for osd_id, row in sorted(cluster.osd_pool_pg_2d.items()):
-        data = [osd_id] + [row.get(pool_name, 0) for pool_name in pools] + [cluster.sum_per_osd[osd_id]]
+    for osd_id, row in sorted(ceph.osd_pool_pg_2d.items()):
+        data = [osd_id] + [row.get(pool_name, 0) for pool_name in pools] + [ceph.sum_per_osd[osd_id]]
         table.add_row(map(str, data))
 
-    table.add_cell("Total cluster PG", sorttable_customkey=str(max(osd.id for osd in cluster.osds) + 1))
+    table.add_cell("Total cluster PG", sorttable_customkey=str(max(osd.id for osd in ceph.osds) + 1))
 
-    list(map(table.add_cell, (cluster.sum_per_pool[pool_name] for pool_name in pools)))
-    table.add_cell(str(sum(cluster.sum_per_pool.values())))
+    list(map(table.add_cell, (ceph.sum_per_pool[pool_name] for pool_name in pools)))
+    table.add_cell(str(sum(ceph.sum_per_pool.values())))
 
     report.add_block(8, "PG copy per OSD:", table)
 
@@ -995,7 +1161,8 @@ def main(argv: List[str]):
         cluster, ceph = load_all(TypedStorage(make_storage(folder, existing=True)))
         logger.info("Done")
 
-        report = Report(opts.name, "index.html")
+        # report = Report(opts.name, "index.html")
+        report = Report2(opts.name, "index.html")
         report.style.append('body {font: 10pt sans;}')
         report.style_links.append("https://maxcdn.bootstrapcdn.com/bootstrap/3.3.4/css/bootstrap.min.css")
 
@@ -1008,7 +1175,7 @@ def main(argv: List[str]):
         show_summary(report, cluster, ceph)
         report.next_line()
 
-        show_hosts_info(report, cluster)
+        show_hosts_info(report, cluster, ceph)
         show_mons_info(report, ceph)
         show_osd_state(report, ceph)
         report.next_line()
@@ -1042,7 +1209,7 @@ def main(argv: List[str]):
                                     show_osd_ops_boxplot,
                                     show_osd_pg_histo)
 
-            show_osd_used_space_histo(report, cluster)
+            show_osd_used_space_histo(report, ceph)
             show_osd_pg_histo(report, ceph)
             report.next_line()
 
@@ -1051,14 +1218,14 @@ def main(argv: List[str]):
             #     report.next_line()
 
             if cluster.has_performance_data:
-                show_osd_lat_heatmaps(report, cluster)
+                show_osd_lat_heatmaps(report, ceph)
                 report.next_line()
 
             if cluster.has_performance_data:
-                show_osd_ops_boxplot(report, cluster)
+                show_osd_ops_boxplot(report, ceph)
                 report.next_line()
 
-        report.save_to(opts.out, opts.pretty_html)
+        report.save_to(Path(opts.out), opts.pretty_html)
         logger.info("Report successfully stored to %r", index_path)
     finally:
         if remove_folder:

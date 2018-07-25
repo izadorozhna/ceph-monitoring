@@ -68,9 +68,12 @@ def get_hdd_resource_usage(perf_data: Any, osds: List[CephOSD]) -> CephDisksReso
             continue
         data_disks[(osd.host.name, osd.storage_info.data_dev)] = osd.storage_info.data_stor_stats
         if isinstance(osd.storage_info, BlueStoreInfo):
+            assert osd.storage_info.db_stor_stats is not None
             db_disks[(osd.host.name, osd.storage_info.db_dev)] = osd.storage_info.db_stor_stats
+            assert osd.storage_info.wal_stor_stats is not None
             wal_disks[(osd.host.name, osd.storage_info.wal_dev)] = osd.storage_info.wal_stor_stats
         else:
+            assert osd.storage_info.j_stor_stats is not None
             journal_disks[(osd.host.name, osd.storage_info.journal_dev)] = osd.storage_info.j_stor_stats
 
     data = hdd_info(data_disks, min_sz, node_bounds)
