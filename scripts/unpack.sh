@@ -10,7 +10,7 @@ tail "-n+$archive" "$0" | tar -zx -C "$tmpdir"
 cd "$tmpdir"
 
 set +e
-if which python3 ; then
+if which python3 > /dev/null 2>&1 ; then
     env PYTHONPATH=typing-3.6.2-py3-none-any.whl python3 collect_info.py $@
 else
     echo "You need python3.4+ to run this tool. 'python3' alias should be created"
