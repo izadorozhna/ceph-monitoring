@@ -831,6 +831,7 @@ def collect(storage: IStorageNNP, opts: Any, executor: Executor) -> None:
             raise
     else:
         master_conn = None
+        master_node = None
 
     code = run_with_code('which ceph')[0] if master_node is None \
             else run_rpc_with_code(master_node.rpc, 'which ceph', node_name=master_node.name)[0]
@@ -993,7 +994,7 @@ def collect(storage: IStorageNNP, opts: Any, executor: Executor) -> None:
         raise
     finally:
         logger.info("Collecting logs and teardown RPC servers")
-        for node in nodes + [master_node]:
+        for node in nodes + ([] if master_node is None else [master_node]):
             if node.rpc is not None:
                 try:
                     storage.put_raw(node.rpc.server.get_logs().encode('utf8'), "rpc_logs/{0}.txt".format(node.fs_name))
