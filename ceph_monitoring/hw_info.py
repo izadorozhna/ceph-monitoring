@@ -1,112 +1,14 @@
 import re
 import xml.etree.ElementTree as ET
-from typing import List, Dict, Optional
-import dataclasses
+from typing import Dict, Optional
 
-from cephlib.units import b2ssize
+
+from .cluster_classes import CPUInfo, HWInfo, LSHWNetInfo
 
 
 def get_data(rr: str, data: str) -> str:
     return re.search("(?ims)" + rr, data).group(0)  # type: ignore
 
-
-@dataclasses.dataclass
-class LSHWNetInfo:
-    name: str
-    speed: Optional[str]
-    duplex: bool
-
-
-@dataclasses.dataclass
-class DiskInfo:
-    size: int
-    mount_point: Optional[str]
-    device: Optional[str]
-
-
-@dataclasses.dataclass
-class CPUInfo:
-    model: str
-    cores: int
-
-
-@dataclasses.dataclass
-class HWInfo:
-    hostname: Optional[str]
-    cpu_info: List[CPUInfo]
-    disks_info: Dict[str, DiskInfo]
-    ram_size: int
-    sys_name: Optional[str]
-    mb: Optional[str]
-    raw: str
-    disks_raw_info: Dict[str, str]
-    net_info: Dict[str, LSHWNetInfo]
-    storage_controllers: List[str]
-
-    def get_HDD_count(self):
-        # SATA HDD COUNT, SAS 10k HDD COUNT, SAS SSD count, PCI-E SSD count
-        return []
-
-    def get_summary(self):
-        cores = sum(count for _, count in self.cpu_info)
-        disks = sum(info.size for info in self.disks_info.values())
-
-        return {'cores': cores,
-                'ram': self.ram_size,
-                'storage': disks,
-                'disk_count': len(self.disks_info)}
-
-    def __str__(self):
-        res = []
-
-        summ = self.get_summary()
-        summary = "Simmary: {cores} cores, {ram}B RAM, {disk}B storage"
-        res.append(summary.format(cores=summ['cores'],
-                                  ram=b2ssize(summ['ram']),
-                                  disk=b2ssize(summ['storage'])))
-        res.append(str(self.sys_name))
-        if self.mb is not None:
-            res.append("Motherboard: " + self.mb)
-
-        if self.ram_size == 0:
-            res.append("RAM: Failed to get RAM size")
-        else:
-            res.append(f"RAM {b2ssize(self.ram_size)}B")
-
-        if self.cpu_info:
-            res.append("CPU cores: Failed to get CPU info")
-        else:
-            res.append("CPU cores:")
-            for name, count in self.cpu_info:
-                res.append(f"    {count} * {name}" if count > 1 else f"    {name}")
-
-        if self.storage_controllers:
-            res.append("Disk controllers:")
-            for descr in self.storage_controllers:
-                res.append(f"    {descr}")
-
-        if self.disks_info != {}:
-            res.append("Storage devices:")
-            for dev, info in sorted(self.disks_info.items()):
-                res.append(f"    {dev} {b2ssize(info.size)}B {info.model}")
-        else:
-            res.append("Storage devices's: Failed to get info")
-
-        if self.disks_raw_info != {}:
-            res.append("Disks devices:")
-            for dev, descr in sorted(self.disks_raw_info.items()):
-                res.append(f"    {dev} {descr}")
-        else:
-            res.append("Disks devices's: Failed to get info")
-
-        if self.net_info != {}:
-            res.append("Net adapters:")
-            for name, adapter in self.net_info.items():
-                res.append(f"    {name} {adapter.is_phy} duplex={adapter.speed}")
-        else:
-            res.append("Net adapters: Failed to get net info")
-
-        return str(self.hostname) + ":\n" + "\n".join("    " + i for i in res)
 
 
 def parse_hw_info(lshw_out: str) -> Optional[HWInfo]:

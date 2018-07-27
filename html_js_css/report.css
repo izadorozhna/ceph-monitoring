@@ -1,0 +1,104 @@
+body { background-color: #FDFDFD; }
+
+table.zebra-table tr:nth-child(even) {background-color: #E0E0FF;}
+table th {background: #e0e0e0;}
+
+.table-line-bg {background-color: #E0E0FF;}
+
+.right{
+    position:relative;
+    margin:0;
+    padding:0;
+    float:right;
+}
+.left{
+    position:relative   ;
+    margin:0;
+    padding:0;
+    float:left;
+}
+
+td { padding: 6px; }
+
+.table_lr th {text-align: center;}
+.table_lr td {text-align: right;}
+.table_lr tr td:first-child {text-align: left;}
+
+.table_c td {text-align: center;}
+.table_c th {text-align: center;}
+
+
+.menu-ceph {
+    width: 15%;
+    margin-left: 0;
+    float: left;
+    text-align: left;
+    top: 0;
+    position:fixed;
+    font-size: 20px;
+    color: #c2c7c8;
+    height: 100%;
+    background-color: #222;
+}
+
+.menu-ceph ul {
+    padding: 35px 40px;
+}
+
+.menu-ceph li {
+    padding: 5px 10px;
+}
+
+.menu-ceph a:hover {
+    cursor: pointer;
+    color: #f1f100;
+    background-color: #666;
+}
+
+.main-ceph {
+    position:absolute;
+    top: 3%;
+    margin-left: 20%;
+    margin-right: 5%;
+    width: 75%;
+    float: right;
+    text-align: center;
+}
+
+.data-ceph {visibility: hidden;}
+
+#table-summary {width: 60%;}
+#table-osd-summary {width: 40%;}
+#table-io-summary {width: 40%;}
+#table-mon-info {width: 60%;}
+#table-hosts-info {width: 60%;}
+#table-osds-state {width: 30%;}
+#table-pools {width: 80%;}
+#table-pgs {width: 30%;}
+#table-pg-per-osd {width: 100%;}
+#table-osd-info {width: 100%;}
+
+#table-hosts-info a {
+    color: #0000EE;
+    border-bottom: 1px solid black;
+    padding-bottom: 2px;
+}
+
+#table-hosts-info a:visited { color: #551A8B; }
+
+#table-hosts-info a:hover {
+    cursor: pointer;
+    color: #a1a1ff;
+}
+
+.hostinfo-net {width: 40%;}
+.hostinfo-disks {width: 100%;}
+.hostinfo-mountable {width: 80%;}
+.hostinfo-mountable tr td:first-child {text-align: left;}
+
+.disk-children-0 {}
+.disk-children-1 {padding-left: 10%;}
+.disk-children-2 {padding-left: 20%;}
+.disk-children-3 {padding-left: 30%;}
+
+

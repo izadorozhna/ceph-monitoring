@@ -99,13 +99,23 @@ class Doc:
 
 
 class HTMLTable:
-    def_table_attrs = {
-        'class': 'table table-bordered table-condensed sortable zebra-table'
-    }
+    def_table_attrs = {'class': 'table-bordered sortable zebra-table'}
 
-    def __init__(self, headers: Iterable[str], table_attrs: Dict[str, str] = def_table_attrs,
-                 zebra: bool = True, header_attrs: Dict[str, str] = None) -> None:
-        self.table_attrs = table_attrs.copy()
+    def __init__(self,
+                 headers: Iterable[str] = None,
+                 table_attrs: Dict[str, str] = None,
+                 zebra: bool = True,
+                 header_attrs: Dict[str, str] = None,
+                 extra_cls: str = None,
+                 id: str = None) -> None:
+
+        self.table_attrs = table_attrs.copy() if table_attrs is not None else self.def_table_attrs.copy()
+
+        if extra_cls:
+            self.table_attrs['class'] = self.table_attrs.get('class', "") + " " + extra_cls
+
+        if id is not None:
+            self.table_attrs['id'] = id
 
         if not zebra:
             self.table_attrs['class'] = self.table_attrs['class'].replace("zebra-table", "")
@@ -113,7 +123,10 @@ class HTMLTable:
         if header_attrs is None:
             header_attrs = {}
 
-        self.headers = [(header, header_attrs) for header in headers]
+        if headers is not None:
+            self.headers = [(header, header_attrs) for header in headers]
+        else:
+            self.headers = None
         self.cells: List[List] = [[]]
 
     def add_header(self, text: str, attrs: Dict[str, str] = None):
@@ -138,8 +151,9 @@ class HTMLTable:
 
         with t.table('', **self.table_attrs):
             with t.thead.tr:
-                for header, attrs in self.headers:
-                    t.th(header, **attrs)
+                if self.headers:
+                    for header, attrs in self.headers:
+                        t.th(header, **attrs)
 
             with t.tbody:
                 for line in self.cells:

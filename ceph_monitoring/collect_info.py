@@ -106,7 +106,7 @@ def get_host_interfaces(node: SimpleRPCClient) -> List[Tuple[bool, str]]:
 def get_device_for_file(node: SimpleRPCClient, fname: str) -> Tuple[str, str]:
     dev = node.rpc.fs.get_dev_for_file(fname)
     dev = dev.decode('utf8')
-    assert dev.startswith('/dev'), "{0!r} is not starts with /dev".format(dev)
+    assert dev.startswith('/dev'), "{!r} is not starts with /dev".format(dev)
     root_dev = dev = dev.strip()
     rr = re.match('^(/dev/[shv]d.*?)\\d+', root_dev)
     if rr:
@@ -169,7 +169,7 @@ class Collector:
         elif isinstance(data, array.array):
             self.storage.put_array(rpath, data, extra if extra else [])
         else:
-            raise TypeError("Can't save value of type {0!r} (to {1!r})".format(type(data), rpath))
+            raise TypeError("Can't save value of type {!r} (to {!r})".format(type(data), rpath))
 
         return data if code == 0 else None
 
@@ -208,7 +208,7 @@ class Collector:
             loc = "locally"
         else:
             code, out = self.run(cmd)
-            loc = "on node {0}".format(self.node.name)
+            loc = "on node {}".format(self.node.name)
 
         if code != 0:
             logger.warning("Cmd %s failed %s with code %s", cmd, loc, code)
@@ -259,11 +259,11 @@ class CephDataCollector(Collector):
     def __init__(self, *args, **kwargs) -> None:
         Collector.__init__(self, *args, **kwargs)
         opt = self.opts.ceph_extra + " " if self.opts.ceph_extra else ""
-        self.radosgw_admin_cmd = "radosgw-admin {0} ".format(opt)
-        self.ceph_cmd = "ceph {0}--format json ".format(opt)
-        self.ceph_cmd_txt = "ceph {0} ".format(opt)
-        self.rados_cmd = "rados {0}--format json ".format(opt)
-        self.rados_cmd_txt = "rados {0} ".format(opt)
+        self.radosgw_admin_cmd = "radosgw-admin {} ".format(opt)
+        self.ceph_cmd = "ceph {}--format json ".format(opt)
+        self.ceph_cmd_txt = "ceph {} ".format(opt)
+        self.rados_cmd = "rados {}--format json ".format(opt)
+        self.rados_cmd_txt = "rados {} ".format(opt)
 
     def collect(self, collect_roles_restriction: List[str]) -> None:
         if 'mon' in collect_roles_restriction:
@@ -282,7 +282,7 @@ class CephDataCollector(Collector):
         # assert self.node is None, "Master data can only be collected from local node"
 
         with self.chdir("master"):
-            curr_data = "{0}\n{1}\n{2}".format(
+            curr_data = "{}\n{}\n{}".format(
                 datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
                 time.time())
@@ -299,7 +299,7 @@ class CephDataCollector(Collector):
 
             self.save("collected_at", 'txt', 0, curr_data)
             _, out = self.save_output("status", self.ceph_cmd + "status", 'json')  # type: ignore
-            assert out, "{0!r} failed".format(self.ceph_cmd + "status")
+            assert out, "{!r} failed".format(self.ceph_cmd + "status")
             status = json.loads(out)
 
             ceph_health = {'status': status['health']['overall_status']}  # type: Dict[str, Union[str, int]]
@@ -317,25 +317,26 @@ class CephDataCollector(Collector):
             ceph_health_js = json.dumps(ceph_health)
             self.save("ceph_health_dict", "js", 0, ceph_health_js, check=False)
 
-            cmds = ['osd tree',
-                    'df',
-                    'auth list',
-                    'osd dump',
-                    'health',
-                    'mon_status',
-                    'osd lspools',
-                    'osd perf',
-                    'osd df',
-                    'health detail']
-
             num_pgs = status['pgmap']['num_pgs']
             if num_pgs > self.opts.max_pg_dump_count:
                 logger.warning(
-                    ("pg dump skipped, as num_pg ({0}) > max_pg_dump_count ({1})." +
+                    ("pg dump skipped, as num_pg ({}) > max_pg_dump_count ({})." +
                      " Use --max-pg-dump-count NUM option to change the limit").format(
                          num_pgs, self.opts.max_pg_dump_count))
+                cmds = []
             else:
-                cmds.append('pg dump')
+                cmds = ['pg dump']
+
+            cmds.extend(['osd tree',
+                         'df',
+                         'auth list',
+                         'osd dump',
+                         'health',
+                         'mon_status',
+                         'osd lspools',
+                         'osd perf',
+                         'osd df',
+                         'health detail'])
 
             for cmd in cmds:
                 self.save_output(cmd.replace(" ", "_"), self.ceph_cmd + cmd, 'json')
@@ -363,7 +364,7 @@ class CephDataCollector(Collector):
 
                     self.save('crushmap', 'bin', code, data)
                     with tempfile.NamedTemporaryFile() as fd_txt:
-                        code, data = run_with_code("crushtool -d {0} -o {1}".format(fd.name, fd_txt.name))
+                        code, data = run_with_code("crushtool -d {} -o {}".format(fd.name, fd_txt.name))
                         if code == 0:
                             data = open(fd_txt.name, "rb").read()
                         self.save('crushmap', 'txt', code, data)
@@ -373,7 +374,7 @@ class CephDataCollector(Collector):
                     if code == 0:
                         data = open(fd.name, "rb").read()
                     self.save('osdmap', 'bin', code, data)
-                    self.save_output('osdmap', "osdmaptool --print {0}".format(fd.name), "txt")
+                    self.save_output('osdmap', "osdmaptool --print {}".format(fd.name), "txt")
             else:
                 temp_fl = "%08X" % random.randint(0, 2 << 64)
                 cr_fname = "/tmp/ceph_collect." + temp_fl + ".cr"
@@ -408,7 +409,7 @@ class CephDataCollector(Collector):
         unexpected_osds = running_osds.difference(ids_from_ceph)
 
         for osd_id in unexpected_osds:
-            logger.warning("Unexpected osd-{0} in node {1}.".format(osd_id, self.node.name))
+            logger.warning("Unexpected osd-{} in node {}.".format(osd_id, self.node.name))
 
         cephdisk_js = rpc_run(self.node.rpc, "ceph-disk list --format=json", node_name=self.node.name).decode('utf8')
         cephdisk_ls = rpc_run(self.node.rpc, "ceph-disk list", node_name=self.node.name).decode('utf8')
@@ -431,8 +432,8 @@ class CephDataCollector(Collector):
                                             if attr in part_info}
 
         for osd in self.node.osds:
-            with self.chdir('osd/{0}'.format(osd.id)):
-                cmd = "tail -n {0} /var/log/ceph/ceph-osd.{1}.log".format(self.opts.ceph_log_max_lines, osd.id)
+            with self.chdir('osd/{}'.format(osd.id)):
+                cmd = "tail -n {} /var/log/ceph/ceph-osd.{}.log".format(self.opts.ceph_log_max_lines, osd.id)
                 self.save_output("log", cmd)
 
                 # TODO: much of this can be done even id osd is down for filestore
@@ -477,14 +478,14 @@ class CephDataCollector(Collector):
 
                     self.save('devs_cfg', 'json', 0, json.dumps(osd_dev_conf))
                 else:
-                    logger.warning("osd-{0} in node {1} is down.".format(osd.id, self.node.name) +
+                    logger.warning("osd-{} in node {} is down.".format(osd.id, self.node.name) +
                                    " No config available, will use default data and journal path")
 
         pids = self.node.rpc.sensors.find_pids_for_cmd('ceph-osd')
         logger.debug("Found next pids for OSD's on node %s: %r", self.node.name, pids)
         if pids:
             for pid in pids:
-                cmdline = self.node.rpc.fs.get_file('/proc/{0}/cmdline'.format(pid), compress=False).decode('utf8')
+                cmdline = self.node.rpc.fs.get_file('/proc/{}/cmdline'.format(pid), compress=False).decode('utf8')
                 opts = cmdline.split("\x00")
                 for op, val in zip(opts[:-1], opts[1:]):
                     if op in ('-i', '--id'):
@@ -496,38 +497,38 @@ class CephDataCollector(Collector):
 
                 osd_proc_info = {}  # type: Dict[str, Any]
 
-                with self.chdir('osd/{0}'.format(osd_id)):
+                with self.chdir('osd/{}'.format(osd_id)):
                     self.save("cmdline", "bin", 0, cmdline)
-                    osd_proc_info['fd_count'] = len(self.node.rpc.fs.listdir("/proc/{0}/fd".format(pid)))
+                    osd_proc_info['fd_count'] = len(self.node.rpc.fs.listdir("/proc/{}/fd".format(pid)))
 
-                    fpath = "/proc/{0}/net/sockstat".format(pid)
+                    fpath = "/proc/{}/net/sockstat".format(pid)
                     ssv4 = split_sockstat_file(self.node.rpc.fs.get_file(fpath, compress=False).decode('utf8'))
                     if not ssv4:
-                        logger.warning("Broken file {0!r} on node {1}".format(fpath, self.node.name))
+                        logger.warning("Broken file {!r} on node {}".format(fpath, self.node.name))
                     else:
                         osd_proc_info['ipv4'] = ssv4
 
-                    fpath = "/proc/{0}/net/sockstat6".format(pid)
+                    fpath = "/proc/{}/net/sockstat6".format(pid)
                     ssv6 = split_sockstat_file(self.node.rpc.fs.get_file(fpath, compress=False).decode('utf8'))
                     if not ssv6:
-                        logger.warning("Broken file {0!r} on node {1}".format(fpath, self.node.name))
+                        logger.warning("Broken file {!r} on node {}".format(fpath, self.node.name))
                     else:
                         osd_proc_info['ipv6'] = ssv6
 
-                    proc_stat = self.node.rpc.fs.get_file("/proc/{0}/status".format(pid), compress=False).decode('utf8')
+                    proc_stat = self.node.rpc.fs.get_file("/proc/{}/status".format(pid), compress=False).decode('utf8')
                     self.save("proc_status", "txt", 0, proc_stat)
                     osd_proc_info['th_count'] = int(proc_stat.split('Threads:')[1].split()[0])
 
                     self.save("procinfo", "json", 0, json.dumps(osd_proc_info))
 
     def collect_monitor(self) -> None:
-        with self.chdir("mon/{0}".format(self.node.mon)):
+        with self.chdir("mon/{}".format(self.node.mon)):
             self.save_output("mon_daemons", "ps aux | grep ceph-mon")
-            tail_ln = "tail -n {0} ".format(self.opts.ceph_log_max_lines)
-            self.save_output("mon_log", tail_ln + "/var/log/ceph/ceph-mon.{0}.log".format(self.node.mon))
+            tail_ln = "tail -n {} ".format(self.opts.ceph_log_max_lines)
+            self.save_output("mon_log", tail_ln + "/var/log/ceph/ceph-mon.{}.log".format(self.node.mon))
             self.save_output("ceph_log", tail_ln + " /var/log/ceph/ceph.log")
             self.save_output("ceph_audit", tail_ln + " /var/log/ceph/ceph.audit.log")
-            self.save_output("config", self.ceph_cmd + "daemon mon.{0} config show".format(self.node.mon),
+            self.save_output("config", self.ceph_cmd + "daemon mon.{} config show".format(self.node.mon),
                              frmt='json')
 
 
@@ -731,13 +732,13 @@ class LoadCollector(Collector):
             if is_unpacked:
                 ext = 'csv' if isinstance(data, array.array) else 'json'
                 extra = [sensor, dev, metric, units]
-                self.save("perf_monitoring/{0}/{1}".format(self.node.fs_name, sensor_path), ext, 0, data,
+                self.save("perf_monitoring/{}/{}".format(self.node.fs_name, sensor_path), ext, 0, data,
                           extra=extra)
             else:
                 if metric == 'historic':
-                    self.storage.put_raw(data, "perf_monitoring/{0}/{1}.bin".format(self.node.fs_name, sensor_path))
+                    self.storage.put_raw(data, "perf_monitoring/{}/{}.bin".format(self.node.fs_name, sensor_path))
                 elif metric == 'perf_dump':
-                    self.storage.put_raw(data, "perf_monitoring/{0}/{1}.json".format(self.node.fs_name, sensor_path))
+                    self.storage.put_raw(data, "perf_monitoring/{}/{}.json".format(self.node.fs_name, sensor_path))
 
 
 ALL_COLLECTORS = [CephDataCollector, NodeCollector, LoadCollector]  # type: List[Type[Collector]]
@@ -790,7 +791,7 @@ def set_node_name(node: SimpleRPCClient) -> None:
 def collect(storage: IStorageNNP, opts: Any, executor: Executor) -> None:
     # This variable is updated from main function
     ssh_opts = "-o LogLevel=quiet -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
-    ssh_opts += "-o ConnectTimeout={0} -o ConnectionAttempts=2".format(opts.ssh_conn_timeout)
+    ssh_opts += "-o ConnectTimeout={} -o ConnectionAttempts=2".format(opts.ssh_conn_timeout)
 
     if opts.ssh_user:
         ssh_opts += " -l {0} ".format(opts.ssh_user)
@@ -803,7 +804,8 @@ def collect(storage: IStorageNNP, opts: Any, executor: Executor) -> None:
 
     for collector in allowed_collectors:
         if collector not in ALL_COLLECTORS_MAP:
-            logger.error(f"Can't found collector {collector}. Only {','.join(ALL_COLLECTORS_MAP)} are available")
+            logger.error("Can't found collector {}. Only {} are available".format(
+                            collector, ','.join(ALL_COLLECTORS_MAP)))
             return
 
     ip_mapping = {}
@@ -817,7 +819,7 @@ def collect(storage: IStorageNNP, opts: Any, executor: Executor) -> None:
                 ip_mapping[ip] = ssh_ip
 
     if opts.ceph_master:
-        logger.info(f"Connecting to ceph-master: {opts.ceph_master}")
+        logger.info("Connecting to ceph-master: {}".format(opts.ceph_master))
         try:
             rpc_conn, _ = init_node(opts.ceph_master, ssh_opts=ssh_opts, with_sudo=opts.sudo)
             master_node = Node(ip=socket.gethostbyname(opts.ceph_master),
@@ -825,7 +827,7 @@ def collect(storage: IStorageNNP, opts: Any, executor: Executor) -> None:
             master_node.rpc = rpc_conn
             set_node_name(master_node)
         except:
-            logger.error(f"Can't connect to ceph-master: {opts.ceph_master}")
+            logger.error("Can't connect to ceph-master: {}".format(opts.ceph_master))
             raise
     else:
         master_conn = None
@@ -1070,14 +1072,14 @@ def setup_logging2(opts: Any, out_folder: str, tmp_log_file: bool = False) -> Op
 
 def git_prepare(path: str) -> bool:
     logger.info("Checking and cleaning git dir %r", path)
-    code, res = run_with_code("cd {0} ; git status --porcelain".format(path))
+    code, res = run_with_code("cd {} ; git status --porcelain".format(path))
 
     if code != 0:
-        sys.stderr.write("Folder {0} doesn't looks like under git control\n".format(path))
+        sys.stderr.write("Folder {} doesn't looks like under git control\n".format(path))
         return False
 
     if len(res.strip()) != 0:
-        sys.stderr.write("Uncommited or untracked files in {0}. ".format(path) +
+        sys.stderr.write("Uncommited or untracked files in {}. ".format(path) +
                          "Cleanup directory before proceed\n")
         return False
 
@@ -1093,7 +1095,7 @@ def git_prepare(path: str) -> bool:
 
 
 def git_commit(path: str, message: str, push: bool = False):
-    cmd = "cd {0} ; git add -A ; git commit -m '{1}'".format(path, message)
+    cmd = "cd {} ; git add -A ; git commit -m '{}'".format(path, message)
     if push:
         cmd += " ; git push"
     run_locally(cmd)
@@ -1171,7 +1173,7 @@ def main(argv: List[str]) -> int:
                 else:
                     out_file = opts.result
 
-                code, res = run_with_code("cd {0} ; tar -zcvf {1} *".format(out_folder, out_file))
+                code, res = run_with_code("cd {} ; tar -zcvf {} *".format(out_folder, out_file))
                 if code != 0:
                     logger.error("Fail to archive results. Please found raw data at %r", out_folder)
                 else:

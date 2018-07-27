@@ -4,357 +4,25 @@ import logging
 import weakref
 import collections
 from ipaddress import IPv4Network, IPv4Address
-from typing import List, Dict, Any, Iterable, Tuple, Union, Set, Callable, Optional, Iterator
-from enum import Enum
+from typing import List, Dict, Any, Iterable, Tuple, Union, Optional, Iterator
 
 import numpy
-from dataclasses import dataclass, field
 
-from cephlib.crush import load_crushmap, Crush
+from cephlib.crush import load_crushmap
 from cephlib.common import AttredDict
 from cephlib.units import unit_conversion_coef_f, ssize2b
 from cephlib.storage import AttredStorage, TypedStorage
 
-from .hw_info import parse_hw_info, get_dev_file_name, HWInfo
+from .hw_info import parse_hw_info, get_dev_file_name
+from .cluster_classes import *
 
 
 logger = logging.getLogger("cephlib.parse")
 NO_VALUE = -1
 
-
-class OSDStoreType(Enum):
-    filestore = 0
-    bluestore = 1
-    unknown = 2
-
-
-class MonRole(Enum):
-    master = 0
-    follower = 1
-    unknown = 2
-
-
-@dataclass
-class PoolDF:
-    size_bytes: int
-    size_kb: int
-    num_objects: int
-    num_object_clones: int
-    num_object_copies: int
-    num_objects_missing_on_primary: int
-    num_objects_unfound: int
-    num_objects_degraded: int
-    read_ops: int
-    read_bytes: int
-    write_ops: int
-    write_bytes: int
-
-
-@dataclass
-class Pool:
-    id: int
-    name: str
-    size: int
-    min_size: int
-    pg: int
-    pgp: int
-    crush_rule: int
-    extra: Dict[str, Any]
-    df: PoolDF
-
-
-@dataclass
-class NetLoad:
-    send_bytes: numpy.ndarray
-    recv_bytes: numpy.ndarray
-    send_packets: numpy.ndarray
-    recv_packets: numpy.ndarray
-
-    send_bytes_avg: float = 0.0
-    recv_bytes_avg: float = 0.0
-    send_packets_avg: float = 0.0
-    recv_packets_avg: float = 0.0
-
-    def __post_init__(self):
-        self.send_bytes_avg = self.send_bytes.mean()
-        self.recv_bytes_avg = self.recv_bytes.mean()
-        self.send_packets_avg = self.send_packets.mean()
-        self.recv_packets_avg = self.recv_packets.mean()
-
-
-@dataclass
-class NetAdapterAddr:
-    ip: IPv4Address
-    net: IPv4Network
-
-
-@dataclass
-class NetworkAdapter:
-    dev: str
-    is_phy: bool
-    duplex: Optional[bool] = None
-    mtu: Optional[int] = None
-    speed: Optional[str] = None
-    ips: List[NetAdapterAddr] = field(default_factory=list)
-    speed_s: Optional[str] = None
-    load: Optional[NetLoad] = None
-
-
-@dataclass
-class DiskLoad:
-    read_bytes: float
-    write_bytes: float
-    read_iops: float
-    write_iops: float
-    io_time: float
-    w_io_time: float
-    iops: float
-    queue_depth: float
-    lat: Optional[float]
-
-    read_bytes_v: numpy.ndarray
-    write_bytes_v: numpy.ndarray
-    read_iops_v: numpy.ndarray
-    write_iops_v: numpy.ndarray
-    io_time_v: numpy.ndarray
-    w_io_time_v: numpy.ndarray
-    iops_v: numpy.ndarray
-    queue_depth_v: numpy.ndarray
-
-
-@dataclass
-class Mountable:
-    name: str
-    size: int
-    mountpoint: Optional[str] = None
-    fs: Optional[str] = None
-    free_space: Optional[int] = None
-    parent: Optional[Callable[[], Optional['Disk']]] = None
-
-
-@dataclass
-class CephVersion:
-    major: int
-    minor: int
-    bugfix: int
-    commit_hash: str
-
-
-@dataclass
-class Disk:
-    tp: str
-    extra: Dict[str, Any]
-    name: str
-    size: int
-    load: Optional[DiskLoad] = None
-    partitions: Dict[str, Mountable] = field(default_factory=dict)
-    mountpoint: Optional[str] = None
-    fs: Optional[str] = None
-    free_space: Optional[int] = None
-    parent: Optional[Callable[[], Optional['Disk']]] = None
-
-
-@dataclass
-class Host:
-    name: str
-    stor_id: str
-    net_adapters: Dict[str, NetworkAdapter]
-    disks: Dict[str, Disk]
-    storage_devs: Dict[str, Mountable]
-    hw_info: Optional[HWInfo]
-
-    uptime: float
-    perf_monitoring: Any
-    open_tcp_sock: int
-    open_udp_sock: int
-    mem_total: int
-    mem_free: int
-    swap_total: int
-    swap_free: int
-    load_5m: Optional[float]
-
-    def find_interface(self, net: IPv4Network) -> Optional[NetworkAdapter]:
-        for adapter in self.net_adapters.values():
-            for ip in adapter.ips:
-                if ip.ip in net:
-                    return adapter
-        return None
-
-
-@dataclass
-class CephMonitor:
-    name: str
-    status: Optional[str]
-    host: Host
-    role: MonRole
-
-    version: Optional[CephVersion] = None
-    kb_avail: Optional[int] = None
-    avail_percent: Optional[int] = None
-
-
-@dataclass
-class BlueStoreInfo:
-    data_dev: str
-    data_partition: str
-    db_dev: str
-    db_partition: str
-    wal_dev: str
-    wal_partition: str
-
-    data_stor_stats: Optional[DiskLoad] = None
-    wal_stor_stats: Optional[DiskLoad] = None
-    db_stor_stats: Optional[DiskLoad] = None
-
-
-@dataclass
-class FileStoreInfo:
-    data_dev: str
-    data_partition: str
-    journal_dev: str
-    journal_partition: str
-
-    data_stor_stats: Optional[DiskLoad] = None
-    j_stor_stats: Optional[DiskLoad] = None
-
-
-class OSDStatus(Enum):
-    up = 0
-    down = 1
-    out = 2
-
-
-@dataclass
-class OSDRunInfo:
-    procinfo: Any
-    cmdline: List[str]
-    config: Dict[str, str]
-
-
-@dataclass
-class CephOSD:
-    id: int
-    host: Host
-    version: CephVersion
-    status: OSDStatus
-
-    cluster_ip: str
-    public_ip: str
-    pg_count: Optional[int]
-    reweight: float
-    used_space: int
-    free_space: int
-    free_perc: int
-
-    storage_type: OSDStoreType = OSDStoreType.unknown
-    storage_info: Union[BlueStoreInfo, FileStoreInfo, None] = None
-
-    run_info: Optional[OSDRunInfo] = None
-    osd_perf: Optional[Dict[str, Union[numpy.ndarray, float]]] = None
-    historic_ops_storage_path: Optional[str] = None
-
-    @property
-    def daemon_runs(self) -> bool:
-        return self.run_info is not None
-
-    def __str__(self) -> str:
-        return "OSD(id={0.id}, host={0.host.name}, free_perc={0.free_perc})".format(self)
-
-
 netstat_fields = "recv_bytes recv_packets rerrs rdrop rfifo rframe rcompressed" + \
                  " rmulticast send_bytes send_packets serrs sdrop sfifo scolls" + \
                  " scarrier scompressed"
-
-@dataclass
-class NetStats:
-    recv_bytes: int
-    recv_packets: int
-    rerrs: int
-    rdrop: int
-    rfifo: int
-    rframe: int
-    rcompressed: int
-    rmulticast: int
-    send_bytes: int
-    send_packets: int
-    serrs: int
-    sdrop: int
-    sfifo: int
-    scolls: int
-    scarrier: int
-    scompressed: int
-
-
-@dataclass
-class DFInfo:
-    name: str
-    size: int
-    free: int
-    mountpoint: str
-
-
-@dataclass
-class IPANetDevInfo:
-    name: str
-    mtu: int
-
-
-class CephStatusCode(Enum):
-    ok = 0
-    warn = 1
-    err = 2
-
-
-@dataclass
-class Cluster:
-    hosts: Dict[str, Host]
-    ip2host: Dict[str, Host]
-    report_collected_at_local: str
-    report_collected_at_gmt: str
-    perf_data: Any = None
-
-    @property
-    def has_performance_data(self) -> bool:
-        return self.perf_data is not None
-
-
-@dataclass
-class CephStatus:
-    overall_status: CephStatusCode
-    health_summary: Any
-    num_pgs: int
-
-    bytes_used: int
-    bytes_total: int
-    bytes_avail: int
-
-    data_bytes: int
-    write_bytes_sec: int
-    op_per_sec: int
-    pgmap_stat: Any
-    monmap_stat: Any
-
-
-@dataclass
-class CephInfo:
-    osds: List[CephOSD]
-    mons: List[CephMonitor]
-    pools: Dict[str, Pool]
-    osd_map: Dict[int, CephOSD]
-
-    # pg distribution
-    osd_pool_pg_2d: Dict[int, Dict[str, int]]
-    sum_per_pool: Dict[str, int]
-    sum_per_osd: Dict[int, int]
-
-    is_luminous: bool
-
-    crush: Crush
-    cluster_net: IPv4Network
-    public_net: IPv4Network
-    settings: AttredDict
-
-    status: CephStatus
 
 
 # -----  parse functions -----------------------------------------------------------------------------------------------
@@ -433,21 +101,36 @@ def parse_lsblkjs(data: List[Dict[str, Any]], hostname: str) -> Iterable[Disk]:
                            name, hostname, disk_js['tran'], disk_js['rota'])
             stor_tp = 'hdd'
 
-        dsk = Disk(name='/dev/' + name,
-                   size=disk_js['size'],
+        dsk = Disk(name=name,
+                   path='/dev/' + name,
+                   size=int(disk_js['size']),
+                   rota=disk_js['rota'] == '1',
+                   scheduler=disk_js['sched'],
                    tp=stor_tp,
                    extra=disk_js,
                    mountpoint=disk_js['mountpoint'],
-                   fs=disk_js["fstype"])
+                   fs=disk_js["fstype"],
+                   hw_model=HWModel(vendor=disk_js['vendor'], model=disk_js['model'], serial=disk_js['serial']),
+                   rq_size=int(disk_js["rq-size"]),
+                   phy_sec=int(disk_js["phy-sec"]),
+                   min_io=int(disk_js["min-io"]))
 
-        for prt_js in disk_js['children']:
-            assert '/' not in prt_js['name']
-            part = Mountable(name='/dev/' + prt_js['name'],
-                             size=prt_js['size'],
-                             mountpoint=prt_js['mountpoint'],
-                             fs=prt_js["fstype"],
-                             parent=weakref.ref(dsk))
-            dsk.partitions[part.name] = part
+        def fill_mountable(root: Dict[str, Any], parent: Any):
+            if 'children' in root:
+                for ch_js in root['children']:
+                    assert '/' not in ch_js['name']
+                    part = Mountable(name=ch_js['name'],
+                                     path='/dev/' + ch_js['name'],
+                                     size=int(ch_js['size']),
+                                     mountpoint=ch_js['mountpoint'],
+                                     fs=ch_js["fstype"],
+                                     parent=weakref.ref(dsk),
+                                     label=ch_js.get("partlabel"))
+                    parent.children[part.path] = part
+                    fill_mountable(ch_js, part)
+
+        fill_mountable(disk_js, dsk)
+
         yield dsk
 
 
@@ -456,7 +139,7 @@ def parse_df(data: str) -> Iterator[DFInfo]:
     assert lines[0].split() == ["Filesystem", "1K-blocks", "Used", "Available", "Use%", "Mounted", "on"]
     for ln in lines[1:]:
         name, size, _, free, _, mountpoint = ln.split()
-        yield DFInfo(name, int(size), int(free), mountpoint)
+        yield DFInfo(path=name, name=name.split("/")[-1], size=int(size), free=int(free), mountpoint=mountpoint)
 
 
 # --- load functions ---------------------------------------------------------------------------------------------------
@@ -509,20 +192,24 @@ def load_interfaces(dtime: Optional[float],
 
 def load_hdds(hostname: str,
               jstor_node: AttredStorage,
-              stor_node: AttredStorage) -> Tuple[Dict[str, Disk], Dict[str, Mountable]]:
+              stor_node: AttredStorage) -> Tuple[Dict[str, Disk], Dict[str, Mountable], Dict[str, DFInfo]]:
 
     disks: Dict[str, Disk] = {}
     storage_devs: Dict[str, Mountable] = {}
     df_info = {info.name: info for info in parse_df(stor_node.df)}
 
+    def walk_all(dsk):
+        if dsk.name in df_info:
+            dsk.free_space = df_info[dsk.name].free
+        for ch in dsk.children.values():
+            walk_all(ch)
+
     for dsk in parse_lsblkjs(jstor_node.lsblkjs['blockdevices'], hostname):
-        disks[dsk.name] = dsk
-        for part in [dsk] + list(dsk.partitions.values()):  # type: ignore
-            if part.name in df_info:
-                part.free_space = df_info[part.name].free
-        storage_devs[dsk.name] = dsk  # type: ignore
-        storage_devs.update(dsk.partitions)
-    return disks, storage_devs
+        disks[dsk.path] = dsk
+        walk_all(dsk)
+        storage_devs[dsk.path] = dsk  # type: ignore
+        storage_devs.update(dsk.children)
+    return disks, storage_devs, df_info
 
 
 def fill_io_devices_usage_stats(dtime: float, perf_monitoring: Any, disks: Dict[str, Disk]):
@@ -690,6 +377,23 @@ def load_PG_distribution(storage: TypedStorage) -> Tuple[Dict[int, Dict[str, int
             dict(sum_per_pool.items()), dict(sum_per_osd.items())
 
 
+version_rr = re.compile(r'ceph version\s+(?P<version>[^ ]*)\s+\((?P<hash>[^)]*?)\)')
+
+
+def parse_ceph_versions(data: str) -> Dict[str, CephVersion]:
+    vers: Dict[str, CephVersion] = {}
+    for line in data.split("\n"):
+        line = line.strip()
+        if line:
+            name, data_js = line.split(":", 1)
+            rr = version_rr.match(json.loads(data_js)["version"])
+            if not rr:
+                logger.error("Can't parse version %r from %r", json.loads(data_js)["version"], line)
+            major, minor, bugfix = map(int, rr.group("version").split("."))
+            vers[name.strip()] = CephVersion(major, minor, bugfix, rr.group("hash"))
+    return vers
+
+
 def load_monitors(storage: TypedStorage, is_luminous: bool) -> List[CephMonitor]:
     if is_luminous:
         mons = storage.json.master.status['monmap']['mons']
@@ -699,10 +403,11 @@ def load_monitors(storage: TypedStorage, is_luminous: bool) -> List[CephMonitor]
         assert len(srv_health) == 1
         mons = srv_health[0]['mons']
 
+    vers = parse_ceph_versions(storage.txt.master.mon_versions)
     result: List[CephMonitor] = []
     for srv in mons:
         health = None if is_luminous else srv["health"]
-        mon = CephMonitor(srv["name"], health, srv["name"], MonRole.unknown)
+        mon = CephMonitor(srv["name"], health, srv["name"], role=MonRole.unknown, version=vers["mon." + srv["name"]])
 
         if not is_luminous:
             mon.kb_avail = srv["kb_avail"]
@@ -715,21 +420,21 @@ def load_ceph_status(storage: TypedStorage, is_luminous: bool) -> CephStatus:
     mstorage = storage.json.master
     pgmap = mstorage.status['pgmap']
     health = mstorage.status['health']
-    return CephStatus(overall_status=health['overall_status'],
+    return CephStatus(overall_status=CephStatusCode.from_str(health['overall_status']),
+                      status=CephStatusCode.from_str(health['status']),
                       health_summary=health['checks' if is_luminous else 'summary'],
                       num_pgs=pgmap['num_pgs'],
                       bytes_used=pgmap["bytes_used"],
                       bytes_total=pgmap["bytes_total"],
                       bytes_avail=pgmap["bytes_avail"],
                       data_bytes=pgmap["data_bytes"],
-                      write_bytes_sec=pgmap.get("write_bytes_sec", 0),
-                      op_per_sec=pgmap.get("op_per_sec", 0),
                       pgmap_stat=pgmap,
-                      monmap_stat=mstorage.status['monmap'])
+                      monmap_stat=mstorage.status['monmap'],
 
-
-version_rr = re.compile(r'osd.(?P<osd_id>\d+)\s*:\s*' +
-                        r'\{"version":"ceph version\s+(?P<version>[^ ]*)\s+\((?P<hash>[^)]*?)\).*?"\}\s*$')
+                      write_bytes_sec=pgmap.get("write_bytes_sec", 0),
+                      write_op_per_sec=pgmap.get("write_op_per_sec", 0),
+                      read_bytes_sec=pgmap.get("read_bytes_sec", 0),
+                      read_op_per_sec=pgmap.get("read_op_per_sec", 0))
 
 
 def avg_counters(counts: List[int], values: List[float]) -> numpy.ndarray:
@@ -847,7 +552,7 @@ class Loader:
                     pass
 
             loadavg = stor_node.get('loadavg')
-            disks, storage_devs = load_hdds(hostname, jstor_node, stor_node)
+            disks, storage_devs, df_info = load_hdds(hostname, jstor_node, stor_node)
 
             if self.perf_data is not None:
                 perf_monitoring = self.perf_data.get(host_ip_name)
@@ -874,7 +579,8 @@ class Loader:
                         swap_total=info['SwapTotal'],
                         swap_free=info['SwapFree'],
                         load_5m=None if loadavg is None else float(loadavg.strip().split()[1]),
-                        hw_info=hw_info)
+                        hw_info=hw_info,
+                        df_info=df_info)
 
             hosts[host.name] = host
 
@@ -905,14 +611,10 @@ class Loader:
             fc = self.storage.raw.get_raw('master/osd_versions.err').decode("utf8")
 
         osd_versions: Dict[int, CephVersion] = {}
-        for line in fc.split("\n"):
-            line = line.strip()
-            if line:
-                rr = version_rr.match(line.strip())
-                if not rr:
-                    raise ValueError(f"Can't parse OSD version {line.strip()}")
-                major, minor, bugfix = map(int, rr.group('version').split('.'))
-                osd_versions[int(rr.group('osd_id'))] = CephVersion(major, minor, bugfix, rr.group('hash'))
+        for name, ver in parse_ceph_versions(fc).items():
+            nm, id = name.split(".")
+            assert nm == 'osd'
+            osd_versions[int(id)] = ver
 
         osd_perf_scalar = {}
         for node in self.storage.json.master.osd_perf['osd_perf_infos']:
@@ -974,8 +676,8 @@ class Loader:
 
                 if osd.storage_type == OSDStoreType.filestore:
                     stor_info: Union[FileStoreInfo, BlueStoreInfo] = FileStoreInfo(
-                        data_dev = osd_disks_info['r_data'],
-                        data_partition = osd_disks_info['data'],
+                        data_dev=osd_disks_info['r_data'],
+                        data_partition=osd_disks_info['data'],
                         journal_dev=osd_disks_info['r_journal'],
                         journal_partition=osd_disks_info['journal'],
                     )

@@ -1,26 +1,8 @@
 from typing import List, Any, Optional, Dict, Tuple
 
 import numpy
-import dataclasses
 
-from .cluster import CephOSD, DiskLoad, BlueStoreInfo
-
-
-@dataclasses.dataclass
-class HDDsResourceUsage:
-    wio: numpy.ndarray  # 2D array
-    wbytes: numpy.ndarray  # 2D array
-    rio: numpy.ndarray  # 2D array
-    rbytes: numpy.ndarray  # 2D array
-    qd: numpy.ndarray  # 2D array
-
-
-@dataclasses.dataclass
-class CephDisksResourceUsage:
-    data: HDDsResourceUsage
-    journal: Optional[HDDsResourceUsage]
-    wal: Optional[HDDsResourceUsage]
-    db: Optional[HDDsResourceUsage]
+from .cluster_classes import CephOSD, DiskLoad, BlueStoreInfo
 
 
 def hdd_info(all_disks: Dict[Tuple[str, str], DiskLoad],

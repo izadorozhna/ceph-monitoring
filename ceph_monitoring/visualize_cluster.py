@@ -5,6 +5,7 @@ import time
 import pstats
 import shutil
 import bisect
+import inspect
 import logging
 import tempfile
 import cProfile
@@ -13,17 +14,20 @@ import subprocess
 import collections
 import logging.config
 from pathlib import Path
-from typing import Dict, Optional, List, Tuple, Any, Union, Set, Sequence
+from typing import Dict, List, Tuple, Any, Union, Set, Sequence, Optional
 
 import dataclasses
 
 from cephlib.storage import make_storage, TypedStorage
 from cephlib.units import b2ssize, b2ssize_10
+from cephlib.common import flatten
 
 from . import html
-from .cluster import (NO_VALUE, CephInfo, Cluster, OSDStoreType,
-                      FileStoreInfo, BlueStoreInfo, load_all, DiskLoad, OSDStatus)
+from .cluster import (NO_VALUE, CephInfo, Cluster, OSDStoreType, CephMonitor, CephOSD, Host,
+                      FileStoreInfo, BlueStoreInfo, load_all, DiskLoad, OSDStatus, CephVersion)
 
+from .plot_data import (per_info_required, show_osd_used_space_histo,
+                        show_osd_load, show_osd_lat_heatmaps, show_osd_ops_boxplot, show_osd_pg_histo)
 
 H = html.rtag
 logger = logging.getLogger('cephlib.report')
@@ -90,216 +94,22 @@ class Report:
         self.script_links: List[str] = []
         self.scripts: List[str] = []
         self.onload: List[str] = []
-        self.divs: List[Union[None, Tuple[float, str, str, str]]] = []
+        self.divs: List[Tuple[Optional[str], Optional[str], str]] = []
 
-    def next_line(self):
-        self.divs.append(None)
-
-    def add_block(self, weight: float, header: str, block_obj: Any, menu_item: str = None):
+    def add_block(self, header: Optional[str], block_obj: Any, menu_item: str = None):
         if menu_item is None:
             menu_item = header
-        self.divs.append((weight, header, menu_item, str(block_obj)))
+        self.divs.append((header, menu_item, str(block_obj)))
 
     def save_to(self, output_dir: Path, pretty_html: bool = False):
-        pt = Path(__file__).absolute().parent.parent
-        static_files_dir = pt / "html_js_css"
 
-        self.style_links.append("http://getbootstrap.com/examples/dashboard/dashboard.css")
-
-        css = """
-        table.zebra-table tr:nth-child(even) {background-color: #E0E0FF;}
-        table th {background: #ededed;}
-        .right{
-            position:relative;
-            margin:0;
-            padding:0;
-            float:right;
-        }
-        .left{
-            position:relative   ;
-            margin:0;
-            padding:0;
-            float:left;
-        }
-        th {text-align: center;}
-        td {text-align: right;}
-        tr td:first-child {text-align: left;}
-        """
-
-        self.style.append(css)
+        self.style_links.append("bootstrap.min.css")
+        self.style_links.append("report.css")
+        self.script_links.append("report.js")
 
         links: List[str] = []
-        for link in self.style_links + self.script_links:
-            fname = link.rsplit('/', 1)[-1]
-            src_path = static_files_dir / fname
-            dst_path = output_dir / fname
-            if src_path.exists():
-                if not dst_path.is_dir():
-                    shutil.copyfile(src_path, dst_path)
-                link = fname
-            links.append(link)
+        static_files_dir = Path(__file__).absolute().parent.parent / "html_js_css"
 
-        css_links = links[:len(self.style_links)]
-        js_links = links[len(self.style_links):]
-
-        doc = html.Doc()
-        with doc.html:
-            with doc.head:
-                doc.title("Ceph cluster report: " + self.cluster_name)
-
-                for url in css_links:
-                    doc.link(href=url, rel="stylesheet", type="text/css")
-
-                doc.style("\n".join(self.style), type="text/css")
-
-                for url in js_links:
-                    doc.script(type="text/javascript", src=url)
-
-                for script in self.scripts:
-                    doc.script(script, type="text/javascript")
-
-            with doc.body(onload=";".join(self.onload)):
-                with doc.div(_class="container-fluid"):
-                    with doc.div(_class="row row-offcanvas row-offcanvas-left"):
-                        with doc.div(_class="col-md-2 sidebar-offcanvas", id="sidebar", role="navigation"):
-                            with doc.div(data_spy="affix", data_offset_top="45", data_offset_bottom="90"):
-                                with doc.ul(_class="nav", id="sidebar-nav"):
-                                    for sid, div_cnt in enumerate(self.divs):
-                                        if div_cnt is None:
-                                            continue
-
-                                        _, _, menu, data = div_cnt
-                                        if menu.endswith(":"):
-                                            menu = menu[:-1]
-                                        doc.li.a(menu, href=f"#section{sid}")
-
-                        with doc.div(_class="col-md-10", data_spy="scroll", data_target="#sidebar-nav"):
-                            doc("\n")
-                            doc._enter("div", _class="row")
-                            for sid, div_cnt in enumerate(self.divs):
-                                if div_cnt is None:
-                                    doc._exit()
-                                    doc("\n")
-                                    doc._enter("div", _class="row")
-                                else:
-                                    w, header, _, block = div_cnt
-                                    if w is None:
-                                        doc(block)
-                                    else:
-                                        with doc.div(_class=f"col-md-{w}"):
-                                            doc.H3.center(header, id=f"section{sid}")
-                                            doc.br
-
-                                            if block != "":
-                                                doc.center(block)
-                            doc._exit()
-
-        index = f"<!doctype html>{doc}"
-        index_path = output_dir / self.output_file_name
-
-        try:
-            if pretty_html:
-                from bs4 import BeautifulSoup
-                index = BeautifulSoup.BeautifulSoup(index).prettify()
-        except:
-            pass
-
-        index_path.open("w").write(index)
-
-
-class Report2:
-    def __init__(self, cluster_name: str, output_file_name: str) -> None:
-        self.cluster_name = cluster_name
-        self.output_file_name = output_file_name
-        self.style: List[str] = []
-        self.style_links: List[str] = []
-        self.script_links: List[str] = []
-        self.scripts: List[str] = []
-        self.onload: List[str] = []
-        self.divs: List[Union[None, Tuple[float, str, str, str]]] = []
-
-    def next_line(self):
-        self.divs.append(None)
-
-    def add_block(self, weight: float, header: str, block_obj: Any, menu_item: str = None):
-        if menu_item is None:
-            menu_item = header
-        self.divs.append((weight, header, menu_item, str(block_obj)))
-
-    def save_to(self, output_dir: Path, pretty_html: bool = False):
-        pt = Path(__file__).absolute().parent.parent
-        static_files_dir = pt / "html_js_css"
-
-        self.style_links.append("http://getbootstrap.com/examples/dashboard/dashboard.css")
-
-        css = """
-        table.zebra-table tr:nth-child(even) {background-color: #E0E0FF;}
-        table th {background: #ededed;}
-        .right{
-            position:relative;
-            margin:0;
-            padding:0;
-            float:right;
-        }
-        .left{
-            position:relative   ;
-            margin:0;
-            padding:0;
-            float:left;
-        }
-        th {text-align: center;}
-        td {text-align: right;}
-        tr td:first-child {text-align: left;}
-        
-        .menu-ceph {
-            width: 10%;
-            margin-left: 0%;
-            float: left;
-            background-color: aquamarine;
-            text-align: left;
-            top:0px;
-            /*position:absolute;*/
-            position:fixed;
-        }
-        
-        .main-ceph {
-            position:absolute;
-            top:0px;
-            margin-left: 10%;
-            width: 90%;
-            float: right;
-            background-color: antiquewhite;
-            text-align: center;
-        }
-        
-        .data-ceph {
-            visibility: hidden;
-        }
-        
-        .menu-ceph ul {
-            padding: 25px 30px;
-        }
-        
-        a:hover {
-            cursor: pointer;
-        }
-        """
-
-        code = """
-        function clicked(el_id) {
-            for(const old of document.getElementsByClassName("main-ceph")) {
-                old.classList.remove('main-ceph');
-                old.classList.add('data-ceph');
-            }
-            const el = document.getElementById(el_id);
-            el.classList.remove('data-ceph');
-            el.classList.add('main-ceph');
-        }
-        """
-        self.style.append(css)
-        self.scripts.append(code)
-
-        links: List[str] = []
         for link in self.style_links + self.script_links:
             fname = link.rsplit('/', 1)[-1]
             src_path = static_files_dir / fname
@@ -334,24 +144,30 @@ class Report2:
                     with doc.ul():
                         for sid, div_cnt in enumerate(self.divs):
                             if div_cnt is not None:
-                                _, _, menu, data = div_cnt
-                                if menu.endswith(":"):
-                                    menu = menu[:-1]
-                                doc.li.a(menu, onclick=f"clicked('{sid}')")
+                                _, menu, _ = div_cnt
+                                if menu:
+                                    if menu.endswith(":"):
+                                        menu = menu[:-1]
+                                    doc.li.a(menu, onclick=f"clicked('{sid}')")
 
                 for sid, div_cnt in enumerate(self.divs):
                     doc("\n")
                     if div_cnt is not None:
-                        with doc.div(_class="main-ceph" if sid == 0 else "data-ceph", id=f"{sid}"):
-                            w, header, _, block = div_cnt
-                            if w is None:
-                                doc(block)
-                            else:
-                                doc.H3.center(header)
-                                doc.br
+                        header, menu_item, block = div_cnt
+                        if menu_item:
+                            doc._enter("div", _class="main-ceph" if sid == 0 else "data-ceph", id=f"{sid}")
 
-                                if block != "":
-                                    doc.center(block)
+                        if header is None:
+                            doc(block)
+                        else:
+                            doc.H3.center(header)
+                            doc.br
+
+                            if block != "":
+                                doc.center(block)
+
+                        if menu_item:
+                            doc._exit()
 
         index = f"<!doctype html>{doc}"
         index_path = output_dir / self.output_file_name
@@ -366,11 +182,18 @@ class Report2:
         index_path.open("w").write(index)
 
 
-def show_summary(report: Report, cluster: Cluster, ceph: CephInfo):
-    t = html.HTMLTable(["Setting", "Value"])
+def get_all_versions(services: List[Union[CephOSD, CephMonitor]]) -> Dict[CephVersion, int]:
+    all_version: Dict[CephVersion, int] = collections.Counter()
+    for srv in services:
+        all_version[srv.version] += 1
+    return all_version
+
+
+def show_cluster_summary(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
+    t = html.HTMLTable(["Setting", "Value"], id="table-summary", extra_cls="table_c")
     t.add_cells("Collected at", cluster.report_collected_at_local)
     t.add_cells("Collected at GMT", cluster.report_collected_at_gmt)
-    t.add_cells("Status", str(ceph.status.overall_status))
+    t.add_cells("Status/overrall", f"{ceph.status.status.name.upper()} / {ceph.status.overall_status.name.upper()}")
     t.add_cells("PG count", str(ceph.status.num_pgs))
     t.add_cells("Pool count", str(len(ceph.pools)))
     t.add_cells("Used", b2ssize(ceph.status.bytes_used))
@@ -379,20 +202,44 @@ def show_summary(report: Report, cluster: Cluster, ceph: CephInfo):
 
     avail_perc = ceph.status.bytes_avail * 100 / ceph.status.bytes_total
     t.add_cells("Free %", str(int(avail_perc)))
-
-    osd_count = len(ceph.osds)
     t.add_cells("Mon count", str(len(ceph.mons)))
+    t.add_cells("OSD count", str(len(ceph.osds)))
 
-    report.add_block(3, "Status:", t)
+    mon_vers = get_all_versions(ceph.mons)
+    t.add_cells("Mon version", ", ".join(map(str, sorted(mon_vers))))
 
-    stor_set = set(osd.storage_type for osd in ceph.osds)
+    osd_vers = get_all_versions(ceph.osds)
+    t.add_cells("OSD version", ", ".join(map(str, sorted(osd_vers))))
+
+    t.add_cells("Monmap version", str(ceph.status.monmap_stat['epoch']))
+    mon_tm = time.mktime(time.strptime(ceph.status.monmap_stat['modified'], "%Y-%m-%d %H:%M:%S.%f"))
+    collect_tm = time.mktime(time.strptime(cluster.report_collected_at_local, "%Y-%m-%d %H:%M:%S"))
+    diff = int(collect_tm - mon_tm)
+
+    h = diff // 3600
+    m = (diff % 3600) % 60
+    s = diff % 60
+    if h < 24:
+        t.add_cells("Monmap modified in", f'{h}:{m:<02d}:{s:<02d}')
+    else:
+        d = h // 24
+        h %= 24
+        t.add_cells("Monmap modified in", f'{d}d {h}:{m:<02d}:{s:<02d}')
+
+    return "Status:", t
+
+
+def show_osd_summary(ceph: CephInfo) -> Tuple[str, Any]:
+    osd_count = len(ceph.osds)
+    stor_set = {osd.storage_type for osd in ceph.osds}
+    stor_set_names = {stor.name for stor in stor_set}
     has_bs = OSDStoreType.bluestore in stor_set
     has_fs = OSDStoreType.filestore in stor_set
 
     if ceph.settings is None:
         t = H.font("No live OSD found!", color="red")
     else:
-        t = html.HTMLTable(["Setting", "Value"])
+        t = html.HTMLTable(["Setting", "Value"], id="table-osd-summary", extra_cls="table_c")
         t.add_cells("Count", str(osd_count))
         t.add_cells("Average PG per OSD", str(ceph.status.num_pgs // osd_count))
         t.add_cells("Cluster net", str(ceph.cluster_net))
@@ -401,9 +248,9 @@ def show_summary(report: Report, cluster: Cluster, ceph: CephInfo):
         t.add_cells("Full ratio", "%0.3f" % (float(ceph.settings.mon_osd_full_ratio,)))
         t.add_cells("Backfill full ratio", getattr(ceph.settings, "osd_backfill_full_ratio", "?"))
         t.add_cells("Filesafe full ratio", "%0.3f" % (float(ceph.settings.osd_failsafe_full_ratio,)))
-        t.add_cells("Storage types", list(stor_set)[0]
-                                     if len(stor_set) == 1
-                                     else html_fail(",".join(map(str, stor_set))))
+        t.add_cells("Storage types", list(stor_set_names)[0]
+                                     if len(stor_set_names) == 1
+                                     else html_fail(",".join(map(str, stor_set_names))))
 
         if has_fs:
             t.add_cells("Journal aio", ceph.settings.journal_aio)
@@ -413,22 +260,23 @@ def show_summary(report: Report, cluster: Cluster, ceph: CephInfo):
             # TODO: add BS info
             pass
 
-        t.add_cells("Monmap version", str(ceph.status.monmap_stat['epoch']))
+    return "OSD:", t
 
-        mon_tm = time.mktime(time.strptime(ceph.status.monmap_stat['modified'], "%Y-%m-%d %H:%M:%S.%f"))
-        collect_tm = time.mktime(time.strptime(cluster.report_collected_at_local, "%Y-%m-%d %H:%M:%S"))
-        diff = int(collect_tm - mon_tm)
-        h = diff // 3600
-        m = (diff % 3600) % 60
-        s = diff % 60
-        t.add_cells("Monmap modified in", f'{h}:{m:<02d}:{s:<02d}')
-    report.add_block(3, "OSD:", t)
 
-    t = html.HTMLTable(["Setting", "Value"])
-    t.add_cells("Client IO Bps", b2ssize(ceph.status.write_bytes_sec))
-    t.add_cells("Client IO IOPS", b2ssize(ceph.status.op_per_sec))
-    report.add_block(2, "Activity:", t)
+def show_io_status(ceph: CephInfo) -> Tuple[str, Any]:
+    t = html.HTMLTable(["IO type", "Value"], id="table-io-summary", extra_cls="table_c")
+    t.add_cells("Client IO Write MiBps", b2ssize(ceph.status.write_bytes_sec // 2 ** 20))
+    t.add_cells("Client IO Write OPS", b2ssize(ceph.status.write_op_per_sec))
+    t.add_cells("Client IO Read MiBps", b2ssize(ceph.status.read_bytes_sec // 2 ** 20))
+    t.add_cells("Client IO Read OPS", b2ssize(ceph.status.read_op_per_sec))
 
+    t.add_cells("Recovery IO MiBps", "Not parsed yet")
+    t.add_cells("Recovery OPS", "Not parsed yet")
+
+    return "IO Activity:", t
+
+
+def show_health_messages(ceph: CephInfo) -> Optional[Tuple[str, Any]]:
     colors = {
         "HEALTH_WARN": "orange",
         "HEALTH_ERR": "red"
@@ -448,55 +296,85 @@ def show_summary(report: Report, cluster: Cluster, ceph: CephInfo):
                 t.font(msg['summary'].capitalize(), color=color)
                 t.br
 
-        report.add_block(2, "Status messages:", t)
+        return "Status messages:", t
 
 
-def show_mons_info(report: Report, ceph: CephInfo):
-    table = html.HTMLTable(headers=["Name", "Health", "Role", "Disk free<br>B (%)"])
+def show_mons_info(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
+    table = html.HTMLTable(headers=["Name", "Health", "Role", "Disk free<br>B (%)"],
+                           id="table-mon-info", extra_cls="table_c")
 
-    for mon in ceph.mons:
+    for mon in sorted(ceph.mons, key=lambda x: x.name):
+        role = "Unknown"
+        health = html_fail("HEALTH_FAIL")
         if mon.status is None:
-            health = "Unknown"
+            for mon_info in ceph.status.monmap_stat['mons']:
+                if mon_info['name'] == mon.name:
+                    if mon_info.get('rank') in [0, 1, 2, 3, 4]:
+                        health = html_ok("HEALTH_OK")
+                        role = "leader" if mon_info.get('rank') == 0 else "follower"
+                        break
         else:
             health = html_ok("HEALTH_OK") if mon.status == "HEALTH_OK" else html_fail(mon.status)
+            role = mon.role
 
-        perc = ("Unknown" if ceph.is_luminous else f"{b2ssize(mon.kb_avail * 1024)} ({mon.avail_percent})")
-        table.add_row(map(str, [mon.name, health, "Unknown" if mon.role is None else mon.role, perc]))
+        if mon.kb_avail is None:
+            mon_db_root = "/var/lib/ceph/mon"
+            root = ""
+            blocks = 0
+            available = 0
+            for df_info in cluster.hosts[mon.host].df_info.values():
+                if mon_db_root.startswith(df_info.mountpoint) and len(root) < len(df_info.mountpoint):
+                    root = df_info.mountpoint
+                    blocks = df_info.size
+                    available = df_info.free
 
-    report.add_block(3, "Monitors info:", table)
+            if root == "":
+                perc = "Unknown"
+            else:
+                perc = f"{b2ssize(available * 1024)} ({available * 100 // blocks})"
+        else:
+            perc = f"{b2ssize(mon.kb_avail * 1024)} ({mon.avail_percent})"
+
+        table.add_row(map(str, [mon.name, health, role, perc]))
+
+    return "Monitors info:", table
 
 
-def show_pg_state(report: Report, ceph: CephInfo):
+def show_pg_state(ceph: CephInfo) -> Tuple[str, Any]:
     statuses: Dict[str, int] = collections.Counter()
 
     for pg_group in ceph.status.pgmap_stat['pgs_by_state']:
         for state_name in pg_group['state_name'].split('+'):
             statuses[state_name] += pg_group["count"]
 
-    table = html.HTMLTable(headers=["Status", "Count", "%"])
+    table = html.HTMLTable(headers=["Status", "Count", "%"], id="table-pgs", extra_cls="table_lr")
     table.add_row(["any", str(ceph.status.num_pgs), "100.00"])
     for status, count in sorted(statuses.items()):
         table.add_row([status, str(count), f"{100.0 * count / ceph.status.num_pgs:.2f}"])
 
-    report.add_block(2, "PG's status:", table)
+    return "PG's status:", table
 
 
-def show_osd_state(report: Report, ceph: CephInfo):
+def show_osd_state(ceph: CephInfo) -> Tuple[str, Any]:
     statuses: Dict[OSDStatus, List[str]] = collections.defaultdict(list)
 
     for osd in ceph.osds:
         statuses[osd.status].append(f"{osd.host.name}:{osd.id}")
 
-    table = html.HTMLTable(headers=["Status", "Count", "ID's"])
+    table = html.HTMLTable(headers=["Status", "Count", "ID's"],
+                           id="table-osds-state", extra_cls="table_c")
 
     for status, osds in sorted(statuses.items()):
-        table.add_row([status, len(osds), "" if status == "up" else
-            ("<br>".join(osds) if len(osds) < 5 else "<br>".join(osds[:4]) + f"<br>and {len(osds) - 4} more")])
+        table.add_row([html_ok(status.name) if status == OSDStatus.up else html_fail(status.name),
+                       len(osds),
+                    ("<br>".join(osds)
+                     if len(osds) < 5
+                     else "<br>".join(osds[:4]) + f"<br>and {len(osds) - 4} more")])
 
-    report.add_block(2, "OSD's state:", table)
+    return "OSD's state:", table
 
 
-def show_pools_info(report: Report, ceph: CephInfo):
+def show_pools_info(ceph: CephInfo) -> Tuple[str, Any]:
     table = html.HTMLTable(headers=["Pool",
                                      "Id",
                                      "size",
@@ -510,7 +388,8 @@ def show_pools_info(report: Report, ceph: CephInfo):
                                      "PG(PGP)",
                                      "Bytes/PG",
                                      "Objs/PR",
-                                     "PG per OSD<br>Dev %"])
+                                     "PG per OSD<br>Dev %"],
+                            id="table-pools", extra_cls="table_lr")
 
     for _, pool in sorted(ceph.pools.items()):
         table.add_cell(pool.name)
@@ -560,10 +439,10 @@ def show_pools_info(report: Report, ceph: CephInfo):
 
         table.next_row()
 
-    report.add_block(8, "Pool's stats:", table)
+    return "Pool's stats:", table
 
 
-def show_osd_info(report: Report, cluster: Cluster, ceph: CephInfo):
+def show_osd_info(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
     # osds_info = [get_osd_info(cluster, osd) for osd in cluster.osds]  # type: List[OSDInfo]
 
     w_headers = ["weight<br>" + root.name for root in ceph.crush.roots]
@@ -593,7 +472,10 @@ def show_osd_info(report: Report, cluster: Cluster, ceph: CephInfo):
     if has_bs:
         headers.extend(["DB<br>colocated", "DB<br>dev type", "DB<br>size"])
 
-    table = html.HTMLTable(headers)
+    table = html.HTMLTable(headers, id="table-osd-info", extra_cls="table_lr")
+
+    all_vers = get_all_versions(ceph.osds)
+    primary_ver = max(all_vers)
 
     for osd in sorted(ceph.osds, key=lambda x: x.id):
         if osd.daemon_runs is None:
@@ -605,12 +487,16 @@ def show_osd_info(report: Report, cluster: Cluster, ceph: CephInfo):
 
         table.add_cell(str(osd.id))
         table.add_cell(osd.host.name)
-        table.add_cell(html_ok("up") if osd.status == 'up' else html_fail("down"))
+        table.add_cell(html_ok("up") if osd.status == OSDStatus.up else html_fail("down"))
+
         if osd.version is None:
             table.add_cell("Unknown")
         else:
-            table.add_cell(
-                f"{osd.version.major}.{osd.version.minor}.{osd.version.bugfix}  [{osd.version.commit_hash[:8]}]")
+            if len(all_vers) != 1:
+                color = html_ok if osd.version == primary_ver else html_fail
+            else:
+                color = lambda x: x
+            table.add_cell(color(str(osd.version)))
         table.add_cell(daemon_msg)
 
         if osd.run_info is not None:
@@ -724,10 +610,11 @@ def show_osd_info(report: Report, cluster: Cluster, ceph: CephInfo):
             table.add_cell(db_size_s)
         table.next_row()
 
-    report.add_block(10, "OSD's info:", table)
+    return "OSD's info:", table
 
 
-def show_osd_perf_info(report: Report, ceph: CephInfo):
+@per_info_required
+def show_osd_perf_info(ceph: CephInfo) -> Tuple[str, Any]:
     table = html.HTMLTable(headers=["OSD",
                                     "node",
                                     "journal<br>lat, ms",
@@ -826,9 +713,10 @@ def show_osd_perf_info(report: Report, ceph: CephInfo):
                 table.add_cell(str(val), sorttable_customkey=str(sorted_val))
         table.next_row()
 
-    report.add_block(10, "OSD's current load:", table)
+    return "OSD's current load:", table
 
 
+@per_info_required
 def show_host_network_load_in_color(report: Report, cluster: Cluster, ceph: CephInfo):
     send_net_io: Dict[str, List[Tuple]] = collections.defaultdict(list)
     recv_net_io: Dict[str, List[Tuple]] = collections.defaultdict(list)
@@ -853,7 +741,7 @@ def show_host_network_load_in_color(report: Report, cluster: Cluster, ceph: Ceph
 
     std_nets = {'public', 'cluster'}
     ceph_net_count = len(std_nets)
-    report.add_block(12, "Network load", "")
+    report.add_block("Network load", "")
 
     for io, name in [(send_net_io, "Send (KiBps/Pps)"), (recv_net_io, "Receive (KiBps/Pps)")]:
 
@@ -883,7 +771,7 @@ def show_host_network_load_in_color(report: Report, cluster: Cluster, ceph: Ceph
 
             table.next_row()
 
-        report.add_block(6, name, table, "Network - " + name)
+        report.add_block(name, table, "Network - " + name)
 
 
 @dataclasses.dataclass
@@ -921,6 +809,7 @@ class CephHDDInfo:
                    roles=set())
 
 
+@per_info_required
 def show_host_io_load_in_color(report: Report, ceph: CephInfo):
     devs: Dict[str, Dict[str, CephHDDInfo]] = collections.defaultdict(dict)
 
@@ -952,7 +841,7 @@ def show_host_io_load_in_color(report: Report, ceph: CephInfo):
             hset[dev].roles.update(roles)
 
     if len(devs) == 0:
-        report.add_block(1, "No current IO load available", "")
+        report.add_block("No current IO load available", "")
         return
 
     loads = [
@@ -969,7 +858,7 @@ def show_host_io_load_in_color(report: Report, ceph: CephInfo):
         ('io_time', None, 'Active time %', 100),
     ]
 
-    report.add_block(12, "Current disk IO load", "")
+    report.add_block("Current disk IO load", "")
 
     for pos, (target_attr, tostrfunc, tp, min_max_val) in enumerate(loads, 1):
         if target_attr == 'lat':
@@ -1006,11 +895,10 @@ def show_host_io_load_in_color(report: Report, ceph: CephInfo):
                 table.add_cell("-", sorttable_customkey='0')
             table.next_row()
 
-        weight = max(2, min(12, max_len + 1 ))
-        report.add_block(weight, tp, table, "Disk IO - " + tp)
+        report.add_block(tp, table, "Disk IO - " + tp)
 
 
-def show_hosts_info(report: Report, cluster: Cluster, ceph: CephInfo):
+def show_hosts_info(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
     header_row = ["Name",
                   "Services",
                   "CPU's",
@@ -1018,15 +906,16 @@ def show_hosts_info(report: Report, cluster: Cluster, ceph: CephInfo):
                   "RAM<br>free",
                   "Swap<br>used",
                   "Load avg<br>5m",
-                  "Conn<br>tcp/udp"]
-    table = html.HTMLTable(headers=header_row)
+                  "Conn<br>tcp/udp",
+                  "IP's"]
+    table = html.HTMLTable(headers=header_row, id="table-hosts-info", extra_cls="table_c")
     for host in sorted(cluster.hosts.values(), key=lambda x: x.name):
         services = [f"osd-{osd.id}" for osd in ceph.osds if osd.host is host]
         for mon in ceph.mons:
             if mon.host is host:
                 services.append(f"mon({host.name})")
 
-        table.add_cell(host.name)
+        table.add_cell(f"""<a onclick="clicked('host-{host.name}')">{host.name}</a>""")
         srv_strs = []
         steps = len(services) // 3 + (1 if len(services) % 3 else 0)
         for idx in range(steps):
@@ -1050,15 +939,17 @@ def show_hosts_info(report: Report, cluster: Cluster, ceph: CephInfo):
                        sorttable_customkey=str(host.swap_total - host.swap_free))
         table.add_cell(str(host.load_5m))
         table.add_cell(f"{host.open_tcp_sock}/{host.open_udp_sock}")
+
+        all_ip = flatten(adapter.ips for adapter in host.net_adapters.values())
+        table.add_cell("<br>".join(str(addr.ip) for addr in all_ip if not addr.ip.is_loopback))
         table.next_row()
 
-    report.add_block(6, "Host's info:", table)
+    return "Host's info:", table
 
 
-def show_osd_pool_PG_distribution(report: Report, ceph: CephInfo):
+def show_osd_pool_PG_distribution(ceph: CephInfo) -> Tuple[str, Any]:
     if ceph.sum_per_osd is None:
-        report.add_block(6, "PG copy per OSD: No pg dump data. Probably too many PG", "")
-        return
+        return "PG copy per OSD: No pg dump data. Probably too many PG", ""
 
     pools_order_t = sorted((-count, name) for name, count in ceph.sum_per_pool.items())
     # pools = sorted(cluster.sum_per_pool)
@@ -1080,7 +971,8 @@ def show_osd_pool_PG_distribution(report: Report, ceph: CephInfo):
                 name = ".".join(parts[:best_idx]) + '.' + '<br>' + ".".join(parts[best_idx:])
         name_headers.append(name)
 
-    table = html.HTMLTable(headers=["OSD/pool"] + name_headers + ['sum'])
+    table = html.HTMLTable(headers=["OSD/pool"] + name_headers + ['sum'],
+                           id="table-pg-per-osd", extra_cls="table_c")
 
     for osd_id, row in sorted(ceph.osd_pool_pg_2d.items()):
         data = [osd_id] + [row.get(pool_name, 0) for pool_name in pools] + [ceph.sum_per_osd[osd_id]]
@@ -1091,7 +983,62 @@ def show_osd_pool_PG_distribution(report: Report, ceph: CephInfo):
     list(map(table.add_cell, (ceph.sum_per_pool[pool_name] for pool_name in pools)))
     table.add_cell(str(sum(ceph.sum_per_pool.values())))
 
-    report.add_block(8, "PG copy per OSD:", table)
+    return "PG copy per OSD:", table
+
+
+def host_info(host: Host) -> str:
+    doc = html.Doc()
+    with doc.div(id=f"host-{host.name}", _class="ceph-data"):
+        doc.center.H3(host.name)
+        doc.br
+        doc.center.H4("Interfaces")
+        doc.br
+        table = html.HTMLTable(None, extra_cls="table_c hostinfo-net")
+        for name, adapter in sorted(host.net_adapters.items()):
+            table.add_row(
+                [name,
+                 f"{adapter.dev}<br>Is phy: {adapter.is_phy}<br>Duplex: {adapter.duplex}<br>MTU: {adapter.mtu}<br>" +
+                 f"Speed: {adapter.speed}<br>" + "".join(f"{ip.ip} / {ip.net.prefixlen}" for ip in adapter.ips)])
+        doc.center(str(table))
+        doc.br
+        doc.center.H4("HW disks")
+        doc.br
+        table = html.HTMLTable(["Name", "Type", "Size", "Rota", "Scheduler", "Model info", "RQ-size", "Phy Sec",
+                                "Min IO"],
+                                extra_cls="table_c hostinfo-disks")
+
+        mib_and_mb = lambda x: f"{b2ssize(x)}B / {b2ssize_10(x)}B"
+
+        for _, disk in sorted(host.disks.items()):
+            table.add_row([disk.name, disk.tp, mib_and_mb(disk.size),
+                           str(disk.rota), str(disk.scheduler),
+                           "Model: {0.model}<br>Vendor: {0.vendor}<br>Serial:{0.serial}".format(disk.hw_model),
+                           str(disk.rq_size), str(disk.phy_sec), str(disk.min_io)])
+
+        doc.center(str(table))
+        doc.br
+        doc.center.H4("Mountable")
+        doc.br
+        table = html.HTMLTable(["Name", "Size", "Mountpoint", "Fs", "Free space", "Label"],
+                               extra_cls="table_c hostinfo-mountable",
+                               table_attrs={'class': 'table-bordered zebra-table'})
+
+        def run_over_children(obj, level: int):
+            table.add_row([f'<div class="disk-children-{level}">{obj.name}</div>',
+                           mib_and_mb(obj.size),
+                           obj.mountpoint if obj.mountpoint else '',
+                           obj.fs if obj.fs else '',
+                           mib_and_mb(obj.free_space) if obj.free_space is not None else '',
+                           "" if obj.label is None else obj.label])
+            for _, ch in sorted(obj.children.items()):
+                run_over_children(ch, level + 1)
+
+        for _, disk in sorted(host.disks.items()):
+            run_over_children(disk, 0)
+
+        doc.center(str(table))
+
+    return str(doc)
 
 
 def parse_args(argv):
@@ -1161,8 +1108,7 @@ def main(argv: List[str]):
         cluster, ceph = load_all(TypedStorage(make_storage(folder, existing=True)))
         logger.info("Done")
 
-        # report = Report(opts.name, "index.html")
-        report = Report2(opts.name, "index.html")
+        report = Report(opts.name, "index.html")
         report.style.append('body {font: 10pt sans;}')
         report.style_links.append("https://maxcdn.bootstrapcdn.com/bootstrap/3.3.4/css/bootstrap.min.css")
 
@@ -1172,58 +1118,43 @@ def main(argv: List[str]):
         else:
             report.script_links.append("http://www.kryogenix.org/code/browser/sorttable/sorttable.js")
 
-        show_summary(report, cluster, ceph)
-        report.next_line()
+        cluster_reporters = [
+            show_cluster_summary,
+            show_osd_summary,
+            show_io_status,
+            show_health_messages,
+            show_hosts_info,
+            show_mons_info,
+            show_osd_state,
+            show_osd_info,
+            show_osd_perf_info,
+            show_pools_info,
+            show_pg_state,
+            show_osd_pool_PG_distribution,
+            show_host_io_load_in_color,
+            show_host_network_load_in_color,
+            show_osd_used_space_histo,
+            show_osd_pg_histo,
+            show_osd_load,
+            show_osd_lat_heatmaps,
+            show_osd_ops_boxplot
+        ]
 
-        show_hosts_info(report, cluster, ceph)
-        show_mons_info(report, ceph)
-        show_osd_state(report, ceph)
-        report.next_line()
+        params = {"ceph": ceph, "cluster": cluster, "report": report}
 
-        show_osd_info(report, cluster, ceph)
+        for reporter in cluster_reporters:
+            if getattr(reporter, "perf_info_required", False) and not cluster.has_performance_data:
+                continue
+            sig = inspect.signature(reporter)
+            curr_params = {name: params[name] for name in sig.parameters}
+            new_block = reporter(**curr_params)
 
-        if cluster.has_performance_data:
-            show_osd_perf_info(report, ceph)
+            if new_block is not None:
+                assert 'report' not in sig.parameters
+                report.add_block(*new_block)
 
-        report.next_line()
-
-        show_pools_info(report, ceph)
-        show_pg_state(report, ceph)
-        report.next_line()
-
-        show_osd_pool_PG_distribution(report, ceph)
-        report.next_line()
-
-        if cluster.has_performance_data:
-            show_host_io_load_in_color(report, ceph)
-            report.next_line()
-
-        if cluster.has_performance_data:
-            show_host_network_load_in_color(report, cluster, ceph)
-            report.next_line()
-
-        if not opts.no_plots:
-            from .plot_data import (show_osd_used_space_histo,
-                                    show_osd_load,
-                                    show_osd_lat_heatmaps,
-                                    show_osd_ops_boxplot,
-                                    show_osd_pg_histo)
-
-            show_osd_used_space_histo(report, ceph)
-            show_osd_pg_histo(report, ceph)
-            report.next_line()
-
-            # if cluster.has_performance_data:
-            #     show_osd_load(report, cluster)
-            #     report.next_line()
-
-            if cluster.has_performance_data:
-                show_osd_lat_heatmaps(report, ceph)
-                report.next_line()
-
-            if cluster.has_performance_data:
-                show_osd_ops_boxplot(report, ceph)
-                report.next_line()
+        for _, host in sorted(cluster.hosts.items()):
+            report.add_block(None, host_info(host))
 
         report.save_to(Path(opts.out), opts.pretty_html)
         logger.info("Report successfully stored to %r", index_path)
