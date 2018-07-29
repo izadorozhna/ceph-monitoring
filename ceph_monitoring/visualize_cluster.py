@@ -17,17 +17,19 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Any, Union, Set, Sequence, Optional
 
 import dataclasses
+import numpy
 
 from cephlib.storage import make_storage, TypedStorage
 from cephlib.units import b2ssize, b2ssize_10
 from cephlib.common import flatten
 
 from . import html
-from .cluster import (NO_VALUE, CephInfo, Cluster, OSDStoreType, CephMonitor, CephOSD, Host,
-                      FileStoreInfo, BlueStoreInfo, load_all, DiskLoad, OSDStatus, CephVersion)
+from .cluster_classes import (CephInfo, Cluster, OSDStoreType, Host, FileStoreInfo, BlueStoreInfo, DiskLoad, OSDStatus,
+                              OSDSInfo)
+from .cluster import NO_VALUE, load_all, get_all_versions, get_nodes_pg_info
 
 from .plot_data import (per_info_required, show_osd_used_space_histo,
-                        show_osd_load, show_osd_lat_heatmaps, show_osd_ops_boxplot, show_osd_pg_histo)
+                        show_osd_load, show_osd_lat_heatmaps, show_osd_ops_boxplot, get_histo_img, get_kde_img)
 
 H = html.rtag
 logger = logging.getLogger('cephlib.report')
@@ -131,7 +133,8 @@ class Report:
                 for url in css_links:
                     doc.link(href=url, rel="stylesheet", type="text/css")
 
-                doc.style("\n".join(self.style), type="text/css")
+                if self.style:
+                    doc.style("\n".join(self.style), type="text/css")
 
                 for url in js_links:
                     doc.script(type="text/javascript", src=url)
@@ -180,13 +183,6 @@ class Report:
             pass
 
         index_path.open("w").write(index)
-
-
-def get_all_versions(services: List[Union[CephOSD, CephMonitor]]) -> Dict[CephVersion, int]:
-    all_version: Dict[CephVersion, int] = collections.Counter()
-    for srv in services:
-        all_version[srv.version] += 1
-    return all_version
 
 
 def show_cluster_summary(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
@@ -297,6 +293,7 @@ def show_health_messages(ceph: CephInfo) -> Optional[Tuple[str, Any]]:
                 t.br
 
         return "Status messages:", t
+    return None
 
 
 def show_mons_info(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
@@ -376,31 +373,31 @@ def show_osd_state(ceph: CephInfo) -> Tuple[str, Any]:
 
 def show_pools_info(ceph: CephInfo) -> Tuple[str, Any]:
     table = html.HTMLTable(headers=["Pool",
-                                     "Id",
-                                     "size",
-                                     "min_size",
-                                     "obj",
-                                     "data",
-                                     "free",
-                                     "read",
-                                     "write",
-                                     "ruleset",
-                                     "PG(PGP)",
-                                     "Bytes/PG",
-                                     "Objs/PR",
-                                     "PG per OSD<br>Dev %"],
+                                    "Id",
+                                    "Size/Min_size",
+                                    "Obj",
+                                    "Bytes",
+                                    "Ruleset",
+                                    "PG(PGP)",
+                                    "PG<br>recommended",
+                                    "Bytes/PG",
+                                    "Objs/PG",
+                                    "PG per OSD<br>Dev %"],
                             id="table-pools", extra_cls="table_lr")
+
+    table2 = html.HTMLTable(headers=["Pool", "Read B", "Write B", "Read ops", "Write ops", "Rd/PG", "Wr/PG"],
+                            id="table-pools-io", extra_cls="table_lr")
+
+    # TODO: separate info and load (read/write/iops)
+    # add iops per PG
+    # add recommended PG count
 
     for _, pool in sorted(ceph.pools.items()):
         table.add_cell(pool.name)
         table.add_cell(str(pool.id))
-        table.add_cell(str(pool.size))
-        table.add_cell(str(pool.min_size))
-        table.add_cell(b2ssize_10(int(pool.df.num_objects)), sorttable_customkey=str(int(pool.df.num_objects)))
-        table.add_cell(b2ssize(int(pool.df.size_bytes)), sorttable_customkey=str(int(pool.df.size_bytes)))
-        table.add_cell('---')
-        table.add_cell(b2ssize(int(pool.df.read_bytes)), sorttable_customkey=str(int(pool.df.read_bytes)))
-        table.add_cell(b2ssize(int(pool.df.write_bytes)), sorttable_customkey=str(int(pool.df.write_bytes)))
+        table.add_cell(f"{pool.size} / {pool.min_size}")
+        table.add_cell(b2ssize_10(pool.df.num_objects), sorttable_customkey=str(pool.df.num_objects))
+        table.add_cell(b2ssize(pool.df.size_bytes), sorttable_customkey=str(pool.df.size_bytes))
         table.add_cell(str(pool.crush_rule))
 
         if pool.pgp != pool.pg:
@@ -409,13 +406,13 @@ def show_pools_info(ceph: CephInfo) -> Tuple[str, Any]:
         else:
             table.add_cell(str(pool.pg), sorttable_customkey=str(pool.pg))
 
-        bytes_per_pg = int(pool.df.size_bytes) // int(pool.pg)
-        bytes_per_pg_s = b2ssize(bytes_per_pg)
-        table.add_cell(bytes_per_pg_s, sorttable_customkey=str(bytes_per_pg))
+        table.add_cell("-")
 
-        obj_per_pg = int(pool.df.num_objects) // int(pool.pg)
-        obj_per_pg_s = b2ssize_10(obj_per_pg)
-        table.add_cell(obj_per_pg_s, sorttable_customkey=str(obj_per_pg))
+        bytes_per_pg = pool.df.size_bytes // pool.pg
+        table.add_cell(b2ssize(bytes_per_pg), sorttable_customkey=str(bytes_per_pg))
+
+        obj_per_pg = pool.df.num_objects // pool.pg
+        table.add_cell(b2ssize_10(obj_per_pg), sorttable_customkey=str(obj_per_pg))
 
         if ceph.sum_per_osd is None:
             table.add_cell('-')
@@ -439,51 +436,106 @@ def show_pools_info(ceph: CephInfo) -> Tuple[str, Any]:
 
         table.next_row()
 
-    return "Pool's stats:", table
+        table2.add_cell(pool.name)
+        table2.add_cell(b2ssize(pool.df.read_bytes), sorttable_customkey=str(pool.df.read_bytes))
+        table2.add_cell(b2ssize(pool.df.write_bytes), sorttable_customkey=str(pool.df.write_bytes))
+        table2.add_cell(b2ssize_10(pool.df.read_ops), sorttable_customkey=str(pool.df.read_ops))
+        table2.add_cell(b2ssize_10(pool.df.write_ops), sorttable_customkey=str(pool.df.write_ops))
+        table2.add_cell(b2ssize_10(pool.df.read_ops // pool.pg), sorttable_customkey=str(pool.df.read_ops))
+        table2.add_cell(b2ssize_10(pool.df.write_ops // pool.pg), sorttable_customkey=str(pool.df.write_ops))
+        table2.next_row()
+
+    return "Pool's stats:", f"<center>{table}<br><br><br><H4>Load info</H4><br>{table2}</center>"
+
+
+def get_osd_load_table(cluster: Cluster, ceph: CephInfo, osds_info: OSDSInfo) -> str:
+    table = html.HTMLTable(["ID", "node", "PG's", "open<br>files", "ip<br>conn", "thr", "RSS", "VMM", "CPU<br>Used, s",
+                            "Total<br>data", "Read<br>ops", "Read", "Write<br>ops", "Write"] +
+                            ["+Bps", "Read<br>IOPS", "Read<br>Bps", "Write<br>IOPS", "Write<br>Bps"]
+                                if ceph.pgs_second else [],
+                            id="table-osd-load", extra_cls="table_lr")
+
+    for osd in sorted(ceph.osds, key=lambda x: x.id):
+        osd_info = osds_info.osds[osd.id]
+
+        table.add_cell(str(osd.id))
+        table.add_cell(osd.host.name)
+
+        #   PG COUNT
+        if osd.pg_count is None:
+            table.add_cell(HTML_UNKNOWN, sorttable_customkey="0")
+        else:
+            table.add_cell(str(osd.pg_count))
+
+        #  RUN INFO - FD COUNT, TCP CONN, THREADS
+        if osd_info.run_info is not None:
+            table.add_cell(str(osd_info.run_info.fd_count))
+            table.add_cell(str(osd_info.run_info.opened_socks))
+            table.add_cell(str(osd_info.run_info.th_count))
+            table.add_cell(b2ssize(osd_info.run_info.vm_rss))
+            table.add_cell(b2ssize(osd_info.run_info.vm_size))
+            table.add_cell(b2ssize_10(osd_info.run_info.cpu_usage))
+        else:
+            for i in range(6):
+                table.add_cell("")
+
+        #  USER DATA SIZE & TOTAL IO
+        if osd_info.pg_stats:
+            table.add_cell(b2ssize(osd_info.pg_stats.bytes))
+            table.add_cell(b2ssize_10(osd_info.pg_stats.reads))
+            table.add_cell(b2ssize(osd_info.pg_stats.read_b))
+            table.add_cell(b2ssize_10(osd_info.pg_stats.writes))
+            table.add_cell(b2ssize(osd_info.pg_stats.write_b))
+        else:
+            for i in range(5):
+                table.add_cell("")
+
+        # USER DATA SIZE DELTA
+        if osd_info.d_stats:
+            table.add_cell(b2ssize(osd_info.d_stats.d_used_space))
+            table.add_cell(b2ssize_10(osd_info.d_stats.d_reads))
+            table.add_cell(b2ssize(osd_info.d_stats.d_read_b))
+            table.add_cell(b2ssize_10(osd_info.d_stats.d_writes))
+            table.add_cell(b2ssize(osd_info.d_stats.d_write_b))
+        else:
+            for i in range(5):
+                table.add_cell("")
+
+        table.next_row()
+
+    return str(table)
 
 
 def show_osd_info(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
-    # osds_info = [get_osd_info(cluster, osd) for osd in cluster.osds]  # type: List[OSDInfo]
+    osds_info = ceph.osds_info
 
-    w_headers = ["weight<br>" + root.name for root in ceph.crush.roots]
+    headers = ["ID", "node", "status", "version [hash]", "daemon<br>run", ] + \
+              ["weight<br>" + root.name for root in ceph.crush.roots] + \
+              ["reweight", "PG", "Scrub<br>ERR"] + \
+              (["Type"] if osds_info.has_bs and osds_info.has_fs else []) + \
+              ["Storage<br>dev type", "Storage<br>total", "Storage<br>free %"]
 
-    stor_set = set(osd.storage_type for osd in ceph.osds)
-    has_bs = OSDStoreType.bluestore in stor_set
-    has_fs = OSDStoreType.filestore in stor_set
-    assert has_fs or has_bs
-
-    headers=["OSD", "node", "status", "version [hash]", "daemon<br>run", "open<br>files", "ip<br>conn", "threads"] + \
-             w_headers + ["reweight", "PG"]
-
-    if has_bs and has_fs:
-        headers.append("Type")
-
-    headers.extend(["Storage<br>dev type", "Storage<br>total", "Storage<br>free %"])
-
-    if has_fs and has_bs:
+    if osds_info.has_bs and osds_info.has_fs:
         headers.extend(["Journal<br>or wal<br>colocated", "Journal<br>or wal<br>dev type",
                         "Journal<br>on file", "Journal<br>or wal<br>size"])
-    elif has_fs and not has_bs:
+    elif osds_info.has_fs and not osds_info.has_bs:
         headers.extend(["Journal<br>colocated", "Journal<br>dev type",
                         "Journal<br>on file", "Journal<br>size"])
     else:
         headers.extend(["wal<br>colocated", "wal<br>dev type", "wal<br>size"])
 
-    if has_bs:
+    if osds_info.has_bs:
         headers.extend(["DB<br>colocated", "DB<br>dev type", "DB<br>size"])
 
     table = html.HTMLTable(headers, id="table-osd-info", extra_cls="table_lr")
 
-    all_vers = get_all_versions(ceph.osds)
-    primary_ver = max(all_vers)
-
     for osd in sorted(ceph.osds, key=lambda x: x.id):
+        osd_info = osds_info.osds[osd.id]
+
         if osd.daemon_runs is None:
             daemon_msg = HTML_UNKNOWN
-        elif osd.daemon_runs:
-            daemon_msg = html_ok('yes')
         else:
-            daemon_msg = html_fail('no')
+            daemon_msg = html_ok('yes') if osd.daemon_runs else html_fail('no')
 
         table.add_cell(str(osd.id))
         table.add_cell(osd.host.name)
@@ -492,125 +544,109 @@ def show_osd_info(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
         if osd.version is None:
             table.add_cell("Unknown")
         else:
-            if len(all_vers) != 1:
-                color = html_ok if osd.version == primary_ver else html_fail
+            if len(osds_info.all_versions) != 1:
+                color = html_ok if osd.version == osds_info.largest_ver else html_fail
             else:
                 color = lambda x: x
             table.add_cell(color(str(osd.version)))
         table.add_cell(daemon_msg)
 
-        if osd.run_info is not None:
-            pinfo = osd.run_info.procinfo
-            table.add_cell(str(pinfo["fd_count"]))
-            socks = sum(int(tp.get('inuse', 0)) for tp in pinfo.get('ipv4', {}).values())
-            socks += sum(int(tp.get('inuse', 0)) for tp in pinfo.get('ipv6', {}).values())
-            table.add_cell(str(socks))
-            table.add_cell(str(pinfo["th_count"]))
-        else:
-            table.add_cell("-")
-            table.add_cell("-")
-            table.add_cell("-")
-
-        disks = cluster.hosts[osd.host.name].disks
-        storage_devs = cluster.hosts[osd.host.name].storage_devs
-        assert osd.storage_info is not None
-        total_b = int(storage_devs[osd.storage_info.data_partition].size)
-
         for root in ceph.crush.roots:
-            nodes = ceph.crush.find_nodes([('root', root.name), ('osd', f"osd.{osd.id}")])
-            if not nodes:
+            if root.name not in osd_info.crush_trees_weights:
                 table.add_cell("-")
-            elif len(nodes) > 1:
-                table.add_cell("+")
             else:
-                expected_weight = float(total_b) / (1024 ** 4)
-                weight = f"{nodes[0].weight:.2f}"
-                weight_s = html_fail(weight) if abs(1 - (nodes[0].weight / expected_weight)) > .2 else weight
-                table.add_cell(weight_s)
+                wok, weight, expected_weight = osd_info.crush_trees_weights[root.name]
 
+                if not wok:
+                    table.add_cell("+")
+                else:
+                    weight_s = f"{weight:.2f}"
+                    table.add_cell(html_fail(weight_s) if abs(1 - weight / expected_weight) > .2 else weight_s)
+
+        #   REWEIGTHS
         rew = f"{osd.reweight:.2f}"
         table.add_cell(html_fail(rew) if abs(osd.reweight - 1.0) > .01 else rew)
 
+        #   PG COUNT
         if osd.pg_count is None:
             table.add_cell(HTML_UNKNOWN, sorttable_customkey="0")
         else:
             table.add_cell(str(osd.pg_count))
 
-        if has_fs and has_bs:
+        if osd_info.pg_stats:
+            table.add_cell(str(osd_info.pg_stats.scrub_errors +
+                               osd_info.pg_stats.deep_scrub_errors +
+                               osd_info.pg_stats.shallow_scrub_errors))
+        else:
+            table.add_cell("")
+
+        # STORAGE TYPE
+        if osds_info.has_fs and osds_info.has_bs:
             table.add_cell(str(osd.storage_type))
 
-        data_drive_type = disks[osd.storage_info.data_dev].tp
-        data_drive_type = (html_ok if data_drive_type in ('ssd', 'nvme') else lambda x: x)(data_drive_type)
-        table.add_cell(data_drive_type)
+        # STORAGE DEV TYPE
+        data_drive_color_fn = html_ok if osd_info.data_drive_type in ('ssd', 'nvme') else lambda x: x
+        table.add_cell(data_drive_color_fn(osd_info.data_drive_type))
 
-        avail_perc = osd.free_perc
-        color = "red" if avail_perc < 20 else ( "yellow" if avail_perc < 40 else "green")
-        avail_perc_str = H.font(avail_perc, color=color)
+        #  USED & FREE SPACE
+        color = "red" if osd.free_perc < 20 else ( "yellow" if osd.free_perc < 40 else "green")
+        avail_perc_str = H.font(osd.free_perc, color=color)
+        table.add_cell(b2ssize(osd_info.total_space), sorttable_customkey=str(osd_info.total_space))
+        table.add_cell(avail_perc_str, sorttable_customkey=str(osd.free_perc))
 
-        table.add_cell(b2ssize(total_b), sorttable_customkey=str(total_b))
-        table.add_cell(avail_perc_str, sorttable_customkey=str(avail_perc))
+        # JOURNAL/WAL/DB info
+        if osd_info.j_info:
+            table.add_cell(str(osd_info.j_info.collocation))
+            table.add_cell(osd_info.j_info.drive_type)
+            table.add_cell(str(osd_info.j_info.on_file))
 
-        sinfo = osd.storage_info
-        if isinstance(sinfo, FileStoreInfo):
-            j_on_same_drive = html_ok("no") if sinfo.journal_dev != sinfo.data_dev else html_fail("yes")
-            j_on_file = html_ok("no") if sinfo.journal_partition != sinfo.data_partition else html_fail("yes")
-            j_drive_type = disks[sinfo.journal_dev].tp
-            j_drive_type = (html_ok if j_drive_type in ('ssd', 'nvme') else html_fail)(j_drive_type)
-
-            table.add_cell(j_on_same_drive)
-            table.add_cell(j_drive_type)
-            table.add_cell(j_on_file)
-
-            if j_on_same_drive:
+            if osd_info.j_info.size is None:
                 j_size_s = '-'
             else:
-                j_size = storage_devs[sinfo.journal_partition].size
-                j_size_s = b2ssize(j_size)
+                j_size_s = b2ssize(osd_info.j_info.size)
                 assert osd.run_info is not None
                 osd_sync = float(osd.run_info.config['filestore_max_sync_interval'])
-                j_size_s = j_size_s if j_size >= osd_sync * 100 * (1024 ** 2) else html_fail(j_size_s)
+                j_size_s = j_size_s if osd_info.j_info.size >= osd_sync * 100 * (1024 ** 2) else html_fail(j_size_s)
             table.add_cell(j_size_s)
 
-            if has_bs:
+            if osds_info.has_bs:
                 table.add_cell('-')
                 table.add_cell('-')
                 table.add_cell('-')
         else:
-            assert isinstance(sinfo, BlueStoreInfo)
-            wal_on_same_drive = html_ok("no") if sinfo.wal_dev != sinfo.data_dev else html_fail("yes")
-            wal_drive_type = disks[sinfo.wal_dev].tp
-            wal_drive_type = (html_ok if wal_drive_type in ('ssd', 'nvme') else html_fail)(wal_drive_type)
-
-            if sinfo.wal_partition not in (sinfo.db_partition, sinfo.data_partition):
-                wal_size = int(storage_devs[sinfo.wal_partition].size)
-                wal_size_s = b2ssize(wal_size) + 'B'
-                wal_size_s = html_fail(wal_size_s) if wal_size < 512 * 1024 * 1024 else wal_size_s
-            else:
-                wal_size_s = '-'
+            assert osd_info.wal_db_info is not None
+            wd_info = osd_info.wal_db_info
+            wal_on_same_drive = html_ok("no") if wd_info.wal_collocation else html_fail("yes")
 
             table.add_cell(wal_on_same_drive)
-            table.add_cell(wal_drive_type)
-            if has_fs:
-                table.add_cell('-')
-            table.add_cell(wal_size_s)
+            wal_drive_type_color_fn = html_ok if wd_info.wal_drive_type in ('ssd', 'nvme') else html_fail
+            table.add_cell(wal_drive_type_color_fn(wd_info.wal_drive_type))
 
-            db_on_same_drive = html_ok("no") if sinfo.db_dev != sinfo.data_dev else html_fail("yes")
-            db_drive_type = disks[sinfo.db_dev].tp
-            db_drive_type = (html_ok if db_drive_type in ('ssd', 'nvme') else html_fail)(db_drive_type)
-            if sinfo.db_partition != sinfo.data_partition:
-                db_size = int(storage_devs[sinfo.db_partition].size)
-                data_size = int(storage_devs[sinfo.data_partition].size)
-                db_size_s = b2ssize(db_size) + "B"
-                db_size_s = html_fail(db_size_s) if db_size < data_size * 0.0095 else db_size_s
+            if osds_info.has_fs:
+                table.add_cell('-')
+
+            if wd_info.wal_size is not None:
+                wal_size_s = b2ssize(wd_info.wal_size) + 'B'
+                table.add_cell(html_fail(wal_size_s) if wd_info.wal_size < 512 * 1024 * 1024 else wal_size_s)
+            else:
+                table.add_cell('-')
+
+            db_colocation = html_ok("no") if wd_info.db_collocation else html_fail("yes")
+            db_drive_type_color_fn = html_ok if wd_info.wal_drive_type in ('ssd', 'nvme') else html_fail
+            if wd_info.db_size is not None:
+                db_size_s = b2ssize(wd_info.db_size) + "B"
+                db_size_s = html_fail(db_size_s) if wd_info.db_size < osd_info.data_part_size * 0.0095 else db_size_s
             else:
                 db_size_s = '-'
 
-            table.add_cell(db_on_same_drive)
-            table.add_cell(db_drive_type)
+            table.add_cell(db_colocation)
+            table.add_cell(db_drive_type_color_fn(wd_info.wal_drive_type))
             table.add_cell(db_size_s)
+
         table.next_row()
 
-    return "OSD's info:", table
+    load_table = get_osd_load_table(cluster, ceph, osds_info)
+    return "OSD's info:", f"<center>{table}<br><br><br><H4>Run info:</H4><br>{load_table}</center>"
 
 
 @per_info_required
@@ -898,8 +934,53 @@ def show_host_io_load_in_color(report: Report, ceph: CephInfo):
         report.add_block(tp, table, "Disk IO - " + tp)
 
 
-def show_hosts_info(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
+def host_link(hostname: str) -> str:
+    return f"""<a class="link" onclick="clicked('host-{hostname}')">{hostname}</a>"""
+
+
+def hosts_pg_info(cluster: Cluster, ceph: CephInfo) -> str:
+    if ceph.osds_info is None:
+        return ""
+
     header_row = ["Name",
+                  "PGs",
+                  "User data",
+                  "Reads",
+                  "Read B",
+                  "Writes",
+                  "Write B",
+                  "User data<br>store rate",
+                  "Reads<br>ps",
+                  "Read Bps",
+                  "Writes<br>ps",
+                  "Write Bps",
+                  ]
+    table = html.HTMLTable(headers=header_row, id="table-hosts-pg-info", extra_cls="table_cr")
+    hosts_pgs_info = get_nodes_pg_info(ceph)
+    for host in sorted(cluster.hosts.values(), key=lambda x: x.name):
+        table.add_cell(host_link(host.name))
+        pgs_info = hosts_pgs_info[host.name]
+        table.add_cell(str(len(pgs_info.pgs)))
+        table.add_cell(b2ssize(pgs_info.io_stat.bytes))
+        table.add_cell(b2ssize_10(pgs_info.io_stat.reads))
+        table.add_cell(b2ssize(pgs_info.io_stat.read_b))
+        table.add_cell(b2ssize_10(pgs_info.io_stat.writes))
+        table.add_cell(b2ssize(pgs_info.io_stat.write_b))
+
+        if pgs_info.dio_stat:
+            table.add_cell(b2ssize(pgs_info.dio_stat.d_used_space))
+            table.add_cell(b2ssize_10(pgs_info.dio_stat.d_reads))
+            table.add_cell(b2ssize(pgs_info.dio_stat.d_read_b))
+            table.add_cell(b2ssize_10(pgs_info.dio_stat.d_writes))
+            table.add_cell(b2ssize(pgs_info.dio_stat.d_write_b))
+
+        table.next_row()
+
+    return f"<br><br><center>Hosts PG's info:<br>{table}</center>"
+
+
+def show_hosts_info(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
+    headers = ["Name",
                   "Services",
                   "CPU's",
                   "RAM<br>total",
@@ -908,14 +989,21 @@ def show_hosts_info(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
                   "Load avg<br>5m",
                   "Conn<br>tcp/udp",
                   "IP's"]
-    table = html.HTMLTable(headers=header_row, id="table-hosts-info", extra_cls="table_c")
+
+    if ceph.osds_info:
+        headers.append("Scrub err")
+        hosts_pgs_info = get_nodes_pg_info(ceph)
+    else:
+        hosts_pgs_info = None
+
+    table = html.HTMLTable(headers=headers, id="table-hosts-info", extra_cls="table_cr")
     for host in sorted(cluster.hosts.values(), key=lambda x: x.name):
         services = [f"osd-{osd.id}" for osd in ceph.osds if osd.host is host]
         for mon in ceph.mons:
             if mon.host is host:
                 services.append(f"mon({host.name})")
 
-        table.add_cell(f"""<a onclick="clicked('host-{host.name}')">{host.name}</a>""")
+        table.add_cell(host_link(host.name))
         srv_strs = []
         steps = len(services) // 3 + (1 if len(services) % 3 else 0)
         for idx in range(steps):
@@ -923,7 +1011,7 @@ def show_hosts_info(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
         table.add_cell("<br>".join(srv_strs))
 
         if host.hw_info is None:
-            map(table.add_cell, ['-'] * (len(header_row) - 2))
+            map(table.add_cell, ['-'] * (len(headers) - 2))
             table.next_row()
             continue
 
@@ -942,9 +1030,13 @@ def show_hosts_info(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
 
         all_ip = flatten(adapter.ips for adapter in host.net_adapters.values())
         table.add_cell("<br>".join(str(addr.ip) for addr in all_ip if not addr.ip.is_loopback))
+        if hosts_pgs_info:
+            pgs_info = hosts_pgs_info[host.name]
+            table.add_cell(str(pgs_info.io_stat.scrub_errors + pgs_info.io_stat.deep_scrub_errors
+                               + pgs_info.io_stat.shallow_scrub_errors))
         table.next_row()
 
-    return "Host's info:", table
+    return "Host's info:", str(table) + hosts_pg_info(cluster, ceph)
 
 
 def show_osd_pool_PG_distribution(ceph: CephInfo) -> Tuple[str, Any]:
@@ -988,17 +1080,16 @@ def show_osd_pool_PG_distribution(ceph: CephInfo) -> Tuple[str, Any]:
 
 def host_info(host: Host) -> str:
     doc = html.Doc()
-    with doc.div(id=f"host-{host.name}", _class="ceph-data"):
+    with doc.div(id=f"host-{host.name}", _class="data-ceph"):
         doc.center.H3(host.name)
         doc.br
         doc.center.H4("Interfaces")
         doc.br
-        table = html.HTMLTable(None, extra_cls="table_c hostinfo-net")
+        table = html.HTMLTable(["Name", "Is PHY", "Duplex", "MTU", "Speed", "IP's"], extra_cls="table_c hostinfo-net")
         for name, adapter in sorted(host.net_adapters.items()):
             table.add_row(
-                [name,
-                 f"{adapter.dev}<br>Is phy: {adapter.is_phy}<br>Duplex: {adapter.duplex}<br>MTU: {adapter.mtu}<br>" +
-                 f"Speed: {adapter.speed}<br>" + "".join(f"{ip.ip} / {ip.net.prefixlen}" for ip in adapter.ips)])
+                [name, str(adapter.is_phy), str(adapter.duplex), str(adapter.mtu),
+                 str(adapter.speed), "<br>".join(f"{ip.ip} / {ip.net.prefixlen}" for ip in adapter.ips)])
         doc.center(str(table))
         doc.br
         doc.center.H4("HW disks")
@@ -1039,6 +1130,21 @@ def host_info(host: Host) -> str:
         doc.center(str(table))
 
     return str(doc)
+
+
+def show_osd_pg_histo(ceph: CephInfo) -> Optional[Tuple[str, Any]]:
+    vals = [osd.pg_count for osd in ceph.osds if osd.pg_count is not None]
+    if vals:
+        return "PG per OSD", get_histo_img(numpy.array(vals))
+    return None
+
+
+def show_pg_size_kde(ceph: CephInfo) -> Optional[Tuple[str, Any]]:
+    if ceph.pgs:
+        vals = [pg.stat_sum.num_bytes for pg in ceph.pgs.pgs.values()]
+        # return "PG sizes", get_kde_img(numpy.array(vals))
+        return "PG sizes", get_histo_img(numpy.array(vals))
+    return None
 
 
 def parse_args(argv):
@@ -1109,8 +1215,6 @@ def main(argv: List[str]):
         logger.info("Done")
 
         report = Report(opts.name, "index.html")
-        report.style.append('body {font: 10pt sans;}')
-        report.style_links.append("https://maxcdn.bootstrapcdn.com/bootstrap/3.3.4/css/bootstrap.min.css")
 
         if opts.simple:
             dct = html.HTMLTable.def_table_attrs
@@ -1137,7 +1241,8 @@ def main(argv: List[str]):
             show_osd_pg_histo,
             show_osd_load,
             show_osd_lat_heatmaps,
-            show_osd_ops_boxplot
+            show_osd_ops_boxplot,
+            show_pg_size_kde
         ]
 
         params = {"ceph": ceph, "cluster": cluster, "report": report}

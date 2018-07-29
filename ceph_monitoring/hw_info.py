@@ -3,7 +3,7 @@ import xml.etree.ElementTree as ET
 from typing import Dict, Optional
 
 
-from .cluster_classes import CPUInfo, HWInfo, LSHWNetInfo
+from .cluster_classes import CPUInfo, HWInfo, LSHWNetInfo, DiskInfo
 
 
 def get_data(rr: str, data: str) -> str:

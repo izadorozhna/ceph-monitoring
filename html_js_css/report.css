@@ -1,4 +1,7 @@
-body { background-color: #FDFDFD; }
+body {
+    background-color: #FDFDFD;
+    font: 10pt sans;
+}
 
 table.zebra-table tr:nth-child(even) {background-color: #E0E0FF;}
 table th {background: #e0e0e0;}
@@ -12,7 +15,7 @@ table th {background: #e0e0e0;}
     float:right;
 }
 .left{
-    position:relative   ;
+    position:relative;
     margin:0;
     padding:0;
     float:left;
@@ -26,6 +29,10 @@ td { padding: 6px; }
 
 .table_c td {text-align: center;}
 .table_c th {text-align: center;}
+
+.table_cr th {text-align: center;}
+.table_cr td {text-align: right;}
+.table_cr tr td:first-child {text-align: center;}
 
 
 .menu-ceph {
@@ -56,40 +63,41 @@ td { padding: 6px; }
 }
 
 .main-ceph {
-    position:absolute;
+    position: absolute;
     top: 3%;
     margin-left: 20%;
     margin-right: 5%;
     width: 75%;
-    float: right;
     text-align: center;
 }
 
-.data-ceph {visibility: hidden;}
+.data-ceph {
+    visibility: hidden;
+    position: absolute;
+    top: 3%;
+}
 
 #table-summary {width: 60%;}
 #table-osd-summary {width: 40%;}
 #table-io-summary {width: 40%;}
 #table-mon-info {width: 60%;}
 #table-hosts-info {width: 60%;}
+#table-hosts-pg-info {width: 60%;}
 #table-osds-state {width: 30%;}
 #table-pools {width: 80%;}
 #table-pgs {width: 30%;}
 #table-pg-per-osd {width: 100%;}
 #table-osd-info {width: 100%;}
+#table-osd-load {width: 100%;}
 
-#table-hosts-info a {
+a.link {
     color: #0000EE;
     border-bottom: 1px solid black;
     padding-bottom: 2px;
 }
 
-#table-hosts-info a:visited { color: #551A8B; }
-
-#table-hosts-info a:hover {
-    cursor: pointer;
-    color: #a1a1ff;
-}
+a.link:visited {color: #551A8B;}
+a.link:hover {cursor: pointer; color: #a1a1ff;}
 
 .hostinfo-net {width: 40%;}
 .hostinfo-disks {width: 100%;}

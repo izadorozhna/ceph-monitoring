@@ -1,12 +1,11 @@
-from typing import List, Any, Optional, Dict, Tuple
+from typing import List, Any, Dict, Tuple
 
 import numpy
 
-from .cluster_classes import CephOSD, DiskLoad, BlueStoreInfo
+from .cluster_classes import CephOSD, DiskLoad, BlueStoreInfo, HDDsResourceUsage, CephDisksResourceUsage
 
 
-def hdd_info(all_disks: Dict[Tuple[str, str], DiskLoad],
-             times_len: int,
+def hdd_load(all_disks: Dict[Tuple[str, str], DiskLoad], times_len: int,
              node_time_bounds: Dict[str, Tuple[int, int]]) -> HDDsResourceUsage:
     shape = len(all_disks), times_len
     wio = numpy.empty(shape)
@@ -58,9 +57,9 @@ def get_hdd_resource_usage(perf_data: Any, osds: List[CephOSD]) -> CephDisksReso
             assert osd.storage_info.j_stor_stats is not None
             journal_disks[(osd.host.name, osd.storage_info.journal_dev)] = osd.storage_info.j_stor_stats
 
-    data = hdd_info(data_disks, min_sz, node_bounds)
-    journal = hdd_info(journal_disks, min_sz, node_bounds)
-    db = hdd_info(db_disks, min_sz, node_bounds)
-    wal = hdd_info(wal_disks, min_sz, node_bounds)
+    data = hdd_load(data_disks, min_sz, node_bounds)
+    journal = hdd_load(journal_disks, min_sz, node_bounds)
+    db = hdd_load(db_disks, min_sz, node_bounds)
+    wal = hdd_load(wal_disks, min_sz, node_bounds)
 
     return CephDisksResourceUsage(data=data, journal=journal, db=db, wal=wal)

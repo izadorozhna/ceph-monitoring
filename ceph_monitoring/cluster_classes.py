@@ -1,12 +1,14 @@
 from enum import Enum
 import datetime
 from ipaddr import IPv4Address, IPv4Network
-from typing import Optional, List, Set, Dict, Any, Callable, Union
+from typing import Optional, List, Set, Dict, Any, Callable, Union, Tuple
 
 import numpy
 from dataclasses import dataclass, field
 
 from cephlib.crush import Crush
+from cephlib.units import b2ssize
+from cephlib.common import AttredDict
 
 
 @dataclass
@@ -110,15 +112,17 @@ class HWInfo:
 
 @dataclass
 class HDDsResourceUsage:
-    wio: numpy.ndarray  # 2D array
-    wbytes: numpy.ndarray  # 2D array
-    rio: numpy.ndarray  # 2D array
-    rbytes: numpy.ndarray  # 2D array
-    qd: numpy.ndarray  # 2D array
+    # 2D arrays for entire cluster load
+    wio: numpy.ndarray
+    wbytes: numpy.ndarray
+    rio: numpy.ndarray
+    rbytes: numpy.ndarray
+    qd: numpy.ndarray
 
 
 @dataclass
 class CephDisksResourceUsage:
+    # 2D arrays for entire cluster load
     data: HDDsResourceUsage
     journal: Optional[HDDsResourceUsage]
     wal: Optional[HDDsResourceUsage]
@@ -164,8 +168,6 @@ class DiskLoad:
     w_io_time_v: numpy.ndarray
     iops_v: numpy.ndarray
     queue_depth_v: numpy.ndarray
-
-
 
 
 class OSDStoreType(Enum):
@@ -362,7 +364,7 @@ class OSDStatus(Enum):
 
 @dataclass
 class OSDRunInfo:
-    procinfo: Any
+    procinfo: Dict[str, Any]
     cmdline: List[str]
     config: Dict[str, str]
 
@@ -415,7 +417,6 @@ class NetStats:
     scolls: int
     scarrier: int
     scompressed: int
-
 
 
 @dataclass
@@ -474,31 +475,10 @@ class CephStatus:
     read_op_per_sec: int
 
 
-@dataclass
-class CephInfo:
-    osds: List[CephOSD]
-    mons: List[CephMonitor]
-    pools: Dict[str, Pool]
-    osd_map: Dict[int, CephOSD]
-
-    # pg distribution
-    osd_pool_pg_2d: Dict[int, Dict[str, int]]
-    sum_per_pool: Dict[str, int]
-    sum_per_osd: Dict[int, int]
-
-    is_luminous: bool
-
-    crush: Crush
-    cluster_net: IPv4Network
-    public_net: IPv4Network
-    settings: AttredDict
-
-    status: CephStatus
-
-
 class PGState(Enum):
     active = 0
     clean = 1
+    peering = 2
 
 
 @dataclass
@@ -541,6 +521,13 @@ class PGStatSum:
 
 
 @dataclass
+class PGId:
+    pool: int
+    num: int
+    id: str
+
+
+@dataclass
 class PG:
     acting: List[int]
     acting_primary: int
@@ -573,7 +560,7 @@ class PG:
     ondisk_log_start: str
     parent: str
     parent_split_bits: int
-    pgid: Tuple[int, int, str]
+    pgid: PGId
     pin_stats_invalid: bool
     reported_epoch: int
     reported_seq: int
@@ -583,3 +570,128 @@ class PG:
     up_primary: int
     version: str
     stat_sum: PGStatSum
+
+
+@dataclass
+class PGDump:
+    version: int
+    collected_at: datetime.datetime
+    pgs: Dict[str, PG]
+
+
+@dataclass
+class JInfo:
+    collocation: bool
+    on_file: bool
+    drive_type: str
+    size: Optional[int]
+
+@dataclass
+class WALDBInfo:
+    wal_collocation: bool
+    wal_drive_type: str
+    wal_size: Optional[int]
+
+    db_collocation: bool
+    db_drive_type: str
+    db_size: Optional[int]
+
+
+@dataclass
+class OSDProcessInfo:
+    opened_socks: int
+    fd_count: int
+    th_count: int
+    cpu_usage: float
+    vm_rss: int
+    vm_size: int
+
+
+@dataclass
+class OSDPGStats:
+    bytes: int
+
+    reads: int
+    read_b: int
+    writes: int
+    write_b: int
+
+    scrub_errors: int
+    deep_scrub_errors: int
+    shallow_scrub_errors: int
+
+
+@dataclass
+class OSDDStats:
+    d_used_space: int
+    d_reads: int
+    d_read_b: int
+    d_writes: int
+    d_write_b: int
+
+
+@dataclass
+class NodePGStats:
+    name: str
+    pgs: List[PG]
+    io_stat: OSDPGStats
+    dio_stat: Optional[OSDDStats]
+
+
+@dataclass
+class OSDInfo:
+    pgs: Optional[List[PG]]
+    total_space: int
+    used_space: int
+    free_space: int
+    total_user_data: int
+    crush_trees_weights: Dict[str, Tuple[bool, float, float]]
+    data_drive_type: str
+    data_part_size: int
+
+    # FS/BS info
+    j_info: Optional[JInfo]
+    wal_db_info: Optional[WALDBInfo]
+
+    run_info: Optional[OSDProcessInfo]
+
+    # load from the very beginning for all owned PG's & other pg stats
+    pg_stats: Optional[OSDPGStats]
+
+    # load during report collection for all owned PG's
+    d_stats: Optional[OSDDStats]
+
+
+@dataclass
+class OSDSInfo:
+    has_fs: bool
+    has_bs: bool
+    osds: Dict[int, OSDInfo]
+    all_versions: Dict[CephVersion, int]
+    largest_ver: CephVersion
+
+
+@dataclass
+class CephInfo:
+    osds: List[CephOSD]
+    mons: List[CephMonitor]
+    pools: Dict[str, Pool]
+    osd_map: Dict[int, CephOSD]
+
+    # pg distribution
+    osd_pool_pg_2d: Dict[int, Dict[str, int]]
+    sum_per_pool: Dict[str, int]
+    sum_per_osd: Dict[int, int]
+
+    is_luminous: bool
+
+    crush: Crush
+    cluster_net: IPv4Network
+    public_net: IPv4Network
+    settings: AttredDict
+
+    status: CephStatus
+
+    pgs: Optional[PGDump]
+    pgs_second: Optional[PGDump]
+    osds_info: Optional[OSDSInfo] = None

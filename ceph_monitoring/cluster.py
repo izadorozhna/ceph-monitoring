@@ -1,15 +1,13 @@
 import re
+import copy
 import json
 import logging
 import weakref
 import collections
 from ipaddress import IPv4Network, IPv4Address
-from typing import List, Dict, Any, Iterable, Tuple, Union, Optional, Iterator
-
-import numpy
+from typing import Iterable, Iterator
 
 from cephlib.crush import load_crushmap
-from cephlib.common import AttredDict
 from cephlib.units import unit_conversion_coef_f, ssize2b
 from cephlib.storage import AttredStorage, TypedStorage
 
@@ -142,7 +140,46 @@ def parse_df(data: str) -> Iterator[DFInfo]:
         yield DFInfo(path=name, name=name.split("/")[-1], size=int(size), free=int(free), mountpoint=mountpoint)
 
 
+def parse_pg_dump(data: Dict[str, Any]) -> PGDump:
+    pgs: List[PG] = []
+    for pg_info in data['pg_stats']:
+        dt = {}
+        for name, tp in PG.__annotations__.items():
+            vl_any = pg_info[name]
+            if tp is datetime.datetime:
+                vl_s, mks = vl_any.split(".")
+                vl = datetime.datetime.strptime(vl_s, '%Y-%m-%d %H:%M:%S').replace(microsecond=int(mks))
+            elif name in ("reported_epoch", "reported_seq"):
+                vl = int(vl_any)
+            elif tp in (int, str, bool):
+                assert isinstance(vl_any, tp), f"Wrong type for field {name}. Expected {tp} got {type(vl_any)}"
+                vl = vl_any
+            elif name == 'stat_sum':
+                vl = PGStatSum(**pg_info['stat_sum'])
+            elif name in ('acting', 'blocked_by', 'up'):
+                assert isinstance(vl_any, list)
+                assert all(isinstance(vl_elem, int) for vl_elem in vl_any)
+                vl = vl_any
+            elif name == 'state':
+                statuses = vl_any.split("+")
+                vl = set(getattr(PGState, status) for status in statuses)
+            elif name == 'pgid':
+                pool_s, pg_s = vl_any.split(".")
+                vl = PGId(pool=int(pool_s), num=int(pg_s, 16), id=vl_any)
+            else:
+                raise ValueError(f"Unknown field tp {tp} for field {name}")
+            dt[name] = vl
+        pgs.append(PG(**dt))
+
+    datetm, mks = data['stamp'].split(".")
+    collected_at = datetime.datetime.strptime(datetm, '%Y-%m-%d %H:%M:%S').replace(microsecond=int(mks))
+    return PGDump(collected_at=collected_at,
+                  pgs={pg.pgid.id: pg for pg in pgs},
+                  version=data['version'])
+
+
 # --- load functions ---------------------------------------------------------------------------------------------------
+
 
 def load_interfaces(dtime: Optional[float],
                     hostname: str,
@@ -333,11 +370,8 @@ def load_perf_monitoring(storage: TypedStorage) \
     return all_data, osd_perf_dump, osd_historic_ops_paths
 
 
-def load_PG_distribution(storage: TypedStorage) -> Tuple[Dict[int, Dict[str, int]], Dict[str, int], Dict[int, int]]:
-    try:
-        pg_dump = storage.json.master.pg_dump
-    except AttributeError:
-        pg_dump = None
+def load_PG_distribution(storage: TypedStorage, pg_dump: Optional[Dict[str, Any]]) \
+        -> Tuple[Dict[int, Dict[str, int]], Dict[str, int], Dict[int, int]]:
 
     pool_id2name: Dict[int, str] = {dt['poolnum']: dt['poolname'] for dt in storage.json.master.osd_lspools}
 
@@ -509,12 +543,24 @@ class Loader:
 
         status = load_ceph_status(self.storage, is_luminous)
 
-        osd_pool_pg_2d, sum_per_pool, sum_per_osd = load_PG_distribution(self.storage)
+        try:
+            pg_dump = self.storage.json.master.pg_dump
+        except AttributeError:
+            pg_dump = None
+
+        osd_pool_pg_2d, sum_per_pool, sum_per_osd = load_PG_distribution(self.storage, pg_dump)
 
         osd_map = self.load_osds(sum_per_osd, osd_perf_dump, osd_historic_ops_paths)
 
         pools = load_pools(self.storage, is_luminous)
         mons = load_monitors(self.storage, is_luminous)
+
+        if pg_dump:
+            pgs = parse_pg_dump(pg_dump)
+            pgs_second = parse_pg_dump(self.storage.json.master.pg_dump_second)
+        else:
+            pgs = None
+            pgs_second = None
 
         return CephInfo(osds=sorted(osd_map.values(), key=lambda x: x.id),
                         mons=mons,
@@ -528,7 +574,9 @@ class Loader:
                         crush=crush,
                         cluster_net=cluster_net,
                         public_net=public_net,
-                        settings=settings)
+                        settings=settings,
+                        pgs=pgs,
+                        pgs_second=pgs_second)
 
     def load_hosts(self) -> Tuple[Dict[str, Host], Dict[str, Host]]:
         hosts: Dict[str, Host] = {}
@@ -720,4 +768,190 @@ class Loader:
 
 def load_all(storage: TypedStorage) -> Tuple[Cluster, CephInfo]:
     l = Loader(storage)
-    return l.load_cluster(), l.load_ceph()
+    cluster = l.load_cluster()
+    ceph = l.load_ceph()
+    ceph.osds_info = get_osds_info(cluster, ceph)
+    return cluster, ceph
+
+
+def get_all_versions(services: List[Union[CephOSD, CephMonitor]]) -> Dict[CephVersion, int]:
+    all_version: Dict[CephVersion, int] = collections.Counter()
+    for srv in services:
+        all_version[srv.version] += 1
+    return all_version
+
+
+def mem2bytes(vl: str) -> int:
+    vl_sz, units = vl.split()
+    assert units == 'kB'
+    return int(vl_sz) * 1024
+
+
+def get_osds_info(cluster: Cluster, ceph: CephInfo) -> OSDSInfo:
+
+    stor_set = set(osd.storage_type for osd in ceph.osds)
+    has_bs = OSDStoreType.bluestore in stor_set
+    has_fs = OSDStoreType.filestore in stor_set
+    assert has_fs or has_bs
+
+    all_vers = get_all_versions(ceph.osds)
+
+    osd2pg_map = collections.defaultdict(list)
+    if ceph.pgs:
+        for pg in ceph.pgs.pgs.values():
+            for osd_id in pg.acting:
+                osd2pg_map[osd_id].append(pg)
+
+    osds: Dict[int, OSDInfo] = {}
+    for osd in ceph.osds:
+        disks = cluster.hosts[osd.host.name].disks
+        storage_devs = cluster.hosts[osd.host.name].storage_devs
+        assert osd.storage_info is not None
+
+        total_b = int(storage_devs[osd.storage_info.data_partition].size)
+
+        #  CRUSH RULES/WEIGHTS
+        crush_info: Dict[str, Tuple[bool, float, float]] = {}
+        for root in ceph.crush.roots:
+            nodes = ceph.crush.find_nodes([('root', root.name), ('osd', f"osd.{osd.id}")])
+            if nodes:
+                if len(nodes) == 1:
+                    expected_weight = float(total_b) / (1024 ** 4)
+                    crush_info[root.name] = [True, nodes[0].weight, expected_weight]
+                else:
+                    crush_info[root.name] = [False, -1.0, -1.0]
+
+        #  RUN INFO - FD COUNT, TCP CONN, THREADS
+        if osd.run_info is not None:
+            pinfo = osd.run_info.procinfo
+            opened_socks = sum(int(tp.get('inuse', 0)) for tp in pinfo.get('ipv4', {}).values())
+            opened_socks += sum(int(tp.get('inuse', 0)) for tp in pinfo.get('ipv6', {}).values())
+            run_info = OSDProcessInfo(fd_count=pinfo["fd_count"],
+                                      opened_socks=opened_socks,
+                                      th_count=pinfo["th_count"],
+                                      cpu_usage=float(pinfo["sched"]["se.sum_exec_runtime"]),
+                                      vm_rss=mem2bytes(pinfo["mem"]["VmRSS"]),
+                                      vm_size=mem2bytes(pinfo["mem"]["VmSize"]))
+        else:
+            run_info = None
+
+        #  USER DATA SIZE & TOTAL IO
+        if ceph.pgs:
+            pgs = osd2pg_map[osd.id]
+            bytes = sum(pg.stat_sum.num_bytes for pg in pgs)
+            reads = sum(pg.stat_sum.num_read for pg in pgs)
+            read_b = sum(pg.stat_sum.num_read_kb * 1024 for pg in pgs)
+            writes = sum(pg.stat_sum.num_write for pg in pgs)
+            write_b = sum(pg.stat_sum.num_write_kb * 1024 for pg in pgs)
+            scrub_err = sum(pg.stat_sum.num_scrub_errors for pg in pgs)
+            deep_scrub_err = sum(pg.stat_sum.num_deep_scrub_errors for pg in pgs)
+            shallow_scrub_err = sum(pg.stat_sum.num_shallow_scrub_errors for pg in pgs)
+
+            pg_stats = OSDPGStats(bytes, reads, read_b, writes, write_b, scrub_err, deep_scrub_err, shallow_scrub_err)
+
+            # USER DATA SIZE DELTA
+            if ceph.pgs_second:
+                smap = ceph.pgs_second.pgs
+                d_bytes = sum(smap[pg.pgid.id].stat_sum.num_bytes for pg in pgs) - bytes
+                d_reads = sum(smap[pg.pgid.id].stat_sum.num_read for pg in pgs) - reads
+                d_read_b = sum(smap[pg.pgid.id].stat_sum.num_read_kb * 1024 for pg in pgs) - read_b
+                d_writes = sum(smap[pg.pgid.id].stat_sum.num_write for pg in pgs) - writes
+                d_write_b = sum(smap[pg.pgid.id].stat_sum.num_write_kb * 1024 for pg in pgs) - write_b
+
+                dtime = (ceph.pgs_second.collected_at - ceph.pgs.collected_at).total_seconds()
+
+                d_stats = OSDDStats(d_bytes // dtime,
+                                    d_reads // dtime,
+                                    d_read_b // dtime,
+                                    d_writes // dtime,
+                                    d_write_b // dtime)
+            else:
+                d_stats = None
+        else:
+            d_stats = None
+            pg_stats = None
+
+        # JOURNAL/WAL/DB info
+        sinfo = osd.storage_info
+        if isinstance(sinfo, FileStoreInfo):
+            collocation = sinfo.journal_dev != sinfo.data_dev
+            on_file = sinfo.journal_partition == sinfo.data_partition
+            drive_type = disks[sinfo.journal_dev].tp
+            size = None if collocation and on_file else storage_devs[sinfo.journal_partition].size
+            fs_info = JInfo(collocation, on_file, drive_type, size)
+            bs_info = None
+        else:
+            assert isinstance(sinfo, BlueStoreInfo)
+            wal_collocation = sinfo.wal_dev != sinfo.data_dev
+            wal_drive_type = disks[sinfo.wal_dev].tp
+
+            if sinfo.wal_partition not in (sinfo.db_partition, sinfo.data_partition):
+                wal_size = int(storage_devs[sinfo.wal_partition].size)
+            else:
+                wal_size = None
+
+            db_collocation = sinfo.db_dev != sinfo.data_dev
+            db_drive_type = disks[sinfo.db_dev].tp
+            if sinfo.db_partition != sinfo.data_partition:
+                db_size = int(storage_devs[sinfo.db_partition].size)
+            else:
+                db_size = None
+
+            fs_info = None
+            bs_info = WALDBInfo(wal_collocation=wal_collocation,
+                                wal_drive_type=wal_drive_type,
+                                wal_size=wal_size,
+                                db_collocation=db_collocation,
+                                db_drive_type=db_drive_type,
+                                db_size=db_size)
+
+        osds[osd.id] = OSDInfo(pgs=osd2pg_map[osd.id] if ceph.pgs else None,
+                               total_space=total_b,
+                               used_space=0,
+                               free_space=0,
+                               total_user_data=0,
+                               crush_trees_weights=crush_info,
+                               data_drive_type=disks[osd.storage_info.data_dev].tp,
+                               data_part_size=storage_devs[osd.storage_info.data_partition].size,
+                               j_info=fs_info,
+                               wal_db_info=bs_info,
+                               run_info=run_info,
+                               pg_stats=pg_stats,
+                               d_stats=d_stats)
+
+    return OSDSInfo(has_bs=has_bs, has_fs=has_fs, all_versions=all_vers, largest_ver=max(all_vers),
+                    osds=osds)
+
+
+def get_nodes_pg_info(ceph: CephInfo) -> Dict[str, NodePGStats]:
+    nodes_pg_info: Dict[str, NodePGStats] = {}
+    assert ceph.osds_info is not None
+    osds = ceph.osds_info
+    for osd_id, osd_info in osds.osds.items():
+        hostname = ceph.osds[osd_id].host.name
+        if hostname in nodes_pg_info:
+            info = nodes_pg_info[hostname]
+
+            info.io_stat.shallow_scrub_errors += osd_info.pg_stats.shallow_scrub_errors
+            info.io_stat.scrub_errors += osd_info.pg_stats.scrub_errors
+            info.io_stat.deep_scrub_errors += osd_info.pg_stats.deep_scrub_errors
+            info.io_stat.write_b += osd_info.pg_stats.write_b
+            info.io_stat.writes += osd_info.pg_stats.writes
+            info.io_stat.read_b += osd_info.pg_stats.read_b
+            info.io_stat.reads += osd_info.pg_stats.reads
+            info.io_stat.bytes += osd_info.pg_stats.bytes
+
+            info.dio_stat.write_b += osd_info.d_stats.write_b
+            info.dio_stat.writes += osd_info.d_stats.writes
+            info.dio_stat.read_b += osd_info.d_stats.read_b
+            info.dio_stat.reads += osd_info.d_stats.reads
+            info.dio_stat.bytes += osd_info.d_stats.bytes
+
+            info.pgs.extend(osd_info.pgs)
+        else:
+            nodes_pg_info[hostname] = NodePGStats(
+                name=hostname,
+                io_stat=copy.copy(osd_info.pg_stats),
+                dio_stat=None if osd_info.d_stats is None else copy.copy(osd_info.d_stats),
+                pgs=osd_info.pgs[:])
+    return nodes_pg_info

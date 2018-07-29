@@ -1,7 +1,7 @@
 import logging
 import warnings
 from io import BytesIO
-from typing import Callable, Any, AnyStr
+from typing import Callable, Any, AnyStr, Union, List
 from typing_extensions import Protocol
 
 import numpy
@@ -38,6 +38,7 @@ class ReportProto(Protocol):
 
 
 def get_img(plt: Any, format: str = 'svg') -> AnyStr:
+    "returns svg image"
     bio = BytesIO()
     if format in ('png', 'jpg'):
         plt.savefig(bio, format=format)
@@ -70,10 +71,14 @@ def show_osd_used_space_histo(report: ReportProto, ceph: CephInfo):
         report.add_block("OSD used space (GiB)", img)
 
 
-def show_osd_pg_histo(report: ReportProto, ceph: CephInfo):
-    vals = numpy.array([osd.pg_count for osd in ceph.osds if osd.pg_count is not None])
-    img = plot_img(plot_histo, vals, left=min(vals) * 0.9, right=max(vals) * 1.1, ax=True)
-    report.add_block("OSD PG", img)
+def get_histo_img(vals: numpy.ndarray) -> str:
+    return plot_img(plot_histo, vals, left=min(vals) * 0.9, right=max(vals) * 1.1, ax=True)
+
+
+def get_kde_img(vals: numpy.ndarray) -> str:
+    fig, ax = pyplot.subplots(figsize=(6, 4), tight_layout=True)
+    seaborn.kdeplot(vals, ax=ax, clip=(vals.min(), vals.max()))
+    return get_img(fig)
 
 
 @per_info_required
