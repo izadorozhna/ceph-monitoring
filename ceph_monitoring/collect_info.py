@@ -28,7 +28,7 @@ except ImportError:
 
 from agent.agent import ConnectionClosed, SimpleRPCClient
 from cephlib.storage import make_storage, IStorageNNP
-from cephlib.common import run_locally, get_sshable_hosts, tmpnam, setup_logging
+from cephlib.common import run_locally, get_sshable_hosts, tmpnam, setup_logging, run_ssh
 from cephlib.rpc import init_node, rpc_run
 from cephlib.discover import get_osds_nodes, get_mons_nodes, OSDInfo
 from cephlib.sensors_rpc_plugin import unpack_rpc_updates
@@ -38,17 +38,17 @@ logger = logging.getLogger('collect')
 
 
 class Node:
-    def __init__(self, ip: str, hostname: str = None, roles: Set[str] = None) -> None:
+    def __init__(self, ip: str, hostname: str = None, roles: Set[str] = None, ssh_endpoint: str = None) -> None:
         self.ip = ip
         self.hostname = hostname
         self.rpc = None
         self.fqdn = None
         self.daemon_pid = None   # type: int
         self.osds = []    # type: List[OSDInfo]
-        self.all_ips = set() # type: Set[str]
+        self.all_ips = {ip} # type: Set[str]
         self.mon = None
         self.roles = roles if roles else set() # type: Set[str]
-        self.ssh_endpoint: str = None
+        self.ssh_endpoint = ssh_endpoint
 
     def dct(self) -> Dict[str, Any]:
         return {'ip': self.ip, 'name': self.hostname, 'roles': list(self.roles), 'ssh_endpoint': self.ssh_endpoint}
@@ -896,7 +896,7 @@ def create_extra_nodes(opts: Any) -> Iterator[Node]:
 
     for ip_or_name, roles in roles_map.items():
         hostname, ip = ip_and_hostname(ip_or_name)
-        yield Node(ip, hostname, roles=roles)
+        yield Node(ip, hostname, roles=roles, ssh_endpoint=ip_or_name)
 
 
 def load_ip_mapping(path: str) -> Dict[str, str]:
@@ -933,22 +933,63 @@ def connect_rpc(nodes: List[Node], executor: Executor, ssh_opts: str, with_sudo:
     return rpc_nodes, failed_nodes
 
 
-def merge_nodes(target_nodes: List[Node], all_nodes: List[Node]):
+def merge_nodes(target_nodes: List[Node], merged_nodes: List[Node]):
     ip2target = {}
-    for node in target_nodes:
-        for ip in node.all_ips:
-            assert ip not in ip2target
-            ip2target[ip] = node
 
-    for node in all_nodes:
-        tnode = ip2target.get(node.ip)
-        if tnode and tnode is not node:
-            tnode.roles.update(node.roles)
-            if node.mon and not tnode.mon:
-                tnode.mon = node.mon
-            for osd in node.osds:
-                if osd not in tnode.osds:
-                    tnode.osds.append(osd)
+    for node in target_nodes:
+        assert node.ip in node.all_ips
+        for ip in node.all_ips:
+            if not ipaddress.IPv4Address(ip).is_loopback:
+                assert ip not in ip2target
+                ip2target[ip] = node
+
+    for node in merged_nodes:
+        found = None
+        for ip in node.all_ips:
+            if ip in ip2target:
+                tnode = ip2target[ip]
+                if found is not None:
+                    assert found is tnode, "Ip's for node {} found twice in target_node list".format(node)
+                    continue
+
+                tnode.roles.update(node.roles)
+
+                if node.mon and not tnode.mon:
+                    tnode.mon = node.mon
+
+                for osd in node.osds:
+                    if osd not in tnode.osds:
+                        tnode.osds.append(osd)
+
+                assert node.ssh_endpoint
+
+                tnode.ssh_endpoint = node.ssh_endpoint
+                found = tnode
+        logger.warning("Node %s not found in target nodes, append it", node)
+        target_nodes.append(node)
+
+
+def parse_ipa4(data: str) -> Set[str]:
+    """
+    parse 'ip -o -4 a' output
+    """
+    res = set()
+    # 26: eth0    inet 169.254.207.170/16
+    for line in data.split("\n"):
+        line = line.strip()
+        if line:
+            _, dev, _, ip_sz, *_ = line.split()
+            ip, sz = ip_sz.split('/')
+            ipaddress.IPv4Address(ip)
+            res.add(ip)
+    return res
+
+
+def fill_nodes_info(nodes: List[Node], ssh_opts: str, executor: Executor):
+    def fill_node(node: Node):
+        node.all_ips = parse_ipa4(run_ssh(node.ssh_endpoint, ssh_opts, "ip -o -4 a").decode("utf8"))
+        logger.debug("Find ips: %s for node %s", ",".join(node.all_ips), node.ssh_endpoint)
+    list(executor.map(fill_node, nodes))
 
 
 def collect(storage: IStorageNNP, opts: Any, executor: Executor) -> None:
@@ -999,7 +1040,9 @@ def collect(storage: IStorageNNP, opts: Any, executor: Executor) -> None:
     else:
         nodes = []
 
-    nodes.extend(create_extra_nodes(opts))
+    extra_nodes = list(create_extra_nodes(opts))
+    fill_nodes_info(extra_nodes, ssh_opts, executor)
+    merge_nodes(nodes, extra_nodes)
 
     nodes_per_type = {}
     no_role = []
