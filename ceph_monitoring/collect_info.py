@@ -19,7 +19,7 @@ import contextlib
 import subprocess
 import logging.config
 from concurrent.futures import ThreadPoolExecutor, Executor
-from typing import Dict, Any, List, Tuple, Set, Callable, Optional, Union, Type, Iterator
+from typing import Dict, Any, List, Tuple, Set, Callable, Optional, Union, Type, Iterator, NamedTuple, cast
 
 try:
     import logging_tree
@@ -28,7 +28,7 @@ except ImportError:
 
 from agent.agent import ConnectionClosed, SimpleRPCClient
 from cephlib.storage import make_storage, IStorageNNP
-from cephlib.common import run_locally, get_sshable_hosts, tmpnam, setup_logging, run_ssh
+from cephlib.common import run_locally, tmpnam, setup_logging
 from cephlib.rpc import init_node, rpc_run
 from cephlib.discover import get_osds_nodes, get_mons_nodes, OSDInfo
 from cephlib.sensors_rpc_plugin import unpack_rpc_updates
@@ -37,37 +37,61 @@ from cephlib.sensors_rpc_plugin import unpack_rpc_updates
 logger = logging.getLogger('collect')
 
 
-class Node:
-    def __init__(self, ssh_ip: str, hostname: str = None) -> None:
+ExecResult = NamedTuple('ExecResult', [('code', int), ('output_b', bytes), ('output', str)])
+
+
+#  -------------------   Node classes and interfaces -------------------------------------------------------------------
+
+
+class INode(metaclass=abc.ABCMeta):
+    name: str
+
+    @abc.abstractmethod
+    def run_exc(self, cmd: str, **kwargs) -> bytes:
+        pass
+
+    @abc.abstractmethod
+    def get_file(self, name: str, compress: bool = False) -> bytes:
+        pass
+
+    def run(self, cmd: str, encoding: str = 'utf8', **kwargs) -> ExecResult:
+        code = 0
+        try:
+            raw = self.run_exc(cmd, **kwargs)
+        except subprocess.CalledProcessError as exc:
+            code = exc.returncode
+            raw = (exc.output + (b"" if exc.stderr is None else exc.stderr))
+
+        return ExecResult(code, raw, raw.decode(encoding))
+
+
+class Node(INode):
+    def __init__(self, ssh_enpoint: str, hostname: str, rpc: SimpleRPCClient) -> None:
+        self.ssh_enpoint = ssh_enpoint
         self.hostname = hostname
-        self.ssh_ip = ssh_ip
-        self.rpc = None  # type: Optional[SimpleRPCClient]
+        self.rpc = rpc
         self.fqdn = None  # type: Optional[str]
         self.daemon_pid = None  # type: Optional[int]
         self.osds = []   # type: List[OSDInfo]
-        self.all_ips = {ssh_ip}  # type: Set[str]
+        self.all_ips = {ssh_enpoint}  # type: Set[str]
         self.mon = None  # type: Optional[str]
 
     def __cmp__(self, other: 'Node') -> int:
-        x = (self.hostname, self.ssh_ip)
-        y = (other.hostname, other.ssh_ip)
+        x = (self.hostname, self.ssh_enpoint)
+        y = (other.hostname, other.ssh_enpoint)
         if x == y:
             return 0
         return 1 if x > y else -1
 
     def dct(self) -> Dict[str, Any]:
-        return {'name': self.hostname, 'ssh_ip': self.ssh_ip}
+        return {'name': self.hostname, 'ssh_enpoint': self.ssh_enpoint, 'all_ips': list(self.all_ips)}
 
     @property
     def name(self) -> str:
-        return self.ssh_ip if self.hostname is None else "{0.hostname}(ssh={0.ssh_ip})".format(self)
-
-    @property
-    def fs_name(self) -> str:
-        return self.ssh_ip if self.hostname is None else "{0.ssh_ip}-{0.hostname}".format(self)
+        return self.hostname
 
     def __str__(self) -> str:
-        return "Node(name={0.name}, ssh_ip={0.ssh_ip})".format(self)
+        return "Node(name={0.name}, ssh_enpoint={0.ssh_enpoint})".format(self)
 
     def merge(self, other: 'Node', overwrite_ssh: bool = True):
 
@@ -77,7 +101,7 @@ class Node:
         self.osds = list(set(self.osds + other.osds))
 
         if overwrite_ssh:
-            self.ssh_ip = other.ssh_ip
+            self.ssh_enpoint = other.ssh_enpoint
 
         if not self.hostname and other.hostname:
             self.hostname = other.hostname
@@ -87,34 +111,111 @@ class Node:
 
         self.all_ips.update(other.all_ips)
 
+    def run_exc(self, cmd: str, **kwargs) -> bytes:
+        assert self.rpc is not None
+        assert 'node_name' not in kwargs
+        return rpc_run(self.rpc, cmd, node_name=self.name, **kwargs)
 
-# CMD executors --------------------------------------------------------------------------------------------------------
+    def get_file(self, name: str, compress: bool = False) -> bytes:
+        data = self.rpc.fs.get_file(name, compress=compress)
+        return zlib.decompress(data) if compress else data
 
 
-def run_rpc_with_code(rpc: SimpleRPCClient, cmd: str, *args, **kwargs) -> Tuple[int, str]:
+class Local(INode):
+    name = 'localhost'
+
+    def run_exc(self, cmd: str, **kwargs) -> bytes:
+        assert 'node_name' not in kwargs
+        return run_locally(cmd, **kwargs)
+
+    def __str__(self) -> str:
+        return "Localhost()"
+
+    def get_file(self, name: str, compress: bool = False) -> bytes:
+        return open(name, 'rb').read()
+
+
+# ------------ HELPER FUNCTIONS: GENERAL -------------------------------------------------------------------------------
+
+
+def get_allowed_paths_checker(disabled_patterns: Optional[List[str]]) -> Callable[[str], bool]:
+    if not disabled_patterns:
+        return lambda path: True
+    disabled = [re.compile(pattern) for pattern in disabled_patterns]
+    return lambda path: not any(pattern.search(path) for pattern in disabled)
+
+
+def ip_and_hostname(ip_or_hostname: str) -> Tuple[str, Optional[str]]:
+    """returns (ip, maybe_hostname)"""
     try:
-        code, out = 0, rpc_run(rpc, cmd, *args, **kwargs)
-    except subprocess.CalledProcessError as exc:
-        code, out = exc.returncode, (exc.output + (b"" if exc.stderr is None else exc.stderr))
-
-    return code, out.decode('utf8')
-
-
-def run_with_code(cmd: str) -> Tuple[int, str]:
-    try:
-        code, out = 0, run_locally(cmd)
-    except subprocess.CalledProcessError as exc:
-        code, out = exc.returncode, (exc.output + (b"" if exc.stderr is None else exc.stderr))
-
-    return code, out.decode('utf8')
+        ipaddress.ip_address(ip_or_hostname)
+        return ip_or_hostname, None
+    except ValueError:
+        return socket.gethostbyname(ip_or_hostname), ip_or_hostname
 
 
-def get_host_interfaces(node: Node) -> List[Tuple[bool, str]]:
+# ------------ HELPER FUNCTIONS: PARSERS -------------------------------------------------------------------------------
+
+
+def parse_ipa4(data: str) -> Set[str]:
+    """
+    parse 'ip -o -4 a' output
+    """
+    res = set()
+    # 26: eth0    inet 169.254.207.170/16
+    for line in data.split("\n"):
+        line = line.strip()
+        if line:
+            _, dev, _, ip_sz, *_ = line.split()
+            ip, sz = ip_sz.split('/')
+            ipaddress.IPv4Address(ip)
+            res.add(ip)
+    return res
+
+
+def parse_proc_file(fc: str) -> Dict[str, str]:
+    res = {}  # type: Dict[str, str]
+    for ln in fc.split("\n"):
+        ln = ln.strip()
+        if ln:
+            name, val = ln.split(":")
+            res[name.strip()] = val.strip()
+    return res
+
+
+def parse_devices_tree(lsblkdct: Dict[str, Any]) -> Dict[str, str]:
+    def fall_down(fnode: Dict[str, Any], root: str, res_dict: Dict[str, str]):
+        res_dict['/dev/' + fnode['name']] = root
+        for ch_node in fnode.get('children', []):
+            fall_down(ch_node, root, res_dict)
+
+    res = {}  # type: Dict[str, str]
+    for node in lsblkdct['blockdevices']:
+        fall_down(node, '/dev/' + node['name'], res)
+        res['/dev/' + node['name']] = '/dev/' + node['name']
+    return res
+
+
+def parse_sockstat_file(fc: str) -> Optional[Dict[str, Dict[str, str]]]:
+    res = {}  # type: Dict[str, Dict[str, str]]
+    for ln in fc.split("\n"):
+        if ln.strip():
+            if ':' not in ln:
+                return None
+            name, params = ln.split(":", 1)
+            params_l = params.split()
+            if len(params_l) % 2 != 0:
+                return None
+            res[name] = dict(zip(params_l[:-1:2], params_l[1::2]))
+    return res
+
+
+# ------------ HELPER FUNCTIONS: RPC -----------------------------------------------------------------------------------
+
+
+def get_host_interfaces(rpc: INode) -> List[Tuple[bool, str]]:
     res = []  # type: List[Tuple[bool, str]]
-    if node is None:
-        content = run_locally("ls -l /sys/class/net").decode('utf8')
-    else:
-        content = rpc_run(node.rpc, "ls -l /sys/class/net", node_name=node.name).decode('utf8')
+    content = rpc.run("ls -l /sys/class/net").output
 
     for line in content.strip().split("\n")[1:]:
         if not line.startswith('l'):
@@ -139,6 +240,74 @@ def get_device_for_file(node: Node, fname: str) -> Tuple[str, str]:
     return root_dev, dev
 
 
+CephServices = NamedTuple('CephServices', [('mons', Dict[str, str]), ('osds', Dict[str, List[OSDInfo]])])
+
+
+def discover_ceph_services(master_node: INode, opts: Any) -> CephServices:
+    exec_func = lambda x: master_node.run_exc(x).decode('utf8')
+
+    mons = {}  # type: Dict[str, str]
+    for mon_id, (ip, name) in get_mons_nodes(exec_func, opts.ceph_extra).items():
+        assert ip not in mons
+        mons[ip] = name
+
+    osds = {}  # type: Dict[str, List[OSDInfo]]
+    osd_nodes = get_osds_nodes(exec_func, opts.ceph_extra, thcount=16)
+    for ip, osds_info in osd_nodes.items():
+        assert ip not in osds
+        osds[ip] = osds_info
+
+    return CephServices(mons, osds)
+
+
+def init_rpc_and_fill_data(ips_or_hostnames: List[str],
+                           ssh_opts: str,
+                           executor: Executor,
+                           with_sudo: bool) -> Tuple[List[Node], List[Tuple[str, str]]]:
+
+    rpc_nodes = []  # type: List[Node]
+    failed_nodes = []  # type: List[Tuple[str, str]]
+
+    def init_node_with_code(ips_or_hostname: str) -> Tuple[bool, Union[Node, str]]:
+        try:
+            rpc, _ = init_node(ips_or_hostname, ssh_opts=ssh_opts, with_sudo=with_sudo)
+            hostname = rpc_run(rpc, "hostname", node_name=ips_or_hostname).strip().decode('utf8')
+            node = Node(ssh_enpoint=ips_or_hostname, hostname=hostname, rpc=rpc)
+            node.all_ips.update(parse_ipa4(node.run("ip -o -4 a").output))
+            logger.debug("%s -> %s, %s", node.ssh_enpoint, node.hostname, node.all_ips)
+            return True, node
+        except Exception as exc:
+            return False, str(exc)
+
+    hostnames = set()  # type: Set[str]
+    for name_or_ip, (is_ok, node_or_err) in zip(ips_or_hostnames, executor.map(init_node_with_code, ips_or_hostnames)):
+        if is_ok:
+            assert isinstance(node_or_err, Node)
+            rpc_nodes.append(node_or_err)
+            assert node_or_err.hostname not in hostnames
+            hostnames.add(node_or_err.hostname)
+        else:
+            assert isinstance(node_or_err, str)
+            failed_nodes.append((name_or_ip, node_or_err))
+
+    return rpc_nodes, failed_nodes
+
+
+def iter_extra_host(opts: Any) -> Iterator[str]:
+    if opts.inventory:
+        with open(opts.inventory) as fd:
+            for ln in fd:
+                ln = ln.strip()
+                if ln and not ln.startswith("#"):
+                    assert ':' not in ln
+                    assert len(ln.split()) == 1
+                    yield ln
+    yield from opts.node
+
+
+#  ---------------  COLLECTORS -----------------------------------------------------------------------------------------
+
+
 class Collector:
     """Base class for data collectors. Can collect data for only one node."""
     name = None  # type: str
@@ -148,7 +317,7 @@ class Collector:
                  allowed_path: Callable[[str], bool],
                  storage: IStorageNNP,
                  opts: Any,
-                 node: Node,
+                 node: INode,
                  pretty_json: bool = False) -> None:
         self.allowed_path = allowed_path
         self.storage = storage
@@ -166,12 +335,6 @@ class Collector:
         finally:
             self.storage = saved
 
-    def run(self, cmd):
-        if self.node is None:
-            return run_with_code(cmd)
-        else:
-            return run_rpc_with_code(self.node.rpc, cmd, node_name=self.node.name)
-
     def save(self, path: str, frmt: str, code: int, data: Union[str, bytes, array.array],
              check: bool = True, extra: List[str] = None) -> Optional[str]:
         """Save results into storage"""
@@ -180,6 +343,7 @@ class Collector:
             return None
 
         if code == 0 and frmt == 'json':
+            assert isinstance(data, (str, bytes))
             data = json.dumps(json.loads(data), indent=4, sort_keys=True)
 
         rpath = path + "." + ("err" if code != 0 else frmt)
@@ -196,31 +360,25 @@ class Collector:
         else:
             raise TypeError("Can't save value of type {!r} (to {!r})".format(type(data), rpath))
 
-        return data if code == 0 else None
+        return data if code == 0 else None  # type: ignore
 
-    def save_file(self, path: str, file_path: str, frmt: str = 'txt', check: bool = True) -> Optional[bytes]:
+    def save_file(self, path: str, file_path: str, frmt: str = 'txt', check: bool = True,
+                  compress: bool = True) -> Optional[bytes]:
         """Download file from node and save it into storage"""
         if check and not self.allowed_path(path):
             logger.debug("Skipped file %r as result path %r is disabled", file_path, path)
             return None
 
-        # make pylinter happy
-        loc = None
         try:
-            if self.node is None:
-                loc = 'local'
-                content = open(file_path, 'rb').read()
-            else:
-                loc = self.node.name
-                content = zlib.decompress(self.node.rpc.fs.get_file(file_path))
+            content = self.node.get_file(file_path, compress=compress)
             code = 0
         except (IOError, RuntimeError) as exc:
-            logger.warning("Can't get file %r from node %s. %s", file_path, loc, exc)
-            content = str(exc)
+            logger.warning("Can't get file %r from node %s. %s", file_path, self.node, exc)
+            content = str(exc)  # type: ignore
             code = 1
 
         self.save(path, frmt, code, content, check=False)
-        return content if code == 0 else None
+        return content if code == 0 else None  # type: ignore
 
     def save_output(self, path: str, cmd: str, frmt: str = 'txt', check: bool = True) -> Optional[Tuple[int, str]]:
         """Run command on node and store result into storage"""
@@ -228,15 +386,10 @@ class Collector:
             logger.debug("Skipped cmd %r as result path %r is disabled", cmd, path)
             return None
 
-        if self.node is None:
-            code, out = run_with_code(cmd)
-            loc = "locally"
-        else:
-            code, out = self.run(cmd)
-            loc = "on node {}".format(self.node.name)
+        code, _, out = self.node.run(cmd)
 
         if code != 0:
-            logger.warning("Cmd %s failed %s with code %s", cmd, loc, code)
+            logger.warning("Cmd %s failed %s with code %s", cmd, self.node, code)
 
         self.save(path, frmt, code, out, check=False)
         return code, out
@@ -248,43 +401,6 @@ class Collector:
         pass
 
 
-def split_sockstat_file(fc: str) -> Optional[Dict[str, Dict[str, str]]]:
-    res = {}  # type: Dict[str, Dict[str, str]]
-    for ln in fc.split("\n"):
-        if ln.strip():
-            if ':' not in ln:
-                return None
-            name, params = ln.split(":", 1)
-            params_l = params.split()
-            if len(params_l) % 2 != 0:
-                return None
-            res[name] = dict(zip(params_l[:-1:2], params_l[1::2]))
-    return res
-
-
-def split_proc_file(fc: str) -> Dict[str, str]:
-    res = {}  # type: Dict[str, str]
-    for ln in fc.split("\n"):
-        ln = ln.strip()
-        if ln:
-            name, val = ln.split(":")
-            res[name.strip()] = val.strip()
-    return res
-
-
-def get_devices_tree(lsblkdct):
-    def fall_down(node, root, res_dict):
-        res_dict['/dev/' + node['name']] = root
-        for ch_node in node.get('children', []):
-            fall_down(ch_node, root, res_dict)
-
-    res = {}
-    for node in lsblkdct['blockdevices']:
-        fall_down(node, '/dev/' + node['name'], res)
-        res['/dev/' + node['name']] = '/dev/' + node['name']
-    return res
-
-
 class CephDataCollector(Collector):
     name = 'ceph'
     collect_roles = ['osd', 'mon', 'ceph-master']
@@ -294,12 +410,12 @@ class CephDataCollector(Collector):
 
     def __init__(self, *args, **kwargs) -> None:
         Collector.__init__(self, *args, **kwargs)
-        opt = self.opts.ceph_extra + " " if self.opts.ceph_extra else ""
-        self.radosgw_admin_cmd = "radosgw-admin {} ".format(opt)
+        opt = self.opts.ceph_extra + (" " if self.opts.ceph_extra else "")
+        self.radosgw_admin_cmd = "radosgw-admin {}".format(opt)
         self.ceph_cmd = "ceph {}--format json ".format(opt)
-        self.ceph_cmd_txt = "ceph {} ".format(opt)
+        self.ceph_cmd_txt = "ceph {}".format(opt)
         self.rados_cmd = "rados {}--format json ".format(opt)
-        self.rados_cmd_txt = "rados {} ".format(opt)
+        self.rados_cmd_txt = "rados {}".format(opt)
 
     def collect(self, collect_roles_restriction: List[str]) -> None:
         if 'mon' in collect_roles_restriction:
@@ -323,7 +439,7 @@ class CephDataCollector(Collector):
                 time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
                 time.time())
 
-            code, out = self.run(self.ceph_cmd + "osd versions")
+            code, _, out = self.node.run(self.ceph_cmd + "osd versions")
             is_luminous = (code == 0)
             if is_luminous:
                 self.save("osd_versions2", 'txt', 0, out)
@@ -353,13 +469,13 @@ class CephDataCollector(Collector):
             ceph_health_js = json.dumps(ceph_health)
             self.save("ceph_health_dict", "js", 0, ceph_health_js, check=False)
 
-            self.__class__.num_pgs = status['pgmap']['num_pgs']
-            if self.__class__.num_pgs > self.opts.max_pg_dump_count:
+            self.__class__.num_pgs = status['pgmap']['num_pgs']  # type: ignore
+            if self.__class__.num_pgs > self.opts.max_pg_dump_count:    # type: ignore
                 logger.warning(
                     ("pg dump skipped, as num_pg ({}) > max_pg_dump_count ({})." +
                      " Use --max-pg-dump-count NUM option to change the limit").format(
-                         self.__class__.num_pgs, self.opts.max_pg_dump_count))
-                cmds = []
+                         self.__class__.num_pgs, self.opts.max_pg_dump_count))    # type: ignore
+                cmds = []  # type: List[str]
             else:
                 cmds = ['pg dump']
 
@@ -392,46 +508,26 @@ class CephDataCollector(Collector):
             self.save_output("zonegroup_list", self.radosgw_admin_cmd + "zonegroup list", "txt")
             self.save_output("zone_list", self.radosgw_admin_cmd + "zone list", "txt")
 
-            if self.node is None:
-                with tempfile.NamedTemporaryFile() as fd:
-                    code, data = run_with_code(self.ceph_cmd + "osd getcrushmap -o " + fd.name)
-                    if code == 0:
-                        data = open(fd.name, "rb").read()
-
-                    self.save('crushmap', 'bin', code, data)
-                    with tempfile.NamedTemporaryFile() as fd_txt:
-                        code, data = run_with_code("crushtool -d {} -o {}".format(fd.name, fd_txt.name))
-                        if code == 0:
-                            data = open(fd_txt.name, "rb").read()
-                        self.save('crushmap', 'txt', code, data)
-
-                with tempfile.NamedTemporaryFile() as fd:
-                    code, res = run_with_code(self.ceph_cmd + "osd getmap -o " + fd.name)
-                    if code == 0:
-                        data = open(fd.name, "rb").read()
-                    self.save('osdmap', 'bin', code, data)
-                    self.save_output('osdmap', "osdmaptool --print {}".format(fd.name), "txt")
+            temp_fl = "%08X" % random.randint(0, 2 << 64)
+            cr_fname = "/tmp/ceph_collect." + temp_fl + ".cr"
+            code, _, _ = self.node.run(self.ceph_cmd + "osd getcrushmap -o " + cr_fname)
+            if code != 0:
+                logger.error("Fail to get crushmap")
             else:
-                temp_fl = "%08X" % random.randint(0, 2 << 64)
-                cr_fname = "/tmp/ceph_collect." + temp_fl + ".cr"
-                code, _ = self.run(self.ceph_cmd + "osd getcrushmap -o " + cr_fname)
+                self.save_file('crushmap', cr_fname, 'bin')
+                code, _, _  = self.node.run("crushtool -d {0} -o {0}.txt".format(cr_fname))
                 if code != 0:
-                    logger.error("Fail to get crushmap")
+                    logger.error("Fail to decompile crushmap")
                 else:
-                    self.save_file('crushmap', cr_fname, 'bin')
-                    code, data = self.run("crushtool -d {0} -o {0}.txt".format(cr_fname))
-                    if code != 0:
-                        logger.error("Fail to decompile crushmap")
-                    else:
-                        self.save_file('crushmap', cr_fname + ".txt", 'txt')
+                    self.save_file('crushmap', cr_fname + ".txt", 'txt')
 
-                osd_fname = "/tmp/ceph_collect." + temp_fl + ".osd"
-                code, _ = self.run(self.ceph_cmd + "osd getmap -o " + osd_fname)
-                if code != 0:
-                    logger.error("Fail to get osdmap")
-                else:
-                    self.save_file('osdmap', osd_fname, 'bin')
-                    self.save_output('osdmap', "osdmaptool --print " + osd_fname, "txt")
+            osd_fname = "/tmp/ceph_collect." + temp_fl + ".osd"
+            code, _, _ = self.node.run(self.ceph_cmd + "osd getmap -o " + osd_fname)
+            if code != 0:
+                logger.error("Fail to get osdmap")
+            else:
+                self.save_file('osdmap', osd_fname, 'bin')
+                self.save_output('osdmap', "osdmaptool --print " + osd_fname, "txt")
 
     def second_pg_dump(self):
         if self.__class__.num_pgs > self.opts.max_pg_dump_count:
@@ -441,27 +537,30 @@ class CephDataCollector(Collector):
                      self.__class__.num_pgs, self.opts.max_pg_dump_count))
         self.save_output("master/pg_dump_second", self.ceph_cmd + "pg dump", 'json')
 
-    def collect_osd(self) -> None:
+    def collect_osd(self):
+        assert isinstance(self.node, Node)
+
         # check OSD process status
-        out = rpc_run(self.node.rpc, "ps aux | grep ceph-osd", node_name=self.node.name).decode("utf8")
+        out = self.node.run("ps aux | grep ceph-osd").output
         osd_re = re.compile(r"ceph-osd[\t ]+.*(-i|--id)[\t ]+(\d+)")
         running_osds = set(int(rr.group(2)) for rr in osd_re.finditer(out))
 
-        ids_from_ceph = set(osd.id for osd in self.node.osds)
+        ids_from_ceph = set(osd.id for osd in cast(Node, self.node).osds)
+
         # expected_osds = running_osds.intersection(ids_from_ceph)
         # down_osds = ids_from_ceph - running_osds
         unexpected_osds = running_osds.difference(ids_from_ceph)
 
         for osd_id in unexpected_osds:
-            logger.warning("Unexpected osd-{} in node {}.".format(osd_id, self.node.name))
+            logger.warning("Unexpected osd-{} in node {}.".format(osd_id, self.node))
 
-        cephdisk_js = rpc_run(self.node.rpc, "ceph-disk list --format=json", node_name=self.node.name).decode('utf8')
-        cephdisk_ls = rpc_run(self.node.rpc, "ceph-disk list", node_name=self.node.name).decode('utf8')
-        lsblk_js = rpc_run(self.node.rpc, "lsblk -a --json", node_name=self.node.name).decode('utf8')
+        cephdisk_js = self.node.run_exc("ceph-disk list --format=json")
+        cephdisk_ls = self.node.run_exc("ceph-disk list")
+        lsblk_js = self.node.run_exc("lsblk -a --json")
         cephdisk_dct = json.loads(cephdisk_js)
-        dev_tree = get_devices_tree(json.loads(lsblk_js))
+        dev_tree = parse_devices_tree(json.loads(lsblk_js))
 
-        with self.chdir('hosts/' + self.node.fs_name):
+        with self.chdir('hosts/' + self.node.name):
             self.save("cephdisk", 'txt', 0, cephdisk_ls)
             self.save("cephdisk", 'json', 0, cephdisk_js)
 
@@ -484,14 +583,14 @@ class CephDataCollector(Collector):
                 if osd.id in running_osds:
                     self.save("config", "txt", 0, osd.config)
                     dir_path = re.search("osd_data = (?P<dir_path>.*?)\n", osd.config).group("dir_path")
-                    stor_type = self.node.rpc.fs.get_file(os.path.join(dir_path, 'type'), compress=False)
+                    stor_type = self.node.get_file(os.path.join(dir_path, 'type'))
                     stor_type = stor_type.decode('utf8').strip()
                     assert stor_type in ('filestore', 'bluestore')
                     devs_for_osd[osd.id]['store_type'] = stor_type
 
                     if stor_type == 'filestore':
                         cmd = "ls -1 '{0}'".format(os.path.join(osd.storage, 'current'))
-                        code, res = run_rpc_with_code(self.node.rpc, cmd)
+                        code, _, res = self.node.run(cmd)
 
                         if code == 0:
                             pgs = [name.split("_")[0] for name in res.split() if "_head" in name]
@@ -529,67 +628,75 @@ class CephDataCollector(Collector):
         logger.debug("Found next pids for OSD's on node %s: %r", self.node.name, pids)
         if pids:
             for pid in pids:
-                cmdline = self.node.rpc.fs.get_file('/proc/{}/cmdline'.format(pid), compress=False).decode('utf8')
-                opts = cmdline.split("\x00")
-                for op, val in zip(opts[:-1], opts[1:]):
-                    if op in ('-i', '--id'):
-                        osd_id = val
-                        break
-                else:
-                    logger.warning("Can't get osd id for cmd line %r", cmdline.replace("\x00", ' '))
-                    continue
+                self.collect_osd_process_info(pid)
 
-                osd_proc_info = {}  # type: Dict[str, Any]
+    def collect_osd_process_info(self, pid: int):
+        assert isinstance(self.node, Node)
+        cmdline = self.node.get_file('/proc/{}/cmdline'.format(pid)).decode('utf8')
+        opts = cmdline.split("\x00")
+        for op, val in zip(opts[:-1], opts[1:]):
+            if op in ('-i', '--id'):
+                osd_id = val
+                break
+        else:
+            logger.warning("Can't get osd id for cmd line %r", cmdline.replace("\x00", ' '))
+            return
 
-                with self.chdir('osd/{}'.format(osd_id)):
-                    pid_dir = "/proc/{}/".format(pid)
-                    self.save("cmdline", "bin", 0, cmdline)
-                    osd_proc_info['fd_count'] = len(self.node.rpc.fs.listdir(pid_dir + "fd"))
+        osd_proc_info = {}  # type: Dict[str, Any]
 
-                    fpath = pid_dir + "net/sockstat"
-                    ssv4 = split_sockstat_file(self.node.rpc.fs.get_file(fpath, compress=False).decode('utf8'))
-                    if not ssv4:
-                        logger.warning("Broken file {!r} on node {}".format(fpath, self.node.name))
-                    else:
-                        osd_proc_info['ipv4'] = ssv4
+        with self.chdir('osd/{}'.format(osd_id)):
+            pid_dir = "/proc/{}/".format(pid)
+            self.save("cmdline", "bin", 0, cmdline)
+            osd_proc_info['fd_count'] = len(self.node.rpc.fs.listdir(pid_dir + "fd"))
 
-                    fpath = pid_dir + "net/sockstat6"
-                    ssv6 = split_sockstat_file(self.node.rpc.fs.get_file(fpath, compress=False).decode('utf8'))
-                    if not ssv6:
-                        logger.warning("Broken file {!r} on node {}".format(fpath, self.node.name))
-                    else:
-                        osd_proc_info['ipv6'] = ssv6
+            fpath = pid_dir + "net/sockstat"
+            ssv4 = parse_sockstat_file(self.node.get_file(fpath).decode('utf8'))
+            if not ssv4:
+                logger.warning("Broken file {!r} on node {}".format(fpath, self.node))
+            else:
+                osd_proc_info['ipv4'] = ssv4
 
-                    proc_stat = self.node.rpc.fs.get_file(pid_dir + "status", compress=False).decode('utf8')
-                    self.save("proc_status", "txt", 0, proc_stat)
-                    osd_proc_info['th_count'] = int(proc_stat.split('Threads:')[1].split()[0])
+            fpath = pid_dir + "net/sockstat6"
+            ssv6 = parse_sockstat_file(self.node.get_file(fpath).decode('utf8'))
+            if not ssv6:
+                logger.warning("Broken file {!r} on node {}".format(fpath, self.node))
+            else:
+                osd_proc_info['ipv6'] = ssv6
 
-                    # IO stats
-                    io_stat = self.node.rpc.fs.get_file(pid_dir + "io", compress=False).decode('utf8')
-                    osd_proc_info['io'] = split_proc_file(io_stat)
+            proc_stat = self.node.get_file(pid_dir + "status").decode('utf8')
+            self.save("proc_status", "txt", 0, proc_stat)
+            osd_proc_info['th_count'] = int(proc_stat.split('Threads:')[1].split()[0])
 
-                    # Mem stats
-                    mem_stat = self.node.rpc.fs.get_file(pid_dir + "status", compress=False).decode('utf8')
-                    osd_proc_info['mem'] = split_proc_file(mem_stat)
+            # IO stats
+            io_stat = self.node.get_file(pid_dir + "io").decode('utf8')
+            osd_proc_info['io'] = parse_proc_file(io_stat)
 
-                    # memmap
-                    mem_map = zlib.decompress(self.node.rpc.fs.get_file(pid_dir + "maps")).decode('utf8')
-                    osd_proc_info['memmap'] = []
-                    for ln in mem_map.strip().split("\n"):
-                        range, access, offset, dev, inode, *pathname = ln.split()
-                        osd_proc_info['memmap'].append([range, access, " ".join(pathname)])
+            # Mem stats
+            mem_stat = self.node.get_file(pid_dir + "status").decode('utf8')
+            osd_proc_info['mem'] = parse_proc_file(mem_stat)
 
-                    # sched
-                    sched = zlib.decompress(self.node.rpc.fs.get_file(pid_dir + "sched")).decode('utf8')
-                    # osd_proc_info['sched_raw'] = split_proc_file("\n".join(sched.strip().split("\n")[2:-2]))
-                    osd_proc_info['sched_raw'] = sched
+            # memmap
+            mem_map = self.node.get_file(pid_dir + "maps", compress=True).decode('utf8')
+            osd_proc_info['memmap'] = []
+            for ln in mem_map.strip().split("\n"):
+                mem_range, access, offset, dev, inode, *pathname = ln.split()
+                osd_proc_info['memmap'].append([mem_range, access, " ".join(pathname)])
 
-                    stat = self.node.rpc.fs.get_file(pid_dir + "stat", compress=False).decode('utf8')
-                    osd_proc_info['stat'] = stat.split()
+            # sched
+            sched = self.node.get_file(pid_dir + "sched", compress=True).decode('utf8')
+            try:
+                osd_proc_info['sched'] = parse_proc_file("\n".join(sched.strip().split("\n")[2:-2]))
+            except:
+                osd_proc_info['sched_raw'] = sched
 
-                    self.save("procinfo", "json", 0, json.dumps(osd_proc_info))
+            stat = self.node.get_file(pid_dir + "stat").decode('utf8')
+            osd_proc_info['stat'] = stat.split()
+
+            self.save("procinfo", "json", 0, json.dumps(osd_proc_info))
 
     def collect_monitor(self) -> None:
+        assert isinstance(self.node, Node)
+        assert self.node.mon is not None
         with self.chdir("mon/{}".format(self.node.mon)):
             self.save_output("mon_daemons", "ps aux | grep ceph-mon")
             tail_ln = "tail -n {} ".format(self.opts.ceph_log_max_lines)
@@ -636,37 +743,39 @@ class NodeCollector(Collector):
         if 'node' not in collect_roles_restriction:
             return
 
-        with self.chdir('hosts/' + self.node.fs_name):
+        with self.chdir('hosts/' + self.node.name):
             for path_offset, frmt, cmd in self.node_commands:
                 try:
                     self.save_output(path_offset, cmd, frmt=frmt)
                 except Exception as exc:
-                    logger.warning("Failed to run %r on node %s: %s", cmd, self.node.name, exc)
+                    logger.warning("Failed to run %r on node %s: %s", cmd, self.node, exc)
 
             for fpath in self.node_files:
                 try:
                     self.save_file(os.path.basename(fpath), fpath)
                 except Exception as exc:
-                    logger.warning("Failed to download file %r from node %s: %s", fpath, self.node.name, exc)
+                    logger.warning("Failed to download file %r from node %s: %s", fpath, self.node, exc)
 
             for name, fpath in self.node_renamed_files:
                 try:
                     self.save_file(name, fpath)
                 except Exception as exc:
-                    logger.warning("Failed to download file %r from node %s: %s", fpath, self.node.name, exc)
+                    logger.warning("Failed to download file %r from node %s: %s", fpath, self.node, exc)
 
             self.collect_interfaces_info()
             self.collect_block_devs()
 
             try:
+                assert isinstance(self.node, Node)
                 if self.node.rpc.fs.file_exists("/etc/debian_version"):
                     self.save_output("packages_deb", "dpkg -l", frmt="txt")
                 else:
                     self.save_output("packages_rpm", "yum list installed", frmt="txt")
             except Exception as exc:
-                logger.warning("Failed to download packages information from node %s: %s", self.node.name, exc)
+                logger.warning("Failed to download packages information from node %s: %s", self.node, exc)
 
     def collect_block_devs(self) -> None:
+        assert isinstance(self.node, Node)
         bdevs_info = self.node.rpc.sensors.get_block_devs_info()
         bdevs_info = {name.decode('utf8'): data for name, data in bdevs_info.items()}
         for name_prefix in ['loop']:
@@ -686,29 +795,33 @@ class NodeCollector(Collector):
         if not nvme_exists:
             missing.append('nvme-tools')
         else:
-            code, out = self.save_output('nvme_list', 'nvme list -o json', frmt='json')
-            if code == 0:
-                try:
-                    for dev in json.loads(out)['Devices']:
-                        name = os.path.basename(dev['DevicePath'])
-                        self.save_output('block_devs/{}/nvme_smart_log'.format(name),
-                                         'nvme smart-log {} -o json'.format(dev['DevicePath']), frmt='json')
-                except:
-                    logging.warning("Failed to process nvme list output")
+            out_t = self.save_output('nvme_list', 'nvme list -o json', frmt='json')
+            if out_t is not None:
+                code, out = out_t
+                if code == 0:
+                    try:
+                        for dev in json.loads(out)['Devices']:
+                            name = os.path.basename(dev['DevicePath'])
+                            self.save_output('block_devs/{}/nvme_smart_log'.format(name),
+                                             'nvme smart-log {} -o json'.format(dev['DevicePath']), frmt='json')
+                    except:
+                        logging.warning("Failed to process nvme list output")
 
         if missing:
             logger.warning("%s is not installed on %s", ",".join(missing), self.node.name)
 
-        code, out_js = self.save_output("lsblkjs", "lsblk -O -b -J", frmt="json")
-        if code == 0:
-            for dev_node in json.loads(out_js)['blockdevices']:
-                name = dev_node['name']
-                with self.chdir('block_devs/' + name):
-                    if hdparm_exists:
-                        self.save_output('hdparm', "sudo hdparm -I /dev/" + name)
+        out_t = self.save_output("lsblkjs", "lsblk -O -b -J", frmt="json")
+        if out_t:
+            code, out_js = out_t
+            if code == 0:
+                for dev_node in json.loads(out_js)['blockdevices']:
+                    name = dev_node['name']
+                    with self.chdir('block_devs/' + name):
+                        if hdparm_exists:
+                            self.save_output('hdparm', "sudo hdparm -I /dev/" + name)
 
-                    if smartctl_exists:
-                        self.save_output('smartctl', "sudo smartctl -a /dev/" + name)
+                        if smartctl_exists:
+                            self.save_output('smartctl', "sudo smartctl -a /dev/" + name)
 
     def collect_interfaces_info(self) -> None:
         interfaces = {}
@@ -720,8 +833,8 @@ class NodeCollector(Collector):
             if not is_phy:
                 continue
 
-            speed = None
-            code, out = run_rpc_with_code(self.node.rpc, "ethtool " + dev, node_name=self.node.name)
+            speed = None  # type: Union[str, int, None]
+            code, _, out = self.node.run("ethtool " + dev)
             if code == 0:
                 # TODO: move this to report code, only collect here
                 for line in out.split("\n"):
@@ -730,7 +843,7 @@ class NodeCollector(Collector):
                     if 'Duplex:' in line:
                         interface['duplex'] = line.split(":")[1].strip() == 'Full'
 
-            code, out = run_rpc_with_code(self.node.rpc, "iwconfig " + dev, node_name=self.node.name)
+            code, _, out = self.node.run("iwconfig " + dev)
             # TODO: move this to report code, only collect here
             if code == 0 and 'Bit Rate=' in out:
                 br1 = out.split('Bit Rate=')[1]
@@ -745,15 +858,14 @@ class NodeCollector(Collector):
                     'Gb/s': 125000000,
                 }
                 for name, mult in mults.items():
-                    if name in speed:
-                        speed = int(float(speed.replace(name, '')) * mult)
+                    if name in speed:  # type: ignore
+                        speed = int(float(speed.replace(name, '')) * mult)    # type: ignore
                         break
                 else:
                     if speed == 'Unknown!':
                         unknown_speed.append(dev)
                     else:
-                        logger.warning("Node %s - can't transform %s interface speed %r to Bps",
-                                       self.node.name, dev, speed)
+                        logger.warning("Node %s - can't transform %s interface speed %r to Bps", self.node, dev, speed)
 
                 if isinstance(speed, int):
                     interface['speed'] = speed
@@ -770,9 +882,10 @@ class LoadCollector(Collector):
     collect_roles = ['load']
 
     def collect(self, collect_roles_restriction: List[str]) -> None:
-        raise RuntimeError("collect should not be called for {0} class instance".format(self.__class__.__name__))
+        raise RuntimeError("collect should not be called for {} class instance".format(self.__class__.__name__))
 
     def start_performance_monitoring(self) -> None:
+        assert isinstance(self.node, Node)
         cfg = {
             "block-io": {},
             "net-io": {},
@@ -781,7 +894,6 @@ class LoadCollector(Collector):
         }
 
         # self.results = {}
-
         #     "perprocess-cpu": {"allowed": ".*"},
         #     "perprocess-ram": {"allowed": ".*"},
         #     "system-cpu": {"allowed": ".*"},
@@ -791,6 +903,7 @@ class LoadCollector(Collector):
         self.node.rpc.sensors.start(cfg)
 
     def collect_performance_data(self) -> None:
+        assert isinstance(self.node, Node)
         for sensor_path, data, is_unpacked, units in unpack_rpc_updates(self.node.rpc.sensors.get_updates()):
             if '.' in sensor_path:
                 sensor, dev, metric = sensor_path.split(".")
@@ -800,398 +913,257 @@ class LoadCollector(Collector):
             if is_unpacked:
                 ext = 'csv' if isinstance(data, array.array) else 'json'
                 extra = [sensor, dev, metric, units]
-                self.save("perf_monitoring/{}/{}".format(self.node.fs_name, sensor_path), ext, 0, data,
+                self.save("perf_monitoring/{}/{}".format(self.node.name, sensor_path), ext, 0, data,
                           extra=extra)
             else:
                 if metric == 'historic':
-                    self.storage.put_raw(data, "perf_monitoring/{}/{}.bin".format(self.node.fs_name, sensor_path))
+                    self.storage.put_raw(data, "perf_monitoring/{}/{}.bin".format(self.node.name, sensor_path))
                 elif metric == 'perf_dump':
-                    self.storage.put_raw(data, "perf_monitoring/{}/{}.json".format(self.node.fs_name, sensor_path))
+                    self.storage.put_raw(data, "perf_monitoring/{}/{}.json".format(self.node.name, sensor_path))
+
+
+# ------------------------  Collect coordinator functions --------------------------------------------------------------
 
 
 ALL_COLLECTORS = [CephDataCollector, NodeCollector, LoadCollector]  # type: List[Type[Collector]]
-
-
-def discover_nodes(opts: Any, master_node: Node = None) -> List[Node]:
-    nodes = {}
-
-    if master_node:
-        exec_func = lambda x: rpc_run(master_node.rpc, x, node_name=master_node.name).decode('utf8')
-    else:
-        exec_func = lambda x: run_locally(x).decode('utf8')
-
-    mons = get_mons_nodes(exec_func, opts.ceph_extra)
-    for mon_id, (ip, name) in mons.items():
-        nodes.setdefault(ip, Node(ip)).mon = name
-
-    osd_nodes = get_osds_nodes(exec_func, opts.ceph_extra, thcount=16)
-    for ip, osds in osd_nodes.items():
-        nodes.setdefault(ip, Node(ip)).osds = osds
-
-    return list(nodes.values())
-
 
 ALL_COLLECTORS_MAP = dict((collector.name, collector)
                           for collector in ALL_COLLECTORS)  # type: Dict[str, Type[Collector]]
 
 
-def get_allowed_paths_checker(disabled_patterns: Optional[List[str]]) -> Callable[[str], bool]:
-    if not disabled_patterns:
-        return lambda path: True
-    disabled = [re.compile(pattern) for pattern in disabled_patterns]
-    return lambda path: not any(pattern.search(path) for pattern in disabled)
+class ReportFailed(RuntimeError):
+    pass
 
 
-def set_node_name_and_ips(node: Node) -> None:
-    if node.hostname is None:
-        node.hostname = rpc_run(node.rpc, "hostname", node_name=node.name).decode('utf8').strip()
-        for ln in rpc_run(node.rpc, "ip -o -4 a", node_name=node.name).decode('utf8').split("\n"):
-            ln = ln.strip()
-            if ln:
-                ip = ln.split()[3].split("/")[0]
-                if not ipaddress.IPv4Address(ip).is_loopback:
-                    node.all_ips.add(ip)
+class CollectorCoordinator:
+    def __init__(self, storage: IStorageNNP, opts: Any, executor: Executor) -> None:
+        self.nodes = []  # type: List[Node]
+        self.opts = opts
+        self.executor = executor
+        self.storage = storage
 
-    logger.debug("%s -> %s, %s", node.ip, node.hostname, node.all_ips)
+        self.ssh_opts = "-o LogLevel=quiet -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null " + \
+            "-o ConnectTimeout={} -o ConnectionAttempts=2".format(opts.ssh_conn_timeout)
 
+        if opts.ssh_user:
+            self.ssh_opts += " -l {0} ".format(opts.ssh_user)
 
-def set_ssh_endpoints(nodes: List[Node], ssh_opts: str, dont_rev_resolve: bool = False):
-    nodes_no_endp = [node for node in nodes if not node.ssh_endpoint]
-    if not dont_rev_resolve:
+        if opts.ssh_opts:
+            self.ssh_opts += opts.ssh_opts + " "
+
+        self.ceph_master_node = None  # type: Optional[INode]
+
+    def connect_and_init(self, ips_or_hostnames: List[str]) -> Tuple[List[Node], List[Tuple[str, str]]]:
+        return init_rpc_and_fill_data(ips_or_hostnames, ssh_opts=self.ssh_opts,
+                                      with_sudo=self.opts.sudo, executor=self.executor)
+
+    def get_master_node(self) -> Optional[INode]:
+        if self.opts.ceph_master:
+            logger.info("Connecting to ceph-master: {}".format(self.opts.ceph_master))
+            nodes, err = self.connect_and_init([self.opts.ceph_master])
+            assert len(nodes) + len(err) == 1
+            if err:
+                logger.error("Can't connect to ceph-master {}: {}".format(self.opts.ceph_master, err[0]))
+                return None
+            return nodes[0]
+        else:
+            return Local()
+
+    def fill_ceph_services(self, nodes: List[Node], ceph_services: CephServices) -> Set[str]:
+        all_nodes_ips: Dict[str, Node] = {}
         for node in nodes:
-            if node.hostname is None:
-                try:
-                    node.fqdn = socket.getfqdn(node.ip)
-                except socket.error:
-                    pass
+            all_nodes_ips.update({ip: node for ip in node.all_ips})
+
+        missing_ceph_ips = set()
+        for ip, mon_name in ceph_services.mons.items():
+            if ip not in all_nodes_ips:
+                missing_ceph_ips.add(ip)
             else:
-                node.fqdn = node.hostname
+                all_nodes_ips[ip].mon = mon_name
 
-    ip2node = {node.ip: node for node in nodes}
+        for ip, osds_info in ceph_services.osds.items():
+            if ip not in all_nodes_ips:
+                missing_ceph_ips.add(ip)
+            else:
+                all_nodes_ips[ip].osds = osds_info
 
-    for ip in get_sshable_hosts(ip2node, ssh_opts):
-        ip2node[ip].ssh_endpoint = ip
+        return missing_ceph_ips
 
-    name2node = {node.fqdn: node for node in nodes if not node.ssh_endpoint and node.fqdn}
-    name2node.update(
-        {node.hostname: node for node in nodes if not node.ssh_endpoint and node.hostname and not node.fqdn})
+    def connect_to_nodes(self) -> List[Node]:
 
-    for name in get_sshable_hosts(name2node, ssh_opts):
-        name2node[name].ssh_endpoint = name
+        self.ceph_master_node = self.get_master_node()
+        if self.ceph_master_node is None:
+            raise ReportFailed()
 
+        if self.ceph_master_node.run('which ceph').code != 0:
+            logger.error("No 'ceph' command available on master node.")
+            raise ReportFailed()
 
-def ip_and_hostname(ip_or_hostname: str) -> Tuple[Optional[str], str]:
-    try:
-        ipaddress.ip_address(ip_or_hostname)
-    except ValueError:
-        return ip_or_hostname, socket.gethostbyname(ip_or_hostname)
-    else:
-        return None, ip_or_hostname
+        ceph_services = None if self.opts.ceph_master_only else discover_ceph_services(self.ceph_master_node, self.opts)
 
+        nodes, errs = self.connect_and_init(list(iter_extra_host(self.opts)))
+        if errs:
+            for ip_or_hostname, err in errs:
+                logging.error("Can't connect to extra node %s: %s", ip_or_hostname, err)
+            raise ReportFailed()
 
-def create_extra_nodes(opts: Any) -> Iterator[Node]:
-    roles_map = {}
+        # add information from monmap and osdmap anout ceph services and connect to extra nodes
+        if ceph_services:
 
-    if opts.inventory:
-        with open(opts.inventory) as fd:
-            for ln in fd:
-                ln = ln.strip()
-                if ln and not ln.startswith("#"):
-                    if ':' in ln:
-                        ip_or_name, roles_s = ln.split(":")
-                        ip_or_name = ip_or_name.strip()
-                        roles = {role.strip() for role in roles_s.split(",")}
-                    else:
-                        ip_or_name = ln
-                        roles = set()
-                    assert ip_or_name not in roles_map, "Node {} duplicates in inventory file".format(ip_or_name)
-                    roles_map[ip_or_name] = roles
+            missing_ceph_ips = self.fill_ceph_services(nodes, ceph_services)
 
-    for ip_or_name in opts.node:
-        assert ip_or_name not in roles_map, "Node {} duplicates in inventory and cli".format(ip_or_name)
-        roles_map[ip_or_name] = set()
+            ceph_nodes, errs = self.connect_and_init(list(missing_ceph_ips))
+            if errs:
+                lfunc = logging.error if self.opts.all_ceph else logging.warning
+                lfunc("Can't connect to ceph nodes")
+                for ip, err in errs:
+                    lfunc("    %s => %s", ip, err)
 
-    for ip_or_name, roles in roles_map.items():
-        hostname, ip = ip_and_hostname(ip_or_name)
-        yield Node(ip, hostname, roles=roles, ssh_endpoint=ip_or_name)
+                if self.opts.all_ceph:
+                    raise ReportFailed()
 
+            missing_mons = {ip: mon for ip, mon in ceph_services.mons.items() if ip in missing_ceph_ips}
+            missing_osds = {ip: osds for ip, osds in ceph_services.osds.items() if ip in missing_ceph_ips}
 
-def load_ip_mapping(path: str) -> Dict[str, str]:
-    ip_mapping = {}
-    with open(path) as fd:
-        for line in fd:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            ip, ssh_ip = line.split()
-            ip_mapping[ip] = ssh_ip
-    return ip_mapping
+            missing_ceph_ips2 = self.fill_ceph_services(ceph_nodes, CephServices(missing_mons, missing_osds))
+            assert not missing_ceph_ips2
 
+            nodes += ceph_nodes
 
-def connect_rpc(nodes: List[Node], executor: Executor, ssh_opts: str, with_sudo: bool) -> \
-        Tuple[List[Node], List[Tuple[Node, str]]]:
-    rpc_nodes = []
-    failed_nodes = []
-
-    def init_node_with_code(node):
-        try:
-            return True, init_node(node.ssh_endpoint, ssh_opts=ssh_opts, with_sudo=with_sudo)
-        except Exception:
-            return False, (None, None)
-
-    rpc_res = executor.map(init_node_with_code, nodes)  # type: ignore
-    for (ok, (rpc_conn_or_err, _)), node in zip(rpc_res, nodes):
-        if ok:
-            node.rpc = rpc_conn_or_err
-            rpc_nodes.append(node)
-        else:
-            failed_nodes.append((node, rpc_conn_or_err))
-
-    return rpc_nodes, failed_nodes
-
-
-def merge_nodes(target_nodes: List[Node], merged_nodes: List[Node]):
-    ip2merged = {}
-
-    for node in merged_nodes:
-        assert node.ip in node.all_ips
-        for ip in node.all_ips:
-            if not ipaddress.IPv4Address(ip).is_loopback:
-                # assert ip not in ip2merged
-                ip2merged[ip] = node
-
-    not_found_mnodes = set(merged_nodes)
-
-    for tnode in sorted(target_nodes, key=lambda x: x.ip):
-        for ip in tnode.all_ips:
-            if ip in ip2merged:
-                mnode = ip2merged[ip]
-                assert mnode in not_found_mnodes, "Node {} already merged".format(mnode)
-                assert mnode.ssh_endpoint, "Merge node {} has no ssh_endpoint".format(mnode)
-                logger.debug("Merge %s into %s", mnode, tnode)
-                tnode.merge(mnode)
-                logger.debug("After merge target is %s", tnode)
-
-                not_found_mnodes.remove(mnode)
-                break
-        else:
-            logger.warning("Node %s not found in merged nodes", tnode)
-
-    if not_found_mnodes:
-        logger.warning("Nodes %s not found targets to merge with. Appending", ", ".join(map(str, not_found_mnodes)))
-        target_nodes.extend(not_found_mnodes)
-
-
-def parse_ipa4(data: str) -> Set[str]:
-    """
-    parse 'ip -o -4 a' output
-    """
-    res = set()
-    # 26: eth0    inet 169.254.207.170/16
-    for line in data.split("\n"):
-        line = line.strip()
-        if line:
-            _, dev, _, ip_sz, *_ = line.split()
-            ip, sz = ip_sz.split('/')
-            ipaddress.IPv4Address(ip)
-            res.add(ip)
-    return res
-
-
-def fill_nodes_info(nodes: List[Node], ssh_opts: str, executor: Executor):
-    def fill_node(node: Node):
-        node.all_ips = parse_ipa4(run_ssh(node.ssh_endpoint, ssh_opts, "ip -o -4 a").decode("utf8"))
-        logger.debug("Find ips: %s for node %s", ", ".join(sorted(node.all_ips)), node.ssh_endpoint)
-    list(executor.map(fill_node, nodes))
-
-
-def collect(storage: IStorageNNP, opts: Any, executor: Executor) -> None:
-    # This variable is updated from main function
-    ssh_opts = "-o LogLevel=quiet -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
-    ssh_opts += "-o ConnectTimeout={} -o ConnectionAttempts=2".format(opts.ssh_conn_timeout)
-
-    if opts.ssh_user:
-        ssh_opts += " -l {0} ".format(opts.ssh_user)
-
-    if opts.ssh_opts:
-        ssh_opts += opts.ssh_opts + " "
-
-    allowed_path_checker = get_allowed_paths_checker(opts.disable)
-    allowed_collectors = opts.collectors.split(',')
-
-    for collector in allowed_collectors:
-        if collector not in ALL_COLLECTORS_MAP:
-            logger.error("Can't found collector {}. Only {} are available".format(
-                            collector, ','.join(ALL_COLLECTORS_MAP)))
-            return
-
-    ip_mapping = load_ip_mapping(opts.ip_mapping) if opts.ip_mapping else {}
-
-    if opts.ceph_master:
-        logger.info("Connecting to ceph-master: {}".format(opts.ceph_master))
-        try:
-            rpc_conn, _ = init_node(opts.ceph_master, ssh_opts=ssh_opts, with_sudo=opts.sudo)
-            master_node = Node(ip=socket.gethostbyname(opts.ceph_master),
-                               hostname=opts.ceph_master)
-            master_node.rpc = rpc_conn
-            set_node_name_and_ips(master_node)
-        except:
-            logger.error("Can't connect to ceph-master: {}".format(opts.ceph_master))
-            raise
-    else:
-        master_node = None
-
-    code = run_with_code('which ceph')[0] if master_node is None \
-            else run_rpc_with_code(master_node.rpc, 'which ceph', node_name=master_node.name)[0]
-
-    if code != 0:
-        logger.error("No 'ceph' command available. Run this script from node, which has ceph access")
-        return
-
-    if not opts.ceph_master_only:
-        nodes = discover_nodes(opts, ip_mapping, master_node)
-    else:
-        nodes = []
-
-    extra_nodes = list(create_extra_nodes(opts))
-    fill_nodes_info(extra_nodes, ssh_opts, executor)
-    merge_nodes(nodes, extra_nodes)
-
-    nodes_per_type = {}
-    no_role = []
-    for node in nodes:
-        for role in node.roles:
-            nodes_per_type.setdefault(role, []).append(node.name)
-        if not node.roles:
-            no_role.append(node.name)
-
-    for role, role_nodes in sorted(nodes_per_type.items()):
-        logger.info("Found %s nodes of role %s: %s", len(role_nodes), role, ",".join(sorted(role_nodes)))
-    if no_role:
-        logger.info("Found %s nodes without roles: %s", len(no_role), ",".join(sorted(no_role)))
-
-    if nodes:
+        logger.info("Found %s nodes with osds", sum(1 for node in nodes if node.osds))
+        logger.info("Found %s nodes with mons", sum(1 for node in nodes if node.mon))
         logger.info("Run with %s hosts in total", len(nodes))
 
-    # set_ssh_endpoints(nodes, ssh_opts, opts.dont_rev_resolve)
+        for node in nodes:
+            descr = node.name
+            if node.mon:
+                descr += " mon=" + node.mon
+            if node.osds:
+                descr += " osds=[" + ",".join(str(osd.id) for osd in node.osds) + "]"
+            logger.debug("Node: %s", descr)
+        return nodes
 
-    bad_hosts = [node for node in nodes if not node.ssh_endpoint]
-    good_hosts = [node for node in nodes if node.ssh_endpoint]
+    def collect(self):
+        # This variable is updated from main function
+        nodes = self.connect_to_nodes()
+        if self.opts.detect_only:
+            return
 
-    if len(bad_hosts) != 0:
-        logger.warning("Next hosts aren't available over ssh and would be skipped: %s",
-                       ", ".join(host.name for host in bad_hosts))
+        self.storage.put_raw(json.dumps([node.dct() for node in nodes]).encode('utf8'), "hosts.json")
 
-    for node in nodes:
-        descr = ("" if node.ssh_endpoint else "OFFLINE ") + node.name
-        if node.mon:
-            descr += " mon=" + node.mon
-        if node.osds:
-            descr += " osds=[" + ",".join(str(osd.id) for osd in node.osds) + "]"
-        logger.debug("Node: %s", descr)
+        allowed_path_checker = get_allowed_paths_checker(self.opts.disable)
+        allowed_collectors = self.opts.collectors.split(',')
 
-    if opts.detect_only:
-        return
+        for collector in allowed_collectors:
+            if collector not in ALL_COLLECTORS_MAP:
+                logger.error("Can't found collector {}. Only {} are available".format(
+                                collector, ','.join(ALL_COLLECTORS_MAP)))
+                raise ReportFailed()
 
-    storage.put_raw(json.dumps([node.dct() for node in nodes]).encode('utf8'), "hosts.json")
+        try:
+            load_collectors = []
 
-    rpc_nodes = []
-    try:
-        logger.info("Initializing RPC connections")
-        rpc_nodes, failed_nodes = connect_rpc(good_hosts, executor, ssh_opts, opts.sudo)
-        for node, err in failed_nodes:
-            logger.error("Failed to setup RPC connection with %s - %r", node.ssh_endpoint, err)
+            collect_load_data_at = 0  # make pylint happy
+            if LoadCollector.name in allowed_collectors:
+                futures = []
+                for node in nodes:
+                    collector = LoadCollector(allowed_path_checker,
+                                              self.storage,
+                                              self.opts,
+                                              node,
+                                              pretty_json=not self.opts.no_pretty_json)
+                    futures.append(self.executor.submit(collector.start_performance_monitoring))
+                    load_collectors.append(collector)
+                logger.info("Start performance collectors")
 
-        logger.info("RPC connected")
-        logger.info("Getting node names")
+                for future in futures:
+                    future.result()
 
-        for future in [executor.submit(set_node_name_and_ips, node) for node in rpc_nodes]:
-            future.result()
+                # time when to stop load collection
+                collect_load_data_at = time.time() + self.opts.load_collect_seconds
 
-        load_collectors = []
-
-        collect_load_data_at = 0  # make pylint happy
-        if LoadCollector.name in allowed_collectors:
             futures = []
-            for node in rpc_nodes:
-                collector = LoadCollector(allowed_path_checker, storage, opts, node,
-                                          pretty_json=not opts.no_pretty_json)
-                futures.append(executor.submit(collector.start_performance_monitoring))
-                load_collectors.append(collector)
-            logger.info("Start performance collectors")
+            if CephDataCollector.name in allowed_collectors:
+                assert self.ceph_master_node is not None
+                func = CephDataCollector(allowed_path_checker,
+                                         self.storage,
+                                         self.opts,
+                                         self.ceph_master_node,
+                                         pretty_json=not self.opts.no_pretty_json).collect
+                futures.append(self.executor.submit(func, ('ceph-master',)))
+                if not self.opts.ceph_master_only:
+                    for node in nodes:
+                        func = CephDataCollector(allowed_path_checker,
+                                                 self.storage,
+                                                 self.opts,
+                                                 node,
+                                                 pretty_json=not self.opts.no_pretty_json).collect
+                        roles = ["mon"] if node.mon else []
+                        if node.osds:
+                            roles.append("osd")
+                        futures.append(self.executor.submit(func, roles))
+
+            if futures:
+                for future in futures:
+                    future.result()
+
+            futures = []
+            for collector_name in allowed_collectors:
+                if collector_name not in (LoadCollector.name, CephDataCollector.name):
+                    for node in nodes:
+                        collector_cls = ALL_COLLECTORS_MAP[collector_name]
+                        func = collector_cls(allowed_path_checker,
+                                             self.storage,
+                                             self.opts,
+                                             node,
+                                             pretty_json=not self.opts.no_pretty_json).collect
+                        futures.append(self.executor.submit(func, ('node',)))
+
+            if futures:
+                for future in futures:
+                    future.result()
+
+            # finish collection - grab performance metrics and one more pg dump
+            futures = []
+            if LoadCollector.name in allowed_collectors:
+                stime = collect_load_data_at - time.time()
+                if stime > 0:
+                    logger.info("Waiting for %s seconds for performance collectors", int(stime + 0.5))
+                    time.sleep(stime)
+
+                logger.info("Collecting performance info")
+                futures.extend(self.executor.submit(collector.collect_performance_data)
+                               for collector in load_collectors)
+
+            if CephDataCollector.name in allowed_collectors:
+                logger.info("Collecting second pg dump")
+                func = CephDataCollector(allowed_path_checker,
+                                         self.storage,
+                                         self.opts,
+                                         self.ceph_master_node,
+                                         pretty_json=not self.opts.no_pretty_json).second_pg_dump
+                futures.append(self.executor.submit(func))
 
             for future in futures:
                 future.result()
 
-            # time when to stop load collection
-            collect_load_data_at = time.time() + opts.load_collect_seconds
-
-        futures = []
-        if CephDataCollector.name in allowed_collectors:
-            func = CephDataCollector(allowed_path_checker, storage, opts, master_node,
-                                     pretty_json=not opts.no_pretty_json).collect
-            futures.append(executor.submit(func, ('ceph-master',)))
-            if not opts.ceph_master_only:
-                for node in rpc_nodes:
-                    func = CephDataCollector(allowed_path_checker, storage, opts, node,
-                                             pretty_json=not opts.no_pretty_json).collect
-                    roles = ["mon"] if node.mon else []
-                    if node.osds:
-                        roles.append("osd")
-                    futures.append(executor.submit(func, roles))
-
-        if futures:
-            for future in futures:
-                future.result()
-
-        futures = []
-        for collector_name in allowed_collectors:
-            if collector_name not in (LoadCollector.name, CephDataCollector.name):
-                for node in rpc_nodes:
-                    collector_cls = ALL_COLLECTORS_MAP[collector_name]
-                    func = collector_cls(allowed_path_checker, storage, opts, node,
-                                         pretty_json=not opts.no_pretty_json).collect
-                    futures.append(executor.submit(func, ('node',)))
-
-        if futures:
-            for future in futures:
-                future.result()
-
-        # finish collection - grab performance metrics and one more pg dump
-        futures = []
-        if LoadCollector.name in allowed_collectors:
-            stime = collect_load_data_at - time.time()
-            if stime > 0:
-                logger.info("Waiting for %s seconds for performance collectors", int(stime + 0.5))
-                time.sleep(stime)
-
-            logger.info("Collecting performance info")
-            futures.extend(executor.submit(collector.collect_performance_data) for collector in load_collectors)
-
-        if CephDataCollector.name in allowed_collectors:
-            logger.info("Collecting second pg dump")
-            func = CephDataCollector(allowed_path_checker, storage, opts, master_node,
-                                     pretty_json=not opts.no_pretty_json).second_pg_dump
-            futures.append(executor.submit(func))
-
-        for future in futures:
-            future.result()
-
-    except Exception as exc:
-        logger.error("Exception happened(see full tb below): %s", exc)
-        raise
-    finally:
-        logger.info("Collecting logs and teardown RPC servers")
-        for node in rpc_nodes + ([] if master_node is None else [master_node]):
-            if node.rpc is not None:
-                try:
-                    storage.put_raw(node.rpc.server.get_logs().encode('utf8'), "rpc_logs/{0}.txt".format(node.fs_name))
-                except Exception:
-                    pass
-                try:
-                    node.rpc.server.stop()
-                except ConnectionClosed:
-                    node.rpc = None
+        except Exception as exc:
+            logger.error("Exception happened(see full tb below): %s", exc)
+            raise
+        finally:
+            logger.info("Collecting logs and teardown RPC servers")
+            for node in nodes + [self.ceph_master_node]:
+                if isinstance(node, Node):
+                    try:
+                        self.storage.put_raw(
+                            node.rpc.server.get_logs().encode('utf8'),
+                            "rpc_logs/{0}.txt".format(node.name))
+                    except Exception:
+                        pass
+                    try:
+                        node.rpc.server.stop()
+                    except ConnectionClosed:
+                        node.rpc = None
 
 
 def parse_args(argv: List[str]) -> Any:
@@ -1213,9 +1185,6 @@ def parse_args(argv: List[str]) -> Any:
                    help="Pass additional nodes from cli. ip_or_name[,ip_or_name...]")
     p.add_argument("--inventory", metavar='FILE',
                    help="File which map node name/ip to roles. In format 1.1.1.1: osd, mon")
-    p.add_argument("--ip-mapping", metavar='FILE',
-                   help="File, which maps node ip to sshable ip of same node. Use if sshd don't listen on ceph " +
-                        "public ip or in other cases. Format: node_ceph_public_ip node_sshd_ip\\n... ")
     p.add_argument("-j", "--no-pretty-json", action="store_true", help="Don't prettify json data")
     p.add_argument("-l", "--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
                    default=None, help="Console log level")
@@ -1236,7 +1205,7 @@ def parse_args(argv: List[str]) -> Any:
     p.add_argument("-u", "--ssh-user", default=None, help="SSH user. Current user by default")
     p.add_argument("--sudo", action="store_true", help="Run agent with sudo on remote node")
     p.add_argument("-w", "--wipe", action='store_true', help="Wipe results directory before store data")
-
+    p.add_argument("-A", '--all-ceph', action="store_true", help="Must successfully connect to all ceph nodes")
     if logging_tree:
         p.add_argument("-T", "--show-log-tree", action="store_true", help="Show logger tree.")
 
@@ -1263,7 +1232,7 @@ def setup_logging2(opts: Any, out_folder: str, tmp_log_file: bool = False) -> Op
 
 def git_prepare(path: str) -> bool:
     logger.info("Checking and cleaning git dir %r", path)
-    code, res = run_with_code("cd {} ; git status --porcelain".format(path))
+    code, _, res = Local().run("cd {} ; git status --porcelain".format(path))
 
     if code != 0:
         sys.stderr.write("Folder {} doesn't looks like under git control\n".format(path))
@@ -1325,7 +1294,7 @@ def main(argv: List[str]) -> int:
             else:
                 out_folder = tempfile.mkdtemp()
 
-        log_file = setup_logging2(opts, out_folder, git_dir is not None)
+        log_file = setup_logging2(opts, out_folder, git_dir is not None)  # type: ignore
 
         if logging_tree and opts.show_log_tree:
             logging_tree.printout()
@@ -1348,15 +1317,15 @@ def main(argv: List[str]) -> int:
             storage = None
 
         with ThreadPoolExecutor(opts.pool_size) as executor:
-            collect(storage, opts, executor)
+            CollectorCoordinator(storage, opts, executor).collect()
 
         if out_folder:
             if git_dir:
                 [h_weak_ref().flush() for h_weak_ref in logging._handlerList]  # type: ignore
                 target_log_file = os.path.join(git_dir, "log.txt")
-                shutil.copy(log_file, target_log_file)
+                shutil.copy(log_file, target_log_file)  # type: ignore
             else:
-                target_log_file = None
+                target_log_file = None  # type: ignore
 
             if not opts.dont_pack_result:
                 if opts.result is None:
@@ -1364,7 +1333,7 @@ def main(argv: List[str]) -> int:
                 else:
                     out_file = opts.result
 
-                code, res = run_with_code("cd {} ; tar -zcvf {} *".format(out_folder, out_file))
+                code, _, res = Local().run("cd {} ; tar -zcvf {} *".format(out_folder, out_file))
                 if code != 0:
                     logger.error("Fail to archive results. Please found raw data at %r", out_folder)
                 else:
@@ -1378,8 +1347,8 @@ def main(argv: List[str]) -> int:
 
                 if git_dir:
                     [h_weak_ref().flush() for h_weak_ref in logging._handlerList]  # type: ignore
-                    shutil.copy(log_file, target_log_file)
-                    os.unlink(log_file)
+                    shutil.copy(log_file, target_log_file)  # type: ignore
+                    os.unlink(log_file)  # type: ignore
 
                 status_templ = "{0:%H:%M %d %b %y}, {1[status]}, {1[free_pc]}% free, {1[blocked]} req blocked, " + \
                                "{1[ac_perc]}% PG active+clean"

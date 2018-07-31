@@ -584,12 +584,11 @@ class Loader:
         udp_sock_re = re.compile('(?im)^udp6?\\b')
         ip2host: Dict[str, Host] = {}
 
-        for is_file, host_ip_name in self.storage.txt.hosts:
+        for is_file, hostname in self.storage.txt.hosts:
             assert not is_file
-            _, hostname = host_ip_name.split("-", 1)
 
-            stor_node = self.storage.txt.hosts[host_ip_name]
-            jstor_node = self.storage.json.hosts[host_ip_name]
+            stor_node = self.storage.txt.hosts[hostname]
+            jstor_node = self.storage.json.hosts[hostname]
 
             lshw_xml = stor_node.get('lshw', ext='xml')
             hw_info = None
@@ -603,7 +602,7 @@ class Loader:
             disks, storage_devs, df_info = load_hdds(hostname, jstor_node, stor_node)
 
             if self.perf_data is not None:
-                perf_monitoring = self.perf_data.get(host_ip_name)
+                perf_monitoring = self.perf_data.get(hostname)
                 dtime = perf_monitoring['collected_at'][-1] - perf_monitoring['collected_at'][0]
                 fill_io_devices_usage_stats(dtime, perf_monitoring, disks)
             else:
@@ -614,7 +613,7 @@ class Loader:
 
             info = parse_meminfo(stor_node.meminfo)
             host = Host(name=hostname,
-                        stor_id=host_ip_name,
+                        stor_id=hostname,
                         net_adapters=net_adapters,
                         disks=disks,
                         storage_devs=storage_devs,
