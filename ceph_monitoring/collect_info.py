@@ -64,6 +64,9 @@ class Node:
         else:
             return self.ip
 
+    def __str__(self) -> str:
+        return "Node(name={0.name})".format(self)
+
 
 # CMD executors --------------------------------------------------------------------------------------------------------
 
@@ -805,7 +808,7 @@ def discover_nodes(opts: Any, ip_mapping: Dict[str, str] = None, master_node: No
         node.roles.add('mon')
         nodes[ip] = node
 
-    osd_nodes = get_osds_nodes(exec_func, opts.ceph_extra)
+    osd_nodes = get_osds_nodes(exec_func, opts.ceph_extra, thcount=16)
     for ip, osds in osd_nodes.items():
         ip = ip_mapping.get(ip, ip)
         node = nodes.setdefault(ip, Node(ip))
@@ -952,6 +955,7 @@ def merge_nodes(target_nodes: List[Node], merged_nodes: List[Node]):
                     assert found is tnode, "Ip's for node {} found twice in target_node list".format(node)
                     continue
 
+                logger.debug("Merge %s into %s", node, tnode)
                 tnode.roles.update(node.roles)
 
                 if node.mon and not tnode.mon:
@@ -965,8 +969,10 @@ def merge_nodes(target_nodes: List[Node], merged_nodes: List[Node]):
 
                 tnode.ssh_endpoint = node.ssh_endpoint
                 found = tnode
-        logger.warning("Node %s not found in target nodes, append it", node)
-        target_nodes.append(node)
+
+        if not found:
+            logger.warning("Node %s not found in target nodes, append it", node)
+            target_nodes.append(node)
 
 
 def parse_ipa4(data: str) -> Set[str]:
