@@ -180,6 +180,75 @@ def parse_pg_dump(data: Dict[str, Any]) -> PGDump:
 
 # --- load functions ---------------------------------------------------------------------------------------------------
 
+# if code == 0:
+#     # TODO: move this to report code, only collect here
+
+#
+# # TODO: move this to report code, only collect here
+# if code == 0 and 'Bit Rate=' in out:
+#     br1 = out.split('Bit Rate=')[1]
+#     if 'Tx-Power=' in br1:
+#         speed = br1.split('Tx-Power=')[0]
+#
+# # TODO: move this to report code, only collect here
+# if speed is not None:
+#     mults = {
+#         'Kb/s': 125,
+#         'Mb/s': 125000,
+#         'Gb/s': 125000000,
+#     }
+#     for name, mult in mults.items():
+#         if name in speed:  # type: ignore
+#             speed = int(float(speed.replace(name, '')) * mult)    # type: ignore
+#             break
+#     else:
+#         if speed == 'Unknown!':
+#             unknown_speed.append(dev)
+#         else:
+#             logger.warning("Node %s - can't transform %s interface speed %r to Bps", self.node, dev, speed)
+#
+#     if isinstance(speed, int):
+#         interface['speed'] = speed
+#     else:
+#         interface['speed_s'] = speed
+
+
+def parse_adapter_info(interface: Dict[str, Any]) -> Tuple[Optional[int], Optional[str], Optional[bool]]:
+    speed = None
+    duplex = None
+    speed_s = None
+
+    if 'ethtool' in interface:
+        for line in interface['ethtool'].split("\n"):
+            if 'Speed:' in line:
+                speed = line.split(":")[1].strip()
+            if 'Duplex:' in line:
+                duplex = line.split(":")[1].strip() == 'Full'
+
+    if 'iwconfig' in interface:
+        if 'Bit Rate=' in interface['iwconfig']:
+            br1 = interface['iwconfig'].split('Bit Rate=')[1]
+            if 'Tx-Power=' in br1:
+                speed = br1.split('Tx-Power=')[0]
+
+    if speed is not None:
+        mults = {
+            'Kb/s': 125,
+            'Mb/s': 125000,
+            'Gb/s': 125000000,
+        }
+        for name, mult in mults.items():
+            if name in speed:  # type: ignore
+                speed = int(float(speed.replace(name, '')) * mult)    # type: ignore
+                break
+
+        if isinstance(speed, int):
+            speed = speed
+        else:
+            speed_s = speed
+
+    return speed, speed_s, duplex
+
 
 def load_interfaces(dtime: Optional[float],
                     hostname: str,
@@ -201,7 +270,14 @@ def load_interfaces(dtime: Optional[float],
         else:
             load = None
 
-        adapter = NetworkAdapter(load=load, **adapter_dct)
+        speed, speed_s, duplex = parse_adapter_info(adapter_dct)
+        adapter = NetworkAdapter(dev=adapter_dct['dev'],
+                                 is_phy=adapter_dct['is_phy'],
+                                 load=load,
+                                 mtu=None,
+                                 speed=speed,
+                                 speed_s=speed_s,
+                                 duplex=duplex)
 
         try:
             adapter.mtu = ifs_info[adapter.dev].mtu

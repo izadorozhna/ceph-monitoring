@@ -115,6 +115,14 @@ class Node(INode):
         data = self.rpc.fs.get_file(name, compress=compress)
         return zlib.decompress(data) if compress else data
 
+    def ceph_info(self) -> str:
+        info = self.name
+        if self.mon:
+            info += " mon=" + self.mon
+        if self.osds:
+            info += " osds=[" + ",".join(str(osd.id) for osd in self.osds) + "]"
+        return info
+
 
 class Local(INode):
     name = 'localhost'
@@ -209,6 +217,7 @@ def parse_sockstat_file(fc: str) -> Optional[Dict[str, Dict[str, str]]]:
 
 
 def get_host_interfaces(rpc: INode) -> List[Tuple[bool, str]]:
+    """Return list of host interfaces, returns pair (is_physical, name)"""
     res = []  # type: List[Tuple[bool, str]]
     content = rpc.run("ls -l /sys/class/net").output
 
@@ -225,6 +234,8 @@ def get_host_interfaces(rpc: INode) -> List[Tuple[bool, str]]:
 
 
 def get_device_for_file(node: Node, fname: str) -> Tuple[str, str]:
+    """Find storage device, on which file is located"""
+
     dev = node.rpc.fs.get_dev_for_file(fname)
     dev = dev.decode('utf8')
     assert dev.startswith('/dev'), "{!r} is not starts with /dev".format(dev)
@@ -238,7 +249,9 @@ def get_device_for_file(node: Node, fname: str) -> Tuple[str, str]:
 CephServices = NamedTuple('CephServices', [('mons', Dict[str, str]), ('osds', Dict[str, List[OSDInfo]])])
 
 
-def discover_ceph_services(master_node: INode, opts: Any) -> CephServices:
+def discover_ceph_services(master_node: INode, opts: Any, thcount: int = 1) -> CephServices:
+    """Find ceph monitors and osds using ceph osd dump and ceph mon_map"""
+
     exec_func = lambda x: master_node.run_exc(x).decode('utf8')
 
     mons = {}  # type: Dict[str, str]
@@ -247,7 +260,7 @@ def discover_ceph_services(master_node: INode, opts: Any) -> CephServices:
         mons[ip] = name
 
     osds = {}  # type: Dict[str, List[OSDInfo]]
-    osd_nodes = get_osds_nodes(exec_func, opts.ceph_extra, thcount=16)
+    osd_nodes = get_osds_nodes(exec_func, opts.ceph_extra, thcount=thcount)
     for ip, osds_info in osd_nodes.items():
         assert ip not in osds
         osds[ip] = osds_info
@@ -259,6 +272,7 @@ def init_rpc_and_fill_data(ips_or_hostnames: List[str],
                            ssh_opts: str,
                            executor: Executor,
                            with_sudo: bool) -> Tuple[List[Node], List[Tuple[str, str]]]:
+    """Connect to nodes and fill Node object with basic node info: ips and hostname"""
 
     rpc_nodes = []  # type: List[Node]
     failed_nodes = []  # type: List[Tuple[str, str]]
@@ -289,6 +303,7 @@ def init_rpc_and_fill_data(ips_or_hostnames: List[str],
 
 
 def iter_extra_host(opts: Any) -> Iterator[str]:
+    """Iterate over all extra hosts from -I & --inventory options, if some"""
     if opts.inventory:
         with open(opts.inventory) as fd:
             for ln in fd:
@@ -510,7 +525,7 @@ class CephDataCollector(Collector):
                 logger.error("Fail to get crushmap")
             else:
                 self.save_file('crushmap', cr_fname, 'bin')
-                code, _, _  = self.node.run("crushtool -d {0} -o {0}.txt".format(cr_fname))
+                code, _, _ = self.node.run("crushtool -d {0} -o {0}.txt".format(cr_fname))
                 if code != 0:
                     logger.error("Fail to decompile crushmap")
                 else:
@@ -682,6 +697,7 @@ class CephDataCollector(Collector):
             try:
                 osd_proc_info['sched'] = parse_proc_file("\n".join(sched.strip().split("\n")[2:-2]))
             except:
+                osd_proc_info['sched'] = {}
                 osd_proc_info['sched_raw'] = sched
 
             stat = self.node.get_file(pid_dir + "stat").decode('utf8')
@@ -771,6 +787,7 @@ class NodeCollector(Collector):
 
     def collect_block_devs(self) -> None:
         assert isinstance(self.node, Node)
+
         bdevs_info = self.node.rpc.sensors.get_block_devs_info()
         bdevs_info = {name.decode('utf8'): data for name, data in bdevs_info.items()}
         for name_prefix in ['loop']:
@@ -825,47 +842,14 @@ class NodeCollector(Collector):
             interface = {'dev': dev, 'is_phy': is_phy}
             interfaces[dev] = interface
 
-            if not is_phy:
-                continue
+            if is_phy:
+                code, _, eth_out = self.node.run("ethtool " + dev)
+                if code:
+                    interface['ethtool'] = eth_out
 
-            speed = None  # type: Union[str, int, None]
-            code, _, out = self.node.run("ethtool " + dev)
-            if code == 0:
-                # TODO: move this to report code, only collect here
-                for line in out.split("\n"):
-                    if 'Speed:' in line:
-                        speed = line.split(":")[1].strip()
-                    if 'Duplex:' in line:
-                        interface['duplex'] = line.split(":")[1].strip() == 'Full'
-
-            code, _, out = self.node.run("iwconfig " + dev)
-            # TODO: move this to report code, only collect here
-            if code == 0 and 'Bit Rate=' in out:
-                br1 = out.split('Bit Rate=')[1]
-                if 'Tx-Power=' in br1:
-                    speed = br1.split('Tx-Power=')[0]
-
-            # TODO: move this to report code, only collect here
-            if speed is not None:
-                mults = {
-                    'Kb/s': 125,
-                    'Mb/s': 125000,
-                    'Gb/s': 125000000,
-                }
-                for name, mult in mults.items():
-                    if name in speed:  # type: ignore
-                        speed = int(float(speed.replace(name, '')) * mult)    # type: ignore
-                        break
-                else:
-                    if speed == 'Unknown!':
-                        unknown_speed.append(dev)
-                    else:
-                        logger.warning("Node %s - can't transform %s interface speed %r to Bps", self.node, dev, speed)
-
-                if isinstance(speed, int):
-                    interface['speed'] = speed
-                else:
-                    interface['speed_s'] = speed
+                code, _, iwconfig_out = self.node.run("iwconfig " + dev)
+                if code:
+                    interface['iwconfig'] = iwconfig_out
 
         self.save('interfaces', 'json', 0, json.dumps(interfaces))
         if unknown_speed:
@@ -999,7 +983,8 @@ class CollectorCoordinator:
             logger.error("No 'ceph' command available on master node.")
             raise ReportFailed()
 
-        ceph_services = None if self.opts.ceph_master_only else discover_ceph_services(self.ceph_master_node, self.opts)
+        ceph_services = None if self.opts.ceph_master_only \
+                        else discover_ceph_services(self.ceph_master_node, self.opts, thcount=self.opts.pool_size)
 
         nodes, errs = self.connect_and_init(list(iter_extra_host(self.opts)))
         if errs:
@@ -1007,7 +992,7 @@ class CollectorCoordinator:
                 logging.error("Can't connect to extra node %s: %s", ip_or_hostname, err)
             raise ReportFailed()
 
-        # add information from monmap and osdmap anout ceph services and connect to extra nodes
+        # add information from monmap and osdmap about ceph services and connect to extra nodes
         if ceph_services:
 
             missing_ceph_ips = self.fill_ceph_services(nodes, ceph_services)
@@ -1035,15 +1020,11 @@ class CollectorCoordinator:
         logger.info("Run with %s hosts in total", len(nodes))
 
         for node in nodes:
-            descr = node.name
-            if node.mon:
-                descr += " mon=" + node.mon
-            if node.osds:
-                descr += " osds=[" + ",".join(str(osd.id) for osd in node.osds) + "]"
-            logger.debug("Node: %s", descr)
+            logger.debug("Node: %s", node.ceph_info())
+
         return nodes
 
-    def start_load_collectors(self) -> Iterator[Future]:
+    def start_load_collectors(self) -> Iterator[Callable]:
         if LoadCollector.name in self.allowed_collectors:
             for node in self.nodes:
                 collector = LoadCollector(self.allowed_path_checker,
@@ -1051,16 +1032,14 @@ class CollectorCoordinator:
                                           self.opts,
                                           node,
                                           pretty_json=not self.opts.no_pretty_json)
-                yield self.executor.submit(collector.start_performance_monitoring)
+                yield collector.start_performance_monitoring
                 self.load_collectors.append(collector)
             logger.info("Start performance collectors")
 
             # time when to stop load collection
             self.collect_load_data_at = time.time() + self.opts.load_collect_seconds
 
-    def finish_load_collectors(self) -> Iterator[Future]:
-        # finish collection - grab performance metrics and one more pg dump
-        futures = []
+    def finish_load_collectors(self) -> Iterator[Callable]:
         if LoadCollector.name in self.allowed_collectors:
             stime = self.collect_load_data_at - time.time()
             if stime > 0:
@@ -1069,53 +1048,52 @@ class CollectorCoordinator:
 
             logger.info("Collecting performance info")
             for collector in self.load_collectors:
-                yield self.executor.submit(collector.collect_performance_data)
+                yield collector.collect_performance_data
 
-    def collect_ceph_data(self) -> Iterator[Future]:
+    def collect_ceph_data(self) -> Iterator[Callable]:
         if CephDataCollector.name in self.allowed_collectors:
             assert self.ceph_master_node is not None
-            func = CephDataCollector(self.allowed_path_checker,
-                                     self.storage,
-                                     self.opts,
-                                     self.ceph_master_node,
-                                     pretty_json=not self.opts.no_pretty_json).collect
-            yield self.executor.submit(func, ('ceph-master',))
+            collector = CephDataCollector(self.allowed_path_checker,
+                                          self.storage,
+                                          self.opts,
+                                          self.ceph_master_node,
+                                          pretty_json=not self.opts.no_pretty_json)
+            yield lambda: collector.collect(['ceph-master'])
 
             if not self.opts.ceph_master_only:
                 for node in self.nodes:
-                    func = CephDataCollector(self.allowed_path_checker,
-                                             self.storage,
-                                             self.opts,
-                                             node,
-                                             pretty_json=not self.opts.no_pretty_json).collect
+                    collector = CephDataCollector(self.allowed_path_checker,
+                                                  self.storage,
+                                                  self.opts,
+                                                  node,
+                                                  pretty_json=not self.opts.no_pretty_json)
                     roles = ["mon"] if node.mon else []
                     if node.osds:
                         roles.append("osd")
-                    yield self.executor.submit(func, roles)
+                    yield lambda: collector.collect(roles)
 
-    def run_other_collectors(self) -> Iterator[Future]:
+    def run_other_collectors(self) -> Iterator[Callable]:
         # run all other collectors
         for collector_name in self.allowed_collectors:
             if collector_name not in (LoadCollector.name, CephDataCollector.name):
                 for node in self.nodes:
                     collector_cls = ALL_COLLECTORS_MAP[collector_name]
-                    func = collector_cls(self.allowed_path_checker,
-                                         self.storage,
-                                         self.opts,
-                                         node,
-                                         pretty_json=not self.opts.no_pretty_json).collect
-                    yield self.executor.submit(func, ('node',))
+                    collector = collector_cls(self.allowed_path_checker,
+                                              self.storage,
+                                              self.opts,
+                                              node,
+                                              pretty_json=not self.opts.no_pretty_json)
+                    yield lambda: collector.collect(['node'])
 
-
-    def second_pg_dump(self) -> Iterator[Future]:
+    def second_pg_dump(self) -> Iterator[Callable]:
         if CephDataCollector.name in self.allowed_collectors:
             logger.info("Collecting second pg dump")
-            func = CephDataCollector(self.allowed_path_checker,
-                                     self.storage,
-                                     self.opts,
-                                     self.ceph_master_node,
-                                     pretty_json=not self.opts.no_pretty_json).second_pg_dump
-            yield self.executor.submit(func)
+            collector = CephDataCollector(self.allowed_path_checker,
+                                          self.storage,
+                                          self.opts,
+                                          self.ceph_master_node,
+                                          pretty_json=not self.opts.no_pretty_json)
+            yield collector.second_pg_dump
 
     def collect(self):
         # This variable is updated from main function
@@ -1139,8 +1117,7 @@ class CollectorCoordinator:
                      self.second_pg_dump]
 
             for func in funcs:
-                futures = list(func())
-                for future in futures:
+                for future in [self.executor.submit(run_func) for run_func in func()]:
                     future.result()
 
         except Exception as exc:
@@ -1167,14 +1144,12 @@ def parse_args(argv: List[str]) -> Any:
     p.add_argument("-c", "--collectors", default="ceph,node,load",
                    help="Comma separated list of collectors. Select from : " +
                    ",".join(coll.name for coll in ALL_COLLECTORS))
-    p.add_argument("--ceph-master", default=None, help="Run all ceph cluster commands from NODE")
+    p.add_argument("--ceph-master", default=None, metavar="NODE", help="Run all ceph cluster commands from NODE")
     p.add_argument("--ceph-master-only", action="store_true", help="Run only ceph master data collection, " +
                    "no osd data collections")
     p.add_argument("-C", "--ceph-extra", default="", help="Extra opts to pass to 'ceph' command")
-    p.add_argument("-d", "--disable", default=[], nargs='*', help="Disable collect pattern")
+    p.add_argument("-d", "--disable", metavar="PATTERN", default=[], nargs='*', help="Disable collect pattern")
     p.add_argument("-D", "--detect-only", action="store_true", help="Don't collect any data, only detect cluster nodes")
-    p.add_argument("--dont-rev-resolve", action="store_true", default=False, help="Disable node name detection by ip")
-    # p.add_argument("--no-detect", action="store_true", help="Don't detect nodes. Inventory must be provided")
     p.add_argument("-g", "--save-to-git", metavar="DIR", help="Commit into git repo, cloned to folder")
     p.add_argument("-G", "--git-push", metavar="DIR", help="Commit into git repo, cloned to folder and run 'git push'")
     p.add_argument("-I", "--node", nargs='+', default=[],
@@ -1193,7 +1168,6 @@ def parse_args(argv: List[str]) -> Any:
     p.add_argument("-o", "--result", default=None, help="Result file")
     p.add_argument("-O", "--output-folder", default=None, help="Result folder")
     p.add_argument("-p", "--pool-size", default=32, type=int, help="RPC/local worker pool size")
-    p.add_argument("-P", "--ssh-pool-size", default=4, type=int, help="SSH worker pool size")
     p.add_argument("-s", "--load-collect-seconds", default=60, type=int, metavar="SEC",
                    help="Collect performance stats for SEC seconds")
     p.add_argument("-S", "--ssh-opts", default=None, help="SSH cli options")
@@ -1202,6 +1176,7 @@ def parse_args(argv: List[str]) -> Any:
     p.add_argument("--sudo", action="store_true", help="Run agent with sudo on remote node")
     p.add_argument("-w", "--wipe", action='store_true', help="Wipe results directory before store data")
     p.add_argument("-A", '--all-ceph', action="store_true", help="Must successfully connect to all ceph nodes")
+
     if logging_tree:
         p.add_argument("-T", "--show-log-tree", action="store_true", help="Show logger tree.")
 
@@ -1254,7 +1229,7 @@ def git_commit(path: str, message: str, push: bool = False):
     cmd = "cd {} ; git add -A ; git commit -m '{}'".format(path, message)
     if push:
         cmd += " ; git push"
-    run_locally(cmd)
+    Local().run(cmd)
 
 
 def pack_output_folder(out_folder: str, out_file: Optional[str], log_level: str):

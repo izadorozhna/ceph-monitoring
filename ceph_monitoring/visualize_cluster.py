@@ -981,14 +981,14 @@ def hosts_pg_info(cluster: Cluster, ceph: CephInfo) -> str:
 
 def show_hosts_info(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
     headers = ["Name",
-                  "Services",
-                  "CPU's",
-                  "RAM<br>total",
-                  "RAM<br>free",
-                  "Swap<br>used",
-                  "Load avg<br>5m",
-                  "Conn<br>tcp/udp",
-                  "IP's"]
+               "Services",
+               "CPU's",
+               "RAM<br>total",
+               "RAM<br>free",
+               "Swap<br>used",
+               "Load avg<br>5m",
+               "Conn<br>tcp/udp",
+               "IP's"]
 
     if ceph.osds_info:
         headers.append("Scrub err")
@@ -1088,8 +1088,12 @@ def host_info(host: Host) -> str:
         table = html.HTMLTable(["Name", "Is PHY", "Duplex", "MTU", "Speed", "IP's"], extra_cls="table_c hostinfo-net")
         for name, adapter in sorted(host.net_adapters.items()):
             table.add_row(
-                [name, str(adapter.is_phy), str(adapter.duplex), str(adapter.mtu),
-                 str(adapter.speed), "<br>".join(f"{ip.ip} / {ip.net.prefixlen}" for ip in adapter.ips)])
+                [name,
+                 str(adapter.is_phy),
+                 "" if adapter.duplex is None else str(adapter.duplex),
+                 "" if adapter.mtu is None else str(adapter.mtu),
+                 "" if adapter.speed is None else str(adapter.speed),
+                 "<br>".join(f"{ip.ip} / {ip.net.prefixlen}" for ip in adapter.ips)])
         doc.center(str(table))
         doc.br
         doc.center.H4("HW disks")
@@ -1101,10 +1105,18 @@ def host_info(host: Host) -> str:
         mib_and_mb = lambda x: f"{b2ssize(x)}B / {b2ssize_10(x)}B"
 
         for _, disk in sorted(host.disks.items()):
+            data = [
+                "" if disk.hw_model.model is None else "Model: " + disk.hw_model.model,
+                "" if disk.hw_model.vendor is None else "Vendor: " + disk.hw_model.vendor,
+                "" if disk.hw_model.serial is None else "Serial: " + disk.hw_model.serial
+            ]
             table.add_row([disk.name, disk.tp, mib_and_mb(disk.size),
-                           str(disk.rota), str(disk.scheduler),
-                           "Model: {0.model}<br>Vendor: {0.vendor}<br>Serial:{0.serial}".format(disk.hw_model),
-                           str(disk.rq_size), str(disk.phy_sec), str(disk.min_io)])
+                           str(disk.rota),
+                           "" if disk.scheduler is None else str(disk.scheduler),
+                           "<br>".join(i for i in data if i),
+                           str(disk.rq_size),
+                           str(disk.phy_sec),
+                           str(disk.min_io)])
 
         doc.center(str(table))
         doc.br

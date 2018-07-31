@@ -277,7 +277,7 @@ class Disk:
     path: str
     size: int
     rota: bool
-    scheduler: str
+    scheduler: Optional[str]
     hw_model: HWModel
     rq_size: int
     phy_sec: int
