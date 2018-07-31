@@ -38,34 +38,54 @@ logger = logging.getLogger('collect')
 
 
 class Node:
-    def __init__(self, ip: str, hostname: str = None, roles: Set[str] = None, ssh_endpoint: str = None) -> None:
-        self.ip = ip
+    def __init__(self, ssh_ip: str, hostname: str = None) -> None:
         self.hostname = hostname
-        self.rpc = None
-        self.fqdn = None
-        self.daemon_pid = None   # type: int
-        self.osds = []    # type: List[OSDInfo]
-        self.all_ips = {ip} # type: Set[str]
-        self.mon = None
-        self.roles = roles if roles else set() # type: Set[str]
-        self.ssh_endpoint = ssh_endpoint
+        self.ssh_ip = ssh_ip
+        self.rpc = None  # type: Optional[SimpleRPCClient]
+        self.fqdn = None  # type: Optional[str]
+        self.daemon_pid = None  # type: Optional[int]
+        self.osds = []   # type: List[OSDInfo]
+        self.all_ips = {ssh_ip}  # type: Set[str]
+        self.mon = None  # type: Optional[str]
+
+    def __cmp__(self, other: 'Node') -> int:
+        x = (self.hostname, self.ssh_ip)
+        y = (other.hostname, other.ssh_ip)
+        if x == y:
+            return 0
+        return 1 if x > y else -1
 
     def dct(self) -> Dict[str, Any]:
-        return {'ip': self.ip, 'name': self.hostname, 'roles': list(self.roles), 'ssh_endpoint': self.ssh_endpoint}
+        return {'name': self.hostname, 'ssh_ip': self.ssh_ip}
 
     @property
     def name(self) -> str:
-        return self.ip if self.hostname is None else "{0.hostname}({0.ip})".format(self)
+        return self.ssh_ip if self.hostname is None else "{0.hostname}(ssh={0.ssh_ip})".format(self)
 
     @property
     def fs_name(self) -> str:
-        if self.hostname is not None:
-            return "{0.ip}-{0.hostname}".format(self)
-        else:
-            return self.ip
+        return self.ssh_ip if self.hostname is None else "{0.ssh_ip}-{0.hostname}".format(self)
 
     def __str__(self) -> str:
-        return "Node(name={0.name})".format(self)
+        return "Node(name={0.name}, ssh_ip={0.ssh_ip})".format(self)
+
+    def merge(self, other: 'Node', overwrite_ssh: bool = True):
+
+        if self.mon and not other.mon:
+            self.mon = other.mon
+
+        self.osds = list(set(self.osds + other.osds))
+
+        if overwrite_ssh:
+            self.ssh_ip = other.ssh_ip
+
+        if not self.hostname and other.hostname:
+            self.hostname = other.hostname
+
+        if not self.fqdn and other.fqdn:
+            self.fqdn = other.fqdn
+
+        self.all_ips.update(other.all_ips)
 
 
 # CMD executors --------------------------------------------------------------------------------------------------------
@@ -89,7 +109,7 @@ def run_with_code(cmd: str) -> Tuple[int, str]:
     return code, out.decode('utf8')
 
 
-def get_host_interfaces(node: SimpleRPCClient) -> List[Tuple[bool, str]]:
+def get_host_interfaces(node: Node) -> List[Tuple[bool, str]]:
     res = []  # type: List[Tuple[bool, str]]
     if node is None:
         content = run_locally("ls -l /sys/class/net").decode('utf8')
@@ -108,7 +128,7 @@ def get_host_interfaces(node: SimpleRPCClient) -> List[Tuple[bool, str]]:
     return res
 
 
-def get_device_for_file(node: SimpleRPCClient, fname: str) -> Tuple[str, str]:
+def get_device_for_file(node: Node, fname: str) -> Tuple[str, str]:
     dev = node.rpc.fs.get_dev_for_file(fname)
     dev = dev.decode('utf8')
     assert dev.startswith('/dev'), "{!r} is not starts with /dev".format(dev)
@@ -561,7 +581,8 @@ class CephDataCollector(Collector):
 
                     # sched
                     sched = zlib.decompress(self.node.rpc.fs.get_file(pid_dir + "sched")).decode('utf8')
-                    osd_proc_info['sched'] = split_proc_file("\n".join(sched.strip().split("\n")[2:-2]))
+                    # osd_proc_info['sched_raw'] = split_proc_file("\n".join(sched.strip().split("\n")[2:-2]))
+                    osd_proc_info['sched_raw'] = sched
 
                     stat = self.node.rpc.fs.get_file(pid_dir + "stat", compress=False).decode('utf8')
                     osd_proc_info['stat'] = stat.split()
@@ -791,9 +812,8 @@ class LoadCollector(Collector):
 ALL_COLLECTORS = [CephDataCollector, NodeCollector, LoadCollector]  # type: List[Type[Collector]]
 
 
-def discover_nodes(opts: Any, ip_mapping: Dict[str, str] = None, master_node: Node = None) -> List[Node]:
+def discover_nodes(opts: Any, master_node: Node = None) -> List[Node]:
     nodes = {}
-    ip_mapping = {} if not ip_mapping else ip_mapping
 
     if master_node:
         exec_func = lambda x: rpc_run(master_node.rpc, x, node_name=master_node.name).decode('utf8')
@@ -802,18 +822,11 @@ def discover_nodes(opts: Any, ip_mapping: Dict[str, str] = None, master_node: No
 
     mons = get_mons_nodes(exec_func, opts.ceph_extra)
     for mon_id, (ip, name) in mons.items():
-        ip = ip_mapping.get(ip, ip)
-        node = Node(ip)
-        node.mon = name
-        node.roles.add('mon')
-        nodes[ip] = node
+        nodes.setdefault(ip, Node(ip)).mon = name
 
     osd_nodes = get_osds_nodes(exec_func, opts.ceph_extra, thcount=16)
     for ip, osds in osd_nodes.items():
-        ip = ip_mapping.get(ip, ip)
-        node = nodes.setdefault(ip, Node(ip))
-        node.osds = osds
-        node.roles.add('osd')
+        nodes.setdefault(ip, Node(ip)).osds = osds
 
     return list(nodes.values())
 
@@ -843,6 +856,7 @@ def set_node_name_and_ips(node: Node) -> None:
 
 
 def set_ssh_endpoints(nodes: List[Node], ssh_opts: str, dont_rev_resolve: bool = False):
+    nodes_no_endp = [node for node in nodes if not node.ssh_endpoint]
     if not dont_rev_resolve:
         for node in nodes:
             if node.hostname is None:
@@ -937,42 +951,35 @@ def connect_rpc(nodes: List[Node], executor: Executor, ssh_opts: str, with_sudo:
 
 
 def merge_nodes(target_nodes: List[Node], merged_nodes: List[Node]):
-    ip2target = {}
+    ip2merged = {}
 
-    for node in target_nodes:
+    for node in merged_nodes:
         assert node.ip in node.all_ips
         for ip in node.all_ips:
             if not ipaddress.IPv4Address(ip).is_loopback:
-                assert ip not in ip2target
-                ip2target[ip] = node
+                # assert ip not in ip2merged
+                ip2merged[ip] = node
 
-    for node in merged_nodes:
-        found = None
-        for ip in node.all_ips:
-            if ip in ip2target:
-                tnode = ip2target[ip]
-                if found is not None:
-                    assert found is tnode, "Ip's for node {} found twice in target_node list".format(node)
-                    continue
+    not_found_mnodes = set(merged_nodes)
 
-                logger.debug("Merge %s into %s", node, tnode)
-                tnode.roles.update(node.roles)
+    for tnode in sorted(target_nodes, key=lambda x: x.ip):
+        for ip in tnode.all_ips:
+            if ip in ip2merged:
+                mnode = ip2merged[ip]
+                assert mnode in not_found_mnodes, "Node {} already merged".format(mnode)
+                assert mnode.ssh_endpoint, "Merge node {} has no ssh_endpoint".format(mnode)
+                logger.debug("Merge %s into %s", mnode, tnode)
+                tnode.merge(mnode)
+                logger.debug("After merge target is %s", tnode)
 
-                if node.mon and not tnode.mon:
-                    tnode.mon = node.mon
+                not_found_mnodes.remove(mnode)
+                break
+        else:
+            logger.warning("Node %s not found in merged nodes", tnode)
 
-                for osd in node.osds:
-                    if osd not in tnode.osds:
-                        tnode.osds.append(osd)
-
-                assert node.ssh_endpoint
-
-                tnode.ssh_endpoint = node.ssh_endpoint
-                found = tnode
-
-        if not found:
-            logger.warning("Node %s not found in target nodes, append it", node)
-            target_nodes.append(node)
+    if not_found_mnodes:
+        logger.warning("Nodes %s not found targets to merge with. Appending", ", ".join(map(str, not_found_mnodes)))
+        target_nodes.extend(not_found_mnodes)
 
 
 def parse_ipa4(data: str) -> Set[str]:
@@ -994,7 +1001,7 @@ def parse_ipa4(data: str) -> Set[str]:
 def fill_nodes_info(nodes: List[Node], ssh_opts: str, executor: Executor):
     def fill_node(node: Node):
         node.all_ips = parse_ipa4(run_ssh(node.ssh_endpoint, ssh_opts, "ip -o -4 a").decode("utf8"))
-        logger.debug("Find ips: %s for node %s", ",".join(node.all_ips), node.ssh_endpoint)
+        logger.debug("Find ips: %s for node %s", ", ".join(sorted(node.all_ips)), node.ssh_endpoint)
     list(executor.map(fill_node, nodes))
 
 
@@ -1066,7 +1073,7 @@ def collect(storage: IStorageNNP, opts: Any, executor: Executor) -> None:
     if nodes:
         logger.info("Run with %s hosts in total", len(nodes))
 
-    set_ssh_endpoints(nodes, ssh_opts, opts.dont_rev_resolve)
+    # set_ssh_endpoints(nodes, ssh_opts, opts.dont_rev_resolve)
 
     bad_hosts = [node for node in nodes if not node.ssh_endpoint]
     good_hosts = [node for node in nodes if node.ssh_endpoint]
@@ -1100,8 +1107,6 @@ def collect(storage: IStorageNNP, opts: Any, executor: Executor) -> None:
 
         for future in [executor.submit(set_node_name_and_ips, node) for node in rpc_nodes]:
             future.result()
-
-        merge_nodes(rpc_nodes, nodes)
 
         load_collectors = []
 
