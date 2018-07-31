@@ -18,7 +18,7 @@ import traceback
 import contextlib
 import subprocess
 import logging.config
-from concurrent.futures import ThreadPoolExecutor, Executor
+from concurrent.futures import ThreadPoolExecutor, Executor, Future
 from typing import Dict, Any, List, Tuple, Set, Callable, Optional, Union, Type, Iterator, NamedTuple, cast
 
 try:
@@ -70,8 +70,6 @@ class Node(INode):
         self.ssh_enpoint = ssh_enpoint
         self.hostname = hostname
         self.rpc = rpc
-        self.fqdn = None  # type: Optional[str]
-        self.daemon_pid = None  # type: Optional[int]
         self.osds = []   # type: List[OSDInfo]
         self.all_ips = {ssh_enpoint}  # type: Set[str]
         self.mon = None  # type: Optional[str]
@@ -105,9 +103,6 @@ class Node(INode):
 
         if not self.hostname and other.hostname:
             self.hostname = other.hostname
-
-        if not self.fqdn and other.fqdn:
-            self.fqdn = other.fqdn
 
         self.all_ips.update(other.all_ips)
 
@@ -952,6 +947,11 @@ class CollectorCoordinator:
             self.ssh_opts += opts.ssh_opts + " "
 
         self.ceph_master_node = None  # type: Optional[INode]
+        self.nodes = []  # type: List[Node]
+        self.collect_load_data_at = 0
+        self.allowed_path_checker = get_allowed_paths_checker(self.opts.disable)
+        self.allowed_collectors = self.opts.collectors.split(',')
+        self.load_collectors = []  # type: List[LoadCollector]
 
     def connect_and_init(self, ips_or_hostnames: List[str]) -> Tuple[List[Node], List[Tuple[str, str]]]:
         return init_rpc_and_fill_data(ips_or_hostnames, ssh_opts=self.ssh_opts,
@@ -1043,116 +1043,112 @@ class CollectorCoordinator:
             logger.debug("Node: %s", descr)
         return nodes
 
+    def start_load_collectors(self) -> Iterator[Future]:
+        if LoadCollector.name in self.allowed_collectors:
+            for node in self.nodes:
+                collector = LoadCollector(self.allowed_path_checker,
+                                          self.storage,
+                                          self.opts,
+                                          node,
+                                          pretty_json=not self.opts.no_pretty_json)
+                yield self.executor.submit(collector.start_performance_monitoring)
+                self.load_collectors.append(collector)
+            logger.info("Start performance collectors")
+
+            # time when to stop load collection
+            self.collect_load_data_at = time.time() + self.opts.load_collect_seconds
+
+    def finish_load_collectors(self) -> Iterator[Future]:
+        # finish collection - grab performance metrics and one more pg dump
+        futures = []
+        if LoadCollector.name in self.allowed_collectors:
+            stime = self.collect_load_data_at - time.time()
+            if stime > 0:
+                logger.info("Waiting for %s seconds for performance collectors", int(stime + 0.5))
+                time.sleep(stime)
+
+            logger.info("Collecting performance info")
+            for collector in self.load_collectors:
+                yield self.executor.submit(collector.collect_performance_data)
+
+    def collect_ceph_data(self) -> Iterator[Future]:
+        if CephDataCollector.name in self.allowed_collectors:
+            assert self.ceph_master_node is not None
+            func = CephDataCollector(self.allowed_path_checker,
+                                     self.storage,
+                                     self.opts,
+                                     self.ceph_master_node,
+                                     pretty_json=not self.opts.no_pretty_json).collect
+            yield self.executor.submit(func, ('ceph-master',))
+
+            if not self.opts.ceph_master_only:
+                for node in self.nodes:
+                    func = CephDataCollector(self.allowed_path_checker,
+                                             self.storage,
+                                             self.opts,
+                                             node,
+                                             pretty_json=not self.opts.no_pretty_json).collect
+                    roles = ["mon"] if node.mon else []
+                    if node.osds:
+                        roles.append("osd")
+                    yield self.executor.submit(func, roles)
+
+    def run_other_collectors(self) -> Iterator[Future]:
+        # run all other collectors
+        for collector_name in self.allowed_collectors:
+            if collector_name not in (LoadCollector.name, CephDataCollector.name):
+                for node in self.nodes:
+                    collector_cls = ALL_COLLECTORS_MAP[collector_name]
+                    func = collector_cls(self.allowed_path_checker,
+                                         self.storage,
+                                         self.opts,
+                                         node,
+                                         pretty_json=not self.opts.no_pretty_json).collect
+                    yield self.executor.submit(func, ('node',))
+
+
+    def second_pg_dump(self) -> Iterator[Future]:
+        if CephDataCollector.name in self.allowed_collectors:
+            logger.info("Collecting second pg dump")
+            func = CephDataCollector(self.allowed_path_checker,
+                                     self.storage,
+                                     self.opts,
+                                     self.ceph_master_node,
+                                     pretty_json=not self.opts.no_pretty_json).second_pg_dump
+            yield self.executor.submit(func)
+
     def collect(self):
         # This variable is updated from main function
-        nodes = self.connect_to_nodes()
+        self.nodes = self.connect_to_nodes()
         if self.opts.detect_only:
             return
 
-        self.storage.put_raw(json.dumps([node.dct() for node in nodes]).encode('utf8'), "hosts.json")
+        self.storage.put_raw(json.dumps([node.dct() for node in self.nodes]).encode('utf8'), "hosts.json")
 
-        allowed_path_checker = get_allowed_paths_checker(self.opts.disable)
-        allowed_collectors = self.opts.collectors.split(',')
-
-        for collector in allowed_collectors:
+        for collector in self.allowed_collectors:
             if collector not in ALL_COLLECTORS_MAP:
                 logger.error("Can't found collector {}. Only {} are available".format(
                                 collector, ','.join(ALL_COLLECTORS_MAP)))
                 raise ReportFailed()
 
         try:
-            load_collectors = []
+            funcs = [self.start_load_collectors,
+                     self.collect_ceph_data,
+                     self.run_other_collectors,
+                     self.finish_load_collectors,
+                     self.second_pg_dump]
 
-            collect_load_data_at = 0  # make pylint happy
-            if LoadCollector.name in allowed_collectors:
-                futures = []
-                for node in nodes:
-                    collector = LoadCollector(allowed_path_checker,
-                                              self.storage,
-                                              self.opts,
-                                              node,
-                                              pretty_json=not self.opts.no_pretty_json)
-                    futures.append(self.executor.submit(collector.start_performance_monitoring))
-                    load_collectors.append(collector)
-                logger.info("Start performance collectors")
-
+            for func in funcs:
+                futures = list(func())
                 for future in futures:
                     future.result()
-
-                # time when to stop load collection
-                collect_load_data_at = time.time() + self.opts.load_collect_seconds
-
-            futures = []
-            if CephDataCollector.name in allowed_collectors:
-                assert self.ceph_master_node is not None
-                func = CephDataCollector(allowed_path_checker,
-                                         self.storage,
-                                         self.opts,
-                                         self.ceph_master_node,
-                                         pretty_json=not self.opts.no_pretty_json).collect
-                futures.append(self.executor.submit(func, ('ceph-master',)))
-                if not self.opts.ceph_master_only:
-                    for node in nodes:
-                        func = CephDataCollector(allowed_path_checker,
-                                                 self.storage,
-                                                 self.opts,
-                                                 node,
-                                                 pretty_json=not self.opts.no_pretty_json).collect
-                        roles = ["mon"] if node.mon else []
-                        if node.osds:
-                            roles.append("osd")
-                        futures.append(self.executor.submit(func, roles))
-
-            if futures:
-                for future in futures:
-                    future.result()
-
-            futures = []
-            for collector_name in allowed_collectors:
-                if collector_name not in (LoadCollector.name, CephDataCollector.name):
-                    for node in nodes:
-                        collector_cls = ALL_COLLECTORS_MAP[collector_name]
-                        func = collector_cls(allowed_path_checker,
-                                             self.storage,
-                                             self.opts,
-                                             node,
-                                             pretty_json=not self.opts.no_pretty_json).collect
-                        futures.append(self.executor.submit(func, ('node',)))
-
-            if futures:
-                for future in futures:
-                    future.result()
-
-            # finish collection - grab performance metrics and one more pg dump
-            futures = []
-            if LoadCollector.name in allowed_collectors:
-                stime = collect_load_data_at - time.time()
-                if stime > 0:
-                    logger.info("Waiting for %s seconds for performance collectors", int(stime + 0.5))
-                    time.sleep(stime)
-
-                logger.info("Collecting performance info")
-                futures.extend(self.executor.submit(collector.collect_performance_data)
-                               for collector in load_collectors)
-
-            if CephDataCollector.name in allowed_collectors:
-                logger.info("Collecting second pg dump")
-                func = CephDataCollector(allowed_path_checker,
-                                         self.storage,
-                                         self.opts,
-                                         self.ceph_master_node,
-                                         pretty_json=not self.opts.no_pretty_json).second_pg_dump
-                futures.append(self.executor.submit(func))
-
-            for future in futures:
-                future.result()
 
         except Exception as exc:
             logger.error("Exception happened(see full tb below): %s", exc)
             raise
         finally:
             logger.info("Collecting logs and teardown RPC servers")
-            for node in nodes + [self.ceph_master_node]:
+            for node in self.nodes + [self.ceph_master_node]:
                 if isinstance(node, Node):
                     try:
                         self.storage.put_raw(
@@ -1261,6 +1257,33 @@ def git_commit(path: str, message: str, push: bool = False):
     run_locally(cmd)
 
 
+def pack_output_folder(out_folder: str, out_file: Optional[str], log_level: str):
+    if out_file is None:
+        out_file = tmpnam(remove_after=False) + ".tar.gz"
+
+    code, _, res = Local().run("cd {} ; tar -zcvf {} *".format(out_folder, out_file))
+    if code != 0:
+        logger.error("Fail to archive results. Please found raw data at %r", out_folder)
+    else:
+        logger.info("Result saved into %r", out_file)
+
+        if log_level in ('WARNING', 'ERROR', "CRITICAL"):
+            print("Result saved into %r" % (out_file,))
+
+
+def commit_into_git(git_dir: str, log_file: str, target_log_file: str, git_push: bool, message: str):
+    logger.info("Comiting into git")
+
+    [h_weak_ref().flush() for h_weak_ref in logging._handlerList]
+    shutil.copy(log_file, target_log_file)
+    os.unlink(log_file)
+
+    status_templ = "{0:%H:%M %d %b %y}, {1[status]}, {1[free_pc]}% free, {1[blocked]} req blocked, " + \
+                   "{1[ac_perc]}% PG active+clean"
+    message = status_templ.format(datetime.datetime.now(), message)
+    git_commit(git_dir, message, git_push)
+
+
 def main(argv: List[str]) -> int:
     out_folder = None
     log_file = None
@@ -1268,6 +1291,7 @@ def main(argv: List[str]) -> int:
     try:
         opts = parse_args(argv)
 
+        # verify options
         if opts.git_push and opts.save_to_git:
             sys.stderr.write("At most one of -g/--save-to-git and -G/--git-push option can be provided\n")
             return 1
@@ -1278,6 +1302,7 @@ def main(argv: List[str]) -> int:
             sys.stderr.write("--output-folder can't be used with -g/-G option\n")
             return 1
 
+        # prepare output folder
         if not opts.detect_only:
             if git_dir:
                 if not git_prepare(git_dir):
@@ -1294,12 +1319,12 @@ def main(argv: List[str]) -> int:
             else:
                 out_folder = tempfile.mkdtemp()
 
+        # setup logging
         log_file = setup_logging2(opts, out_folder, git_dir is not None)  # type: ignore
 
         if logging_tree and opts.show_log_tree:
             logging_tree.printout()
             return 0
-
     except Exception:
         if log_file:
             with open(log_file, 'wt') as fd:
@@ -1316,9 +1341,11 @@ def main(argv: List[str]) -> int:
         else:
             storage = None
 
+        # run collect
         with ThreadPoolExecutor(opts.pool_size) as executor:
             CollectorCoordinator(storage, opts, executor).collect()
 
+        # compress/commit output folder
         if out_folder:
             if git_dir:
                 [h_weak_ref().flush() for h_weak_ref in logging._handlerList]  # type: ignore
@@ -1328,33 +1355,16 @@ def main(argv: List[str]) -> int:
                 target_log_file = None  # type: ignore
 
             if not opts.dont_pack_result:
-                if opts.result is None:
-                    out_file = tmpnam(remove_after=False) + ".tar.gz"
-                else:
-                    out_file = opts.result
-
-                code, _, res = Local().run("cd {} ; tar -zcvf {} *".format(out_folder, out_file))
-                if code != 0:
-                    logger.error("Fail to archive results. Please found raw data at %r", out_folder)
-                else:
-                    logger.info("Result saved into %r", out_file)
-
-                    if opts.log_level in ('WARNING', 'ERROR', "CRITICAL"):
-                        print("Result saved into %r" % (out_file,))
+                pack_output_folder(out_folder, opts.result, opts.log_level)
 
             if git_dir:
-                logger.info("Comiting into git")
-
-                if git_dir:
-                    [h_weak_ref().flush() for h_weak_ref in logging._handlerList]  # type: ignore
-                    shutil.copy(log_file, target_log_file)  # type: ignore
-                    os.unlink(log_file)  # type: ignore
-
-                status_templ = "{0:%H:%M %d %b %y}, {1[status]}, {1[free_pc]}% free, {1[blocked]} req blocked, " + \
-                               "{1[ac_perc]}% PG active+clean"
+                assert isinstance(target_log_file, str)
                 ceph_health = json.loads(storage.get_raw("ceph_health_dict").decode("utf8"))
-                message = status_templ.format(datetime.datetime.now(), ceph_health)
-                git_commit(git_dir, message, opts.git_push is not None)
+                commit_into_git(git_dir,
+                                log_file=log_file,
+                                target_log_file=target_log_file,
+                                message=ceph_health,
+                                git_push=opts.git_push is not None)
             elif not opts.dont_remove_unpacked:
                 if opts.dont_pack_result:
                     logger.warning("Unpacked tree is kept as --dont-pack-result option is set, so no archive created")
@@ -1366,6 +1376,8 @@ def main(argv: List[str]) -> int:
                 logger.info("Temporary folder %r", out_folder)
                 if opts.log_level in ('WARNING', 'ERROR', "CRITICAL"):
                     print("Temporary folder %r" % (out_folder,))
+    except ReportFailed:
+        return 1
     except Exception:
         logger.exception("During make_storage/collect")
         raise
