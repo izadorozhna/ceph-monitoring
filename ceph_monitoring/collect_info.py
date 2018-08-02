@@ -15,6 +15,7 @@ import argparse
 import datetime
 import ipaddress
 import traceback
+import functools
 import contextlib
 import subprocess
 import logging.config
@@ -44,7 +45,7 @@ ExecResult = NamedTuple('ExecResult', [('code', int), ('output_b', bytes), ('out
 
 
 class INode(metaclass=abc.ABCMeta):
-    name: str
+    name = ""  # type: str
 
     @abc.abstractmethod
     def run_exc(self, cmd: str, **kwargs) -> bytes:
@@ -405,7 +406,7 @@ class Collector:
         return code, out
 
     @abc.abstractmethod
-    def collect(self, collect_roles_restriction: List[str]) -> None:
+    def collect(self, collect_roles_restriction: List[str]):
         """Do collect data,
         collect_roles_restriction is a list of allowed roles to be collected"""
         pass
@@ -556,17 +557,14 @@ class CephDataCollector(Collector):
         running_osds = set(int(rr.group(2)) for rr in osd_re.finditer(out))
 
         ids_from_ceph = set(osd.id for osd in cast(Node, self.node).osds)
-
-        # expected_osds = running_osds.intersection(ids_from_ceph)
-        # down_osds = ids_from_ceph - running_osds
         unexpected_osds = running_osds.difference(ids_from_ceph)
 
         for osd_id in unexpected_osds:
             logger.warning("Unexpected osd-{} in node {}.".format(osd_id, self.node))
 
-        cephdisk_js = self.node.run_exc("ceph-disk list --format=json")
-        cephdisk_ls = self.node.run_exc("ceph-disk list")
-        lsblk_js = self.node.run_exc("lsblk -a --json")
+        cephdisk_js = self.node.run_exc("ceph-disk list --format=json").decode("utf8")
+        cephdisk_ls = self.node.run_exc("ceph-disk list").decode("utf8")
+        lsblk_js = self.node.run_exc("lsblk -a --json").decode("utf8")
         cephdisk_dct = json.loads(cephdisk_js)
         dev_tree = parse_devices_tree(json.loads(lsblk_js))
 
@@ -730,7 +728,7 @@ class NodeCollector(Collector):
         ("ipa", "txt", "ip a"),
         ("ifconfig", "txt", "ifconfig"),
         ("ifconfig_short", "txt", "ifconfig -s"),
-        ("journalctl", 'txt', 'journalctl -b'),
+        # ("journalctl", 'txt', 'journalctl -b'),
         ("lshw", "xml", "lshw -xml"),
         ("lsblk", "txt", "lsblk -O"),
         ("lsblk_short", "txt", "lsblk"),
@@ -865,12 +863,6 @@ class LoadCollector(Collector):
 
     def start_performance_monitoring(self) -> None:
         assert isinstance(self.node, Node)
-        cfg = {
-            "block-io": {},
-            "net-io": {},
-            "vm-io": {},
-            "ceph": {"sources": ['historic', 'perf_dump'], "osds": "all"}
-        }
 
         # self.results = {}
         #     "perprocess-cpu": {"allowed": ".*"},
@@ -878,6 +870,21 @@ class LoadCollector(Collector):
         #     "system-cpu": {"allowed": ".*"},
         #     "system-ram": {"allowed": ".*"},
         #     "ceph": {"osds": []},
+
+        cfg = {
+            "block-io": {},
+            "net-io": {},
+            "vm-io": {},
+        }
+
+        if self.opts.ceph_historic:
+            cfg.setdefault("ceph", {}).setdefault("sources", []).append('historic')
+
+        if self.opts.ceph_perf:
+            cfg.setdefault("ceph", {}).setdefault("sources", []).append('perf_dump')
+
+        if self.opts.ceph_historic or self.opts.ceph_perf:
+            cfg['ceph']['osds'] = 'all'
 
         self.node.rpc.sensors.start(cfg)
 
@@ -954,7 +961,8 @@ class CollectorCoordinator:
             return Local()
 
     def fill_ceph_services(self, nodes: List[Node], ceph_services: CephServices) -> Set[str]:
-        all_nodes_ips: Dict[str, Node] = {}
+        all_nodes_ips = {}  # type: Dict[str, Node]
+        # all_nodes_ips: Dict[str, Node] = {}
         for node in nodes:
             all_nodes_ips.update({ip: node for ip in node.all_ips})
 
@@ -1058,7 +1066,7 @@ class CollectorCoordinator:
                                           self.opts,
                                           self.ceph_master_node,
                                           pretty_json=not self.opts.no_pretty_json)
-            yield lambda: collector.collect(['ceph-master'])
+            yield functools.partial(collector.collect, ['ceph-master'])
 
             if not self.opts.ceph_master_only:
                 for node in self.nodes:
@@ -1070,7 +1078,7 @@ class CollectorCoordinator:
                     roles = ["mon"] if node.mon else []
                     if node.osds:
                         roles.append("osd")
-                    yield lambda: collector.collect(roles)
+                    yield functools.partial(collector.collect, roles)
 
     def run_other_collectors(self) -> Iterator[Callable]:
         # run all other collectors
@@ -1083,9 +1091,9 @@ class CollectorCoordinator:
                                               self.opts,
                                               node,
                                               pretty_json=not self.opts.no_pretty_json)
-                    yield lambda: collector.collect(['node'])
+                    yield functools.partial(collector.collect, ['node'])
 
-    def second_pg_dump(self) -> Iterator[Callable]:
+    def second_pg_dump(self) -> Iterator[Callable[[], None]]:
         if CephDataCollector.name in self.allowed_collectors:
             logger.info("Collecting second pg dump")
             collector = CephDataCollector(self.allowed_path_checker,
@@ -1154,6 +1162,8 @@ def parse_args(argv: List[str]) -> Any:
     p.add_argument("-G", "--git-push", metavar="DIR", help="Commit into git repo, cloned to folder and run 'git push'")
     p.add_argument("-I", "--node", nargs='+', default=[],
                    help="Pass additional nodes from cli. ip_or_name[,ip_or_name...]")
+    p.add_argument("--ceph-historic", action="store_true", help="Collect ceph historic ops")
+    p.add_argument("--ceph-perf", action="store_true", help="Collect ceph perf dump data (a LOT of data!)")
     p.add_argument("--inventory", metavar='FILE',
                    help="File which map node name/ip to roles. In format 1.1.1.1: osd, mon")
     p.add_argument("-j", "--no-pretty-json", action="store_true", help="Don't prettify json data")
