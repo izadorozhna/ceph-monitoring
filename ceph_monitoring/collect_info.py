@@ -19,8 +19,8 @@ import functools
 import contextlib
 import subprocess
 import logging.config
-from concurrent.futures import ThreadPoolExecutor, Executor, Future
-from typing import Dict, Any, List, Tuple, Set, Callable, Optional, Union, Type, Iterator, NamedTuple, cast
+from concurrent.futures import ThreadPoolExecutor, Executor
+from typing import Dict, Any, List, Tuple, Set, Callable, Optional, Union, Type, Iterator, NamedTuple, cast, Iterable
 
 try:
     import logging_tree
@@ -64,6 +64,14 @@ class INode(metaclass=abc.ABCMeta):
             raw = (exc.output + (b"" if exc.stderr is None else exc.stderr))
 
         return ExecResult(code, raw, raw.decode(encoding))
+
+    @abc.abstractmethod
+    def file_exists(self, fname: str) -> bool:
+        pass
+
+    @abc.abstractmethod
+    def listdir(self, path: str) -> Iterable[str]:
+        pass
 
 
 class Node(INode):
@@ -124,6 +132,12 @@ class Node(INode):
             info += " osds=[" + ",".join(str(osd.id) for osd in self.osds) + "]"
         return info
 
+    def file_exists(self, fname: str) -> bool:
+        return self.rpc.fs.file_exists(fname)
+
+    def listdir(self, path: str) -> Iterable[str]:
+        return self.rpc.fs.listdir(path)
+
 
 class Local(INode):
     name = 'localhost'
@@ -137,6 +151,12 @@ class Local(INode):
 
     def get_file(self, name: str, compress: bool = False) -> bytes:
         return open(name, 'rb').read()
+
+    def file_exists(self, fname: str) -> bool:
+        return os.path.exists(fname)
+
+    def listdir(self, path: str) -> Iterable[str]:
+        return [i for i in os.listdir(path) if i not in ('.', '..')]
 
 
 # ------------ HELPER FUNCTIONS: GENERAL -------------------------------------------------------------------------------
@@ -743,7 +763,6 @@ class NodeCollector(Collector):
         ("netstat_stat", "txt", "netstat -s"),
         ("sysctl", "txt", "sysctl -a"),
         ("uname", "txt", "uname -a"),
-        ("bonds", "txt", "cat /proc/net/bonding/*")
     ]
 
     node_files = [
@@ -765,6 +784,10 @@ class NodeCollector(Collector):
                 except Exception as exc:
                     logger.warning("Failed to run %r on node %s: %s", cmd, self.node, exc)
 
+            # collect_bonds_info
+            for fname in self.node.listdir("/proc/net/bonding"):
+                self.save_file("bond_" + fname, "/proc/net/bonding/" + fname)
+
             for fpath in self.node_files:
                 try:
                     self.save_file(os.path.basename(fpath), fpath)
@@ -781,8 +804,7 @@ class NodeCollector(Collector):
             self.collect_block_devs()
 
             try:
-                assert isinstance(self.node, Node)
-                if self.node.rpc.fs.file_exists("/etc/debian_version"):
+                if self.node.file_exists("/etc/debian_version"):
                     self.save_output("packages_deb", "dpkg -l", frmt="txt")
                 else:
                     self.save_output("packages_rpm", "yum list installed", frmt="txt")

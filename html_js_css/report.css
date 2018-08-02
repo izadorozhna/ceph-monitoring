@@ -83,7 +83,7 @@ td { padding: 6px; }
 #table-mon-info {width: 60%;}
 #table-hosts-info {width: 60%;}
 #table-hosts-pg-info {width: 60%;}
-#table-osds-state {width: 30%;}
+#table-osds-state {width: 50%;}
 #table-pools {width: 80%;}
 #table-pgs {width: 30%;}
 #table-pg-per-osd {width: 100%;}

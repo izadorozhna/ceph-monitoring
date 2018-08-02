@@ -114,7 +114,12 @@ def check_osds_disk_types_and_sizes(ceph: CephInfo) -> List[CheckResult]:
             else:
                 sync = 5
 
-            min_j_size = (50 if osd_info.data_drive_type == 'hdd' else 200) * 2 * sync
+            if osd_info.data_drive_type == 'hdd':
+                min_j_size = 50 * 2 * sync
+            elif  osd_info.data_drive_type == 'sas hdd':
+                min_j_size = 100 * 2 * sync
+            else:
+                min_j_size = 200 * 2 * sync
 
             if osd_info.j_info.size / 2 ** 20 < min_j_size:
                 wrong_j_size.append((osd.id, (osd_info.j_info.size, 2 ** 20 < min_j_size)))
@@ -124,7 +129,7 @@ def check_osds_disk_types_and_sizes(ceph: CephInfo) -> List[CheckResult]:
                 wrong_wal_devices.append(osd.id)
 
             min_db_size = osd_info.data_part_size * 0.02
-            min_db_size = (50 if osd_info.data_drive_type == 'hdd' else 200) * 2 * sync
+            min_db_size = 0
 
             if osd_info.wal_db_info.db_drive_type not in ("ssd", "nvme"):
                 wrong_db_devices.append(osd.id)

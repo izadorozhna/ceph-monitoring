@@ -92,7 +92,9 @@ def parse_lsblkjs(data: List[Dict[str, Any]], hostname: str) -> Iterable[Disk]:
         stor_tp = {
             ('sata', '1'): 'hdd',
             ('sata', '0'): 'ssd',
-            ('nvme', '0'): 'nvme'
+            ('nvme', '0'): 'nvme',
+            ('sas',  '1'): 'sas hdd',
+            ('sas',  '0'): 'ssd',
         }.get((disk_js["tran"], disk_js["rota"]))
 
         if stor_tp is None:
@@ -260,6 +262,12 @@ def load_interfaces(dtime: Optional[float],
     # net_stats = parse_netdev(stor_node.netdev)
     ifs_info = parse_ipa(stor_node.ipa)
     net_adapters = {}
+
+    for name, vl in list(ifs_info.items()):
+        if '@' in name:
+            bond, _ = name.split('@')
+            if bond not in ifs_info:
+                ifs_info[bond] = vl
 
     for name, adapter_dct in jstor_node.interfaces.items():
         if dtime is not None and dtime > 1.0 and perf_monitoring:

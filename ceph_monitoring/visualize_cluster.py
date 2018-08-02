@@ -385,7 +385,7 @@ def show_osd_state(ceph: CephInfo) -> Tuple[str, Any]:
     for status, osds in sorted(statuses.items()):
         table.add_row([html_ok(status.name) if status == OSDStatus.up else html_fail(status.name),
                        len(osds),
-                      "<br>".join(", ".join(grp) for grp in partition(osds, 10))])
+                      "<br>".join(", ".join(grp) for grp in partition(osds, 20))])
 
     return "OSD's state:", table
 
@@ -1133,15 +1133,29 @@ def host_info(host: Host) -> str:
         mib_and_mb = lambda x: f"{b2ssize(x)}B / {b2ssize_10(x)}B"
 
         for _, disk in sorted(host.disks.items()):
-            data = [
-                "" if disk.hw_model.model is None else "Model: " + disk.hw_model.model,
-                "" if disk.hw_model.vendor is None else "Vendor: " + disk.hw_model.vendor,
-                "" if disk.hw_model.serial is None else "Serial: " + disk.hw_model.serial
-            ]
+
+            if disk.hw_model.model and disk.hw_model.vendor:
+                model = f"Model: {disk.hw_model.vendor.strip()} / {disk.hw_model.model}"
+            elif disk.hw_model.model:
+                model = f"Model: {disk.hw_model.model}"
+            elif disk.hw_model.vendor:
+                model = f"Vendor: {disk.hw_model.vendor.strip()}"
+            else:
+                model = ""
+
+            serial = "" if disk.hw_model.serial is None else ("Serial: " + disk.hw_model.serial)
+
+            if model and serial:
+                info = f"{model}<br>{serial}"
+            elif model or serial:
+                info = model if model else serial
+            else:
+                info = ""
+
             table.add_row([disk.name, disk.tp, mib_and_mb(disk.size),
                            str(disk.rota),
                            "" if disk.scheduler is None else str(disk.scheduler),
-                           "<br>".join(i for i in data if i),
+                           info,
                            str(disk.rq_size),
                            str(disk.phy_sec),
                            str(disk.min_io)])
