@@ -177,13 +177,18 @@ def parse_ipa4(data: str) -> Set[str]:
     return res
 
 
-def parse_proc_file(fc: str) -> Dict[str, str]:
+def parse_proc_file(fc: str, ignore_err: bool = False) -> Dict[str, str]:
     res = {}  # type: Dict[str, str]
     for ln in fc.split("\n"):
         ln = ln.strip()
         if ln:
-            name, val = ln.split(":")
-            res[name.strip()] = val.strip()
+            try:
+                name, val = ln.split(":")
+            except ValueError:
+                if not ignore_err:
+                    raise
+            else:
+                res[name.strip()] = val.strip()
     return res
 
 
@@ -465,7 +470,7 @@ class CephDataCollector(Collector):
             assert out, "{!r} failed".format(self.ceph_cmd + "status")
             status = json.loads(out)
 
-            ceph_health = {'status': status['health']['overall_status']}  # type: Dict[str, Union[str, int]]
+            ceph_health = {'status': status['health'].get('overall_status')}  # type: Dict[str, Union[str, int]]
             avail = status['pgmap']['bytes_avail']
             total = status['pgmap']['bytes_total']
             ceph_health['free_pc'] = int(avail * 100 / total + 0.5)
@@ -693,7 +698,8 @@ class CephDataCollector(Collector):
             # sched
             sched = self.node.get_file(pid_dir + "sched", compress=True).decode('utf8')
             try:
-                osd_proc_info['sched'] = parse_proc_file("\n".join(sched.strip().split("\n")[2:-2]))
+                data = "\n".join(sched.strip().split("\n")[2:])
+                osd_proc_info['sched'] = parse_proc_file(data, ignore_err=True)
             except:
                 osd_proc_info['sched'] = {}
                 osd_proc_info['sched_raw'] = sched

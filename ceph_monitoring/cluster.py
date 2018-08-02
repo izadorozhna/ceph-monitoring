@@ -13,6 +13,7 @@ from cephlib.storage import AttredStorage, TypedStorage
 
 from .hw_info import parse_hw_info, get_dev_file_name
 from .cluster_classes import *
+from .collect_info import parse_proc_file
 
 
 logger = logging.getLogger("cephlib.parse")
@@ -901,10 +902,16 @@ def get_osds_info(cluster: Cluster, ceph: CephInfo) -> OSDSInfo:
             pinfo = osd.run_info.procinfo
             opened_socks = sum(int(tp.get('inuse', 0)) for tp in pinfo.get('ipv4', {}).values())
             opened_socks += sum(int(tp.get('inuse', 0)) for tp in pinfo.get('ipv6', {}).values())
+
+            sched = pinfo['sched']
+            if not sched:
+                data = "\n".join(pinfo['sched_raw'].strip().split("\n")[2:])
+                sched = parse_proc_file(data, ignore_err=True)
+
             run_info = OSDProcessInfo(fd_count=pinfo["fd_count"],
                                       opened_socks=opened_socks,
                                       th_count=pinfo["th_count"],
-                                      cpu_usage=float(pinfo["sched"]["se.sum_exec_runtime"]),
+                                      cpu_usage=float(sched["se.sum_exec_runtime"]),
                                       vm_rss=mem2bytes(pinfo["mem"]["VmRSS"]),
                                       vm_size=mem2bytes(pinfo["mem"]["VmSize"]))
         else:
@@ -1016,11 +1023,11 @@ def get_nodes_pg_info(ceph: CephInfo) -> Dict[str, NodePGStats]:
             info.io_stat.reads += osd_info.pg_stats.reads
             info.io_stat.bytes += osd_info.pg_stats.bytes
 
-            info.dio_stat.write_b += osd_info.d_stats.write_b
-            info.dio_stat.writes += osd_info.d_stats.writes
-            info.dio_stat.read_b += osd_info.d_stats.read_b
-            info.dio_stat.reads += osd_info.d_stats.reads
-            info.dio_stat.bytes += osd_info.d_stats.bytes
+            info.dio_stat.d_write_b += osd_info.d_stats.d_write_b
+            info.dio_stat.d_writes += osd_info.d_stats.d_writes
+            info.dio_stat.d_read_b += osd_info.d_stats.d_read_b
+            info.dio_stat.d_reads += osd_info.d_stats.d_reads
+            info.dio_stat.d_used_space += osd_info.d_stats.d_used_space
 
             info.pgs.extend(osd_info.pgs)
         else:

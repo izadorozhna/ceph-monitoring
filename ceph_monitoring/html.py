@@ -1,4 +1,8 @@
+from enum import Enum
 from typing import Callable, List, Dict, Union, Iterable
+
+
+from cephlib.units import b2ssize, b2ssize_10
 
 
 class RTag:
@@ -98,27 +102,51 @@ class Doc:
         return self.__stack[-1](text, **attrs)
 
 
+class TableAlign(Enum):
+    center = 0
+    left_right = 1
+    center_right = 2
+
+
 class HTMLTable:
-    def_table_attrs = {'class': 'table-bordered sortable zebra-table'}
+    default_classes = {'table-bordered', 'sortable', 'zebra-table'}
 
     def __init__(self,
+                 id: str = None,
                  headers: Iterable[str] = None,
                  table_attrs: Dict[str, str] = None,
                  zebra: bool = True,
                  header_attrs: Dict[str, str] = None,
-                 extra_cls: str = None,
-                 id: str = None) -> None:
+                 extra_cls: Iterable[str] = None,
+                 sortable: bool = True,
+                 align: TableAlign = TableAlign.center) -> None:
 
-        self.table_attrs = table_attrs.copy() if table_attrs is not None else self.def_table_attrs.copy()
+        assert not isinstance(extra_cls, str)
+        self.table_attrs = table_attrs.copy() if table_attrs is not None else {}
+        classes = self.default_classes.copy()
 
         if extra_cls:
-            self.table_attrs['class'] = self.table_attrs.get('class', "") + " " + extra_cls
+            classes.update(extra_cls)
+
+        if not zebra:
+            classes.remove('zebra-table')
+
+        if not sortable:
+            classes.remove('sortable')
+
+        if align == TableAlign.center:
+            classes.add('table_c')
+        elif align == TableAlign.left_right:
+            classes.add('table_lr')
+        elif align == TableAlign.center_right:
+            classes.add('table_cr')
+        else:
+            raise ValueError(f"Unknown align type: {align}")
 
         if id is not None:
             self.table_attrs['id'] = id
 
-        if not zebra:
-            self.table_attrs['class'] = self.table_attrs['class'].replace("zebra-table", "")
+        self.table_attrs['class'] = " ".join(classes)
 
         if header_attrs is None:
             header_attrs = {}
@@ -134,6 +162,14 @@ class HTMLTable:
 
     def add_cell(self, data: Union[str, TagProxy], **attrs: str):
         self.cells[-1].append((data, attrs))
+
+    def add_cell_b2ssize(self, data: Union[int, float], **attrs: str):
+        assert 'sorttable_customkey' not in attrs
+        self.add_cell(b2ssize(data), sorttable_customkey=str(data), **attrs)
+
+    def add_cell_b2ssize_10(self, data: Union[int, float], **attrs: str):
+        assert 'sorttable_customkey' not in attrs
+        self.add_cell(b2ssize_10(data), sorttable_customkey=str(data), **attrs)
 
     def add_cells(self, *cells: Union[str, TagProxy], **attrs: str):
         self.add_row(cells, **attrs)

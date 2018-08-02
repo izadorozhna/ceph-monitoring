@@ -14,7 +14,7 @@ import subprocess
 import collections
 import logging.config
 from pathlib import Path
-from typing import Dict, List, Tuple, Any, Union, Set, Sequence, Optional
+from typing import Dict, List, Tuple, Any, Union, Set, Sequence, Optional, Iterable, TypeVar
 
 import dataclasses
 import numpy
@@ -87,6 +87,21 @@ def val_to_color(val: float, color_map: CMap = def_color_map) -> str:
     return f"#{ncolor[0]:02X}{ncolor[1]:02X}{ncolor[2]:02X}"
 
 
+T = TypeVar('T')
+
+
+def partition(items: Iterable[T], size: int) -> Iterable[List[T]]:
+    curr = []
+    for idx, val in enumerate(items):
+        curr.append(val)
+        if (idx + 1) % size == 0:
+            yield curr
+            curr = []
+
+    if curr:
+        yield curr
+
+
 class Report:
     def __init__(self, cluster_name: str, output_file_name: str) -> None:
         self.cluster_name = cluster_name
@@ -108,6 +123,7 @@ class Report:
         self.style_links.append("bootstrap.min.css")
         self.style_links.append("report.css")
         self.script_links.append("report.js")
+        self.script_links.append("sorttable.js")
 
         links: List[str] = []
         static_files_dir = Path(__file__).absolute().parent.parent / "html_js_css"
@@ -186,7 +202,7 @@ class Report:
 
 
 def show_cluster_summary(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
-    t = html.HTMLTable(["Setting", "Value"], id="table-summary", extra_cls="table_c")
+    t = html.HTMLTable("table-summary", ["Setting", "Value"], sortable=False)
     t.add_cells("Collected at", cluster.report_collected_at_local)
     t.add_cells("Collected at GMT", cluster.report_collected_at_gmt)
     t.add_cells("Status/overrall", f"{ceph.status.status.name.upper()} / {ceph.status.overall_status.name.upper()}")
@@ -235,7 +251,7 @@ def show_osd_summary(ceph: CephInfo) -> Tuple[str, Any]:
     if ceph.settings is None:
         t = H.font("No live OSD found!", color="red")
     else:
-        t = html.HTMLTable(["Setting", "Value"], id="table-osd-summary", extra_cls="table_c")
+        t = html.HTMLTable("table-osd-summary", ["Setting", "Value"], sortable=False)
         t.add_cells("Count", str(osd_count))
         t.add_cells("Average PG per OSD", str(ceph.status.num_pgs // osd_count))
         t.add_cells("Cluster net", str(ceph.cluster_net))
@@ -260,7 +276,7 @@ def show_osd_summary(ceph: CephInfo) -> Tuple[str, Any]:
 
 
 def show_io_status(ceph: CephInfo) -> Tuple[str, Any]:
-    t = html.HTMLTable(["IO type", "Value"], id="table-io-summary", extra_cls="table_c")
+    t = html.HTMLTable("table-io-summary", ["IO type", "Value"], sortable=False)
     t.add_cells("Client IO Write MiBps", b2ssize(ceph.status.write_bytes_sec // 2 ** 20))
     t.add_cells("Client IO Write OPS", b2ssize(ceph.status.write_op_per_sec))
     t.add_cells("Client IO Read MiBps", b2ssize(ceph.status.read_bytes_sec // 2 ** 20))
@@ -297,8 +313,7 @@ def show_health_messages(ceph: CephInfo) -> Optional[Tuple[str, Any]]:
 
 
 def show_mons_info(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
-    table = html.HTMLTable(headers=["Name", "Health", "Role", "Disk free<br>B (%)"],
-                           id="table-mon-info", extra_cls="table_c")
+    table = html.HTMLTable("table-mon-info", ["Name", "Health", "Role", "Disk free<br>B (%)"])
 
     for mon in sorted(ceph.mons, key=lambda x: x.name):
         role = "Unknown"
@@ -327,12 +342,19 @@ def show_mons_info(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
 
             if root == "":
                 perc = "Unknown"
+                sort_by = "0"
             else:
                 perc = f"{b2ssize(available * 1024)} ({available * 100 // blocks})"
+                sort_by = str(available)
         else:
             perc = f"{b2ssize(mon.kb_avail * 1024)} ({mon.avail_percent})"
+            sort_by = str(mon.kb_avail)
 
-        table.add_row(map(str, [mon.name, health, role, perc]))
+        table.add_cell(mon.name)
+        table.add_cell(health)
+        table.add_cell(role)
+        table.add_cell(perc, sorttable_customkey=sort_by)
+        table.next_row()
 
     return "Monitors info:", table
 
@@ -344,7 +366,7 @@ def show_pg_state(ceph: CephInfo) -> Tuple[str, Any]:
         for state_name in pg_group['state_name'].split('+'):
             statuses[state_name] += pg_group["count"]
 
-    table = html.HTMLTable(headers=["Status", "Count", "%"], id="table-pgs", extra_cls="table_lr")
+    table = html.HTMLTable("table-pgs", ["Status", "Count", "%"])
     table.add_row(["any", str(ceph.status.num_pgs), "100.00"])
     for status, count in sorted(statuses.items()):
         table.add_row([status, str(count), f"{100.0 * count / ceph.status.num_pgs:.2f}"])
@@ -356,37 +378,35 @@ def show_osd_state(ceph: CephInfo) -> Tuple[str, Any]:
     statuses: Dict[OSDStatus, List[str]] = collections.defaultdict(list)
 
     for osd in ceph.osds:
-        statuses[osd.status].append(f"{osd.host.name}:{osd.id}")
+        statuses[osd.status].append(str(osd.id))
 
-    table = html.HTMLTable(headers=["Status", "Count", "ID's"],
-                           id="table-osds-state", extra_cls="table_c")
+    table = html.HTMLTable("table-osds-state", ["Status", "Count", "ID's"])
 
     for status, osds in sorted(statuses.items()):
         table.add_row([html_ok(status.name) if status == OSDStatus.up else html_fail(status.name),
                        len(osds),
-                    ("<br>".join(osds)
-                     if len(osds) < 5
-                     else "<br>".join(osds[:4]) + f"<br>and {len(osds) - 4} more")])
+                      "<br>".join(", ".join(grp) for grp in partition(osds, 10))])
 
     return "OSD's state:", table
 
 
 def show_pools_info(ceph: CephInfo) -> Tuple[str, Any]:
-    table = html.HTMLTable(headers=["Pool",
-                                    "Id",
-                                    "Size/Min_size",
-                                    "Obj",
-                                    "Bytes",
-                                    "Ruleset",
-                                    "PG(PGP)",
-                                    "PG<br>recommended",
-                                    "Bytes/PG",
-                                    "Objs/PG",
-                                    "PG per OSD<br>Dev %"],
-                            id="table-pools", extra_cls="table_lr")
+    table = html.HTMLTable("table-pools",
+                           ["Pool",
+                            "Id",
+                            "Size/Min_size",
+                            "Obj",
+                            "Bytes",
+                            "Ruleset",
+                            "PG(PGP)",
+                            "PG<br>recommended",
+                            "Bytes/PG",
+                            "Objs/PG",
+                            "PG per OSD<br>Dev %"],
+                            align=html.TableAlign.left_right)
 
-    table2 = html.HTMLTable(headers=["Pool", "Read B", "Write B", "Read ops", "Write ops", "Rd/PG", "Wr/PG"],
-                            id="table-pools-io", extra_cls="table_lr")
+    table2 = html.HTMLTable("table-pools-io", ["Pool", "Read B", "Write B", "Read ops", "Write ops", "Rd/PG", "Wr/PG"],
+                            align=html.TableAlign.left_right)
 
     # TODO: separate info and load (read/write/iops)
     # add iops per PG
@@ -395,29 +415,27 @@ def show_pools_info(ceph: CephInfo) -> Tuple[str, Any]:
     for _, pool in sorted(ceph.pools.items()):
         table.add_cell(pool.name)
         table.add_cell(str(pool.id))
-        table.add_cell(f"{pool.size} / {pool.min_size}")
-        table.add_cell(b2ssize_10(pool.df.num_objects), sorttable_customkey=str(pool.df.num_objects))
-        table.add_cell(b2ssize(pool.df.size_bytes), sorttable_customkey=str(pool.df.size_bytes))
+        table.add_cell(f"{pool.size} / {pool.min_size}", sorttable_customkey=str(pool.size))
+        table.add_cell_b2ssize_10(pool.df.num_objects)
+        table.add_cell_b2ssize(pool.df.size_bytes)
         table.add_cell(str(pool.crush_rule))
 
         if pool.pgp != pool.pg:
             table.add_cell(f"{pool.pg}({H.font(str(pool.pgp), color='red')})",
                            sorttable_customkey=str(pool.pg))
         else:
-            table.add_cell(str(pool.pg), sorttable_customkey=str(pool.pg))
+            table.add_cell(str(pool.pg))
 
         table.add_cell("-")
 
-        bytes_per_pg = pool.df.size_bytes // pool.pg
-        table.add_cell(b2ssize(bytes_per_pg), sorttable_customkey=str(bytes_per_pg))
-
-        obj_per_pg = pool.df.num_objects // pool.pg
-        table.add_cell(b2ssize_10(obj_per_pg), sorttable_customkey=str(obj_per_pg))
+        table.add_cell_b2ssize(pool.df.size_bytes // pool.pg)
+        table.add_cell_b2ssize_10(pool.df.num_objects // pool.pg)
 
         if ceph.sum_per_osd is None:
             table.add_cell('-')
         else:
             row = [osd_pg.get(pool.name, 0) for osd_pg in ceph.osd_pool_pg_2d.values()]
+            row = [i for i in row if i != 0]
             avg = float(sum(row)) / len(row)
             if len(row) < 2:
                 dev = None
@@ -437,23 +455,24 @@ def show_pools_info(ceph: CephInfo) -> Tuple[str, Any]:
         table.next_row()
 
         table2.add_cell(pool.name)
-        table2.add_cell(b2ssize(pool.df.read_bytes), sorttable_customkey=str(pool.df.read_bytes))
-        table2.add_cell(b2ssize(pool.df.write_bytes), sorttable_customkey=str(pool.df.write_bytes))
-        table2.add_cell(b2ssize_10(pool.df.read_ops), sorttable_customkey=str(pool.df.read_ops))
-        table2.add_cell(b2ssize_10(pool.df.write_ops), sorttable_customkey=str(pool.df.write_ops))
-        table2.add_cell(b2ssize_10(pool.df.read_ops // pool.pg), sorttable_customkey=str(pool.df.read_ops))
-        table2.add_cell(b2ssize_10(pool.df.write_ops // pool.pg), sorttable_customkey=str(pool.df.write_ops))
+        table2.add_cell_b2ssize(pool.df.read_bytes)
+        table2.add_cell_b2ssize(pool.df.write_bytes)
+        table2.add_cell_b2ssize_10(pool.df.read_ops)
+        table2.add_cell_b2ssize_10(pool.df.write_ops)
+        table2.add_cell_b2ssize_10(pool.df.read_ops // pool.pg)
+        table2.add_cell_b2ssize_10(pool.df.write_ops // pool.pg)
         table2.next_row()
 
     return "Pool's stats:", f"<center>{table}<br><br><br><H4>Load info</H4><br>{table2}</center>"
 
 
 def get_osd_load_table(cluster: Cluster, ceph: CephInfo, osds_info: OSDSInfo) -> str:
-    table = html.HTMLTable(["ID", "node", "PG's", "open<br>files", "ip<br>conn", "thr", "RSS", "VMM", "CPU<br>Used, s",
+    table = html.HTMLTable("table-osd-load",
+                           ["ID", "node", "PG's", "open<br>files", "ip<br>conn", "thr", "RSS", "VMM", "CPU<br>Used, s",
                             "Total<br>data", "Read<br>ops", "Read", "Write<br>ops", "Write"] +
-                            ["+Bps", "Read<br>IOPS", "Read<br>Bps", "Write<br>IOPS", "Write<br>Bps"]
-                                if ceph.pgs_second else [],
-                            id="table-osd-load", extra_cls="table_lr")
+                           (["+Bps", "Read<br>IOPS", "Read<br>Bps", "Write<br>IOPS", "Write<br>Bps"]
+                             if ceph.pgs_second else []),
+                           align=html.TableAlign.left_right)
 
     for osd in sorted(ceph.osds, key=lambda x: x.id):
         osd_info = osds_info.osds[osd.id]
@@ -472,31 +491,31 @@ def get_osd_load_table(cluster: Cluster, ceph: CephInfo, osds_info: OSDSInfo) ->
             table.add_cell(str(osd_info.run_info.fd_count))
             table.add_cell(str(osd_info.run_info.opened_socks))
             table.add_cell(str(osd_info.run_info.th_count))
-            table.add_cell(b2ssize(osd_info.run_info.vm_rss))
-            table.add_cell(b2ssize(osd_info.run_info.vm_size))
-            table.add_cell(b2ssize_10(osd_info.run_info.cpu_usage))
+            table.add_cell_b2ssize(osd_info.run_info.vm_rss)
+            table.add_cell_b2ssize(osd_info.run_info.vm_size)
+            table.add_cell_b2ssize_10(osd_info.run_info.cpu_usage)
         else:
             for i in range(6):
                 table.add_cell("")
 
         #  USER DATA SIZE & TOTAL IO
         if osd_info.pg_stats:
-            table.add_cell(b2ssize(osd_info.pg_stats.bytes))
-            table.add_cell(b2ssize_10(osd_info.pg_stats.reads))
-            table.add_cell(b2ssize(osd_info.pg_stats.read_b))
-            table.add_cell(b2ssize_10(osd_info.pg_stats.writes))
-            table.add_cell(b2ssize(osd_info.pg_stats.write_b))
+            table.add_cell_b2ssize(osd_info.pg_stats.bytes)
+            table.add_cell_b2ssize_10(osd_info.pg_stats.reads)
+            table.add_cell_b2ssize(osd_info.pg_stats.read_b)
+            table.add_cell_b2ssize_10(osd_info.pg_stats.writes)
+            table.add_cell_b2ssize(osd_info.pg_stats.write_b)
         else:
             for i in range(5):
                 table.add_cell("")
 
         # USER DATA SIZE DELTA
         if osd_info.d_stats:
-            table.add_cell(b2ssize(osd_info.d_stats.d_used_space))
-            table.add_cell(b2ssize_10(osd_info.d_stats.d_reads))
-            table.add_cell(b2ssize(osd_info.d_stats.d_read_b))
-            table.add_cell(b2ssize_10(osd_info.d_stats.d_writes))
-            table.add_cell(b2ssize(osd_info.d_stats.d_write_b))
+            table.add_cell_b2ssize(osd_info.d_stats.d_used_space)
+            table.add_cell_b2ssize_10(osd_info.d_stats.d_reads)
+            table.add_cell_b2ssize(osd_info.d_stats.d_read_b)
+            table.add_cell_b2ssize_10(osd_info.d_stats.d_writes)
+            table.add_cell_b2ssize(osd_info.d_stats.d_write_b)
         else:
             for i in range(5):
                 table.add_cell("")
@@ -527,7 +546,7 @@ def show_osd_info(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
     if osds_info.has_bs:
         headers.extend(["DB<br>colocated", "DB<br>dev type", "DB<br>size"])
 
-    table = html.HTMLTable(headers, id="table-osd-info", extra_cls="table_lr")
+    table = html.HTMLTable("table-osd-info", headers, align=html.TableAlign.left_right)
 
     for osd in sorted(ceph.osds, key=lambda x: x.id):
         osd_info = osds_info.osds[osd.id]
@@ -591,7 +610,7 @@ def show_osd_info(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
         #  USED & FREE SPACE
         color = "red" if osd.free_perc < 20 else ( "yellow" if osd.free_perc < 40 else "green")
         avail_perc_str = H.font(osd.free_perc, color=color)
-        table.add_cell(b2ssize(osd_info.total_space), sorttable_customkey=str(osd_info.total_space))
+        table.add_cell_b2ssize(osd_info.total_space)
         table.add_cell(avail_perc_str, sorttable_customkey=str(osd.free_perc))
 
         # JOURNAL/WAL/DB info
@@ -627,7 +646,8 @@ def show_osd_info(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
 
             if wd_info.wal_size is not None:
                 wal_size_s = b2ssize(wd_info.wal_size) + 'B'
-                table.add_cell(html_fail(wal_size_s) if wd_info.wal_size < 512 * 1024 * 1024 else wal_size_s)
+                table.add_cell(html_fail(wal_size_s) if wd_info.wal_size < 512 * 1024 * 1024 else wal_size_s,
+                               sorttable_customkey=str(wd_info.wal_size))
             else:
                 table.add_cell('-')
 
@@ -635,13 +655,15 @@ def show_osd_info(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
             db_drive_type_color_fn = html_ok if wd_info.wal_drive_type in ('ssd', 'nvme') else html_fail
             if wd_info.db_size is not None:
                 db_size_s = b2ssize(wd_info.db_size) + "B"
+                size_sort_by = str(wd_info.db_size)
                 db_size_s = html_fail(db_size_s) if wd_info.db_size < osd_info.data_part_size * 0.0095 else db_size_s
             else:
                 db_size_s = '-'
+                size_sort_by = ''
 
             table.add_cell(db_colocation)
             table.add_cell(db_drive_type_color_fn(wd_info.wal_drive_type))
-            table.add_cell(db_size_s)
+            table.add_cell(db_size_s, sorttable_customkey=size_sort_by)
 
         table.next_row()
 
@@ -781,7 +803,8 @@ def show_host_network_load_in_color(report: Report, cluster: Cluster, ceph: Ceph
 
     for io, name in [(send_net_io, "Send (KiBps/Pps)"), (recv_net_io, "Receive (KiBps/Pps)")]:
 
-        table = html.HTMLTable(["host", "cluster", "public"] + ["hw adapter"] * (max_net_count - ceph_net_count),
+        table = html.HTMLTable(headers=["host", "cluster", "public"] +
+                                       ["hw adapter"] * (max_net_count - ceph_net_count),
                                zebra=False)
 
         for host_name, net_loads in sorted(io.items()):
@@ -907,7 +930,7 @@ def show_host_io_load_in_color(report: Report, ceph: CephInfo):
 
         max_len = max(map(len, devs.values()))
 
-        table = html.HTMLTable(['host'] + ['load'] * max_len, zebra=False)
+        table = html.HTMLTable(headers=['host'] + ['load'] * max_len, zebra=False)
         for host_name, devices in sorted(devs.items()):
             # TODO: mark devices with data/journal/wal/db tags
             table.add_cell(host_name)
@@ -955,28 +978,29 @@ def hosts_pg_info(cluster: Cluster, ceph: CephInfo) -> str:
                   "Writes<br>ps",
                   "Write Bps",
                   ]
-    table = html.HTMLTable(headers=header_row, id="table-hosts-pg-info", extra_cls="table_cr")
+    table = html.HTMLTable("table-hosts-pg-info", header_row, align=html.TableAlign.center_right)
     hosts_pgs_info = get_nodes_pg_info(ceph)
     for host in sorted(cluster.hosts.values(), key=lambda x: x.name):
-        table.add_cell(host_link(host.name))
-        pgs_info = hosts_pgs_info[host.name]
-        table.add_cell(str(len(pgs_info.pgs)))
-        table.add_cell(b2ssize(pgs_info.io_stat.bytes))
-        table.add_cell(b2ssize_10(pgs_info.io_stat.reads))
-        table.add_cell(b2ssize(pgs_info.io_stat.read_b))
-        table.add_cell(b2ssize_10(pgs_info.io_stat.writes))
-        table.add_cell(b2ssize(pgs_info.io_stat.write_b))
+        if host.name in hosts_pgs_info:
+            table.add_cell(host_link(host.name))
+            pgs_info = hosts_pgs_info[host.name]
+            table.add_cell(str(len(pgs_info.pgs)))
+            table.add_cell_b2ssize(pgs_info.io_stat.bytes)
+            table.add_cell_b2ssize_10(pgs_info.io_stat.reads)
+            table.add_cell_b2ssize(pgs_info.io_stat.read_b)
+            table.add_cell_b2ssize_10(pgs_info.io_stat.writes)
+            table.add_cell_b2ssize(pgs_info.io_stat.write_b)
 
-        if pgs_info.dio_stat:
-            table.add_cell(b2ssize(pgs_info.dio_stat.d_used_space))
-            table.add_cell(b2ssize_10(pgs_info.dio_stat.d_reads))
-            table.add_cell(b2ssize(pgs_info.dio_stat.d_read_b))
-            table.add_cell(b2ssize_10(pgs_info.dio_stat.d_writes))
-            table.add_cell(b2ssize(pgs_info.dio_stat.d_write_b))
+            if pgs_info.dio_stat:
+                table.add_cell_b2ssize(pgs_info.dio_stat.d_used_space)
+                table.add_cell_b2ssize_10(pgs_info.dio_stat.d_reads)
+                table.add_cell_b2ssize(pgs_info.dio_stat.d_read_b)
+                table.add_cell_b2ssize_10(pgs_info.dio_stat.d_writes)
+                table.add_cell_b2ssize(pgs_info.dio_stat.d_write_b)
 
-        table.next_row()
+            table.next_row()
 
-    return f"<br><br><center>Hosts PG's info:<br>{table}</center>"
+    return f"<br><br><center><H4>Hosts PG's info:</H4><br><br>{table}</center>"
 
 
 def show_hosts_info(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
@@ -996,22 +1020,26 @@ def show_hosts_info(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
     else:
         hosts_pgs_info = None
 
-    table = html.HTMLTable(headers=headers, id="table-hosts-info", extra_cls="table_cr")
+    table = html.HTMLTable("table-hosts-info", headers, align=html.TableAlign.center_right)
     for host in sorted(cluster.hosts.values(), key=lambda x: x.name):
-        services = [f"osd-{osd.id}" for osd in ceph.osds if osd.host is host]
+
+        srv_strs = []
         for mon in ceph.mons:
-            if mon.host is host:
-                services.append(f"mon({host.name})")
+            if mon.host == host.name:
+                srv_strs.append(f"Mon: {host.name}")
 
         table.add_cell(host_link(host.name))
-        srv_strs = []
-        steps = len(services) // 3 + (1 if len(services) % 3 else 0)
-        for idx in range(steps):
-            srv_strs.append(",".join(services[idx * 3: idx * 3 + 3]))
+        osd_services = [str(osd.id) for osd in ceph.osds if osd.host is host]
+        if osd_services:
+            srv_strs.append("OSD's: " + ", ".join(osd_services[:3]))
+            for ids in partition(osd_services[3:], 4):
+                srv_strs.append(", ".join(ids))
+
         table.add_cell("<br>".join(srv_strs))
 
         if host.hw_info is None:
-            map(table.add_cell, ['-'] * (len(headers) - 2))
+            for i in ['-'] * (len(headers) - 2):
+                table.add_cell(i)
             table.next_row()
             continue
 
@@ -1020,13 +1048,13 @@ def show_hosts_info(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
         else:
             table.add_cell(str(sum(inf.cores for inf in host.hw_info.cpu_info)))
 
-        table.add_cell(b2ssize(host.mem_total), sorttable_customkey=str(host.mem_total))
-        table.add_cell(b2ssize(host.mem_free), sorttable_customkey=str(host.mem_free))
+        table.add_cell_b2ssize(host.mem_total)
+        table.add_cell_b2ssize(host.mem_free)
 
-        table.add_cell(b2ssize(host.swap_total - host.swap_free),
-                       sorttable_customkey=str(host.swap_total - host.swap_free))
+        table.add_cell_b2ssize(host.swap_total - host.swap_free)
         table.add_cell(str(host.load_5m))
-        table.add_cell(f"{host.open_tcp_sock}/{host.open_udp_sock}")
+        table.add_cell(f"{host.open_tcp_sock}/{host.open_udp_sock}",
+                       sorttable_customkey=str(host.open_tcp_sock + host.open_udp_sock))
 
         all_ip = flatten(adapter.ips for adapter in host.net_adapters.values())
         table.add_cell("<br>".join(str(addr.ip) for addr in all_ip if not addr.ip.is_loopback))
@@ -1063,8 +1091,7 @@ def show_osd_pool_PG_distribution(ceph: CephInfo) -> Tuple[str, Any]:
                 name = ".".join(parts[:best_idx]) + '.' + '<br>' + ".".join(parts[best_idx:])
         name_headers.append(name)
 
-    table = html.HTMLTable(headers=["OSD/pool"] + name_headers + ['sum'],
-                           id="table-pg-per-osd", extra_cls="table_c")
+    table = html.HTMLTable("table-pg-per-osd", ["OSD/pool"] + name_headers + ['sum'])
 
     for osd_id, row in sorted(ceph.osd_pool_pg_2d.items()):
         data = [osd_id] + [row.get(pool_name, 0) for pool_name in pools] + [ceph.sum_per_osd[osd_id]]
@@ -1085,7 +1112,8 @@ def host_info(host: Host) -> str:
         doc.br
         doc.center.H4("Interfaces")
         doc.br
-        table = html.HTMLTable(["Name", "Is PHY", "Duplex", "MTU", "Speed", "IP's"], extra_cls="table_c hostinfo-net")
+        table = html.HTMLTable(headers=["Name", "Is PHY", "Duplex", "MTU", "Speed", "IP's"],
+                               extra_cls=["hostinfo-net"])
         for name, adapter in sorted(host.net_adapters.items()):
             table.add_row(
                 [name,
@@ -1098,9 +1126,9 @@ def host_info(host: Host) -> str:
         doc.br
         doc.center.H4("HW disks")
         doc.br
-        table = html.HTMLTable(["Name", "Type", "Size", "Rota", "Scheduler", "Model info", "RQ-size", "Phy Sec",
-                                "Min IO"],
-                                extra_cls="table_c hostinfo-disks")
+        table = html.HTMLTable(headers=["Name", "Type", "Size", "Rota", "Scheduler",
+                                        "Model info", "RQ-size", "Phy Sec", "Min IO"],
+                                extra_cls=["hostinfo-disks"])
 
         mib_and_mb = lambda x: f"{b2ssize(x)}B / {b2ssize_10(x)}B"
 
@@ -1122,9 +1150,8 @@ def host_info(host: Host) -> str:
         doc.br
         doc.center.H4("Mountable")
         doc.br
-        table = html.HTMLTable(["Name", "Size", "Mountpoint", "Fs", "Free space", "Label"],
-                               extra_cls="table_c hostinfo-mountable",
-                               table_attrs={'class': 'table-bordered zebra-table'})
+        table = html.HTMLTable(headers=["Name", "Size", "Mountpoint", "Fs", "Free space", "Label"],
+                               extra_cls=["hostinfo-mountable"], sortable=False)
 
         def run_over_children(obj, level: int):
             table.add_row([f'<div class="disk-children-{level}">{obj.name}</div>',
@@ -1166,7 +1193,6 @@ def parse_args(argv):
     p.add_argument("-n", "--no-plots", help="Don't draw any plots, generate tables only", action="store_true")
     p.add_argument("-N", "--name", help="Report name", default="Nemo")
     p.add_argument("-o", '--out', help="report output folder", required=True)
-    p.add_argument("-s", "--simple", help="Generate simple report", action="store_true")
     p.add_argument("-w", '--overwrite', action='store_true',  help="Overwrite result folder data")
     p.add_argument("-p", "--pretty-html", help="Prettify index.html", action="store_true")
     p.add_argument("data_folder", help="Folder with data, or .tar.gz archive")
@@ -1227,12 +1253,6 @@ def main(argv: List[str]):
         logger.info("Done")
 
         report = Report(opts.name, "index.html")
-
-        if opts.simple:
-            dct = html.HTMLTable.def_table_attrs
-            dct['class'] = dct['class'].replace("sortable", "").replace("zebra-table", "")
-        else:
-            report.script_links.append("http://www.kryogenix.org/code/browser/sorttable/sorttable.js")
 
         cluster_reporters = [
             show_cluster_summary,
