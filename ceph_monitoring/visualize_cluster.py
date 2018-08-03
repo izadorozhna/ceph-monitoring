@@ -12,6 +12,7 @@ import cProfile
 import argparse
 import subprocess
 import collections
+import urllib.request
 import logging.config
 from pathlib import Path
 from typing import Dict, List, Tuple, Any, Union, Set, Sequence, Optional, Iterable, TypeVar
@@ -46,11 +47,11 @@ def html_fail(text: str) -> html.TagProxy:
     return H.font(text, color="red")
 
 
-CMap = List[Tuple[float, Tuple[float, float, float]]]
+CMap = Sequence[Tuple[float, Tuple[float, float, float]]]
 
 
 # replace with hvs mapping
-def_color_map: CMap = [
+def_color_map: CMap = (
     (0.0, (0.500, 0.000, 1.000)),
     (0.1, (0.304, 0.303, 0.988)),
     (0.2, (0.100, 0.588, 0.951)),
@@ -62,7 +63,7 @@ def_color_map: CMap = [
     (0.8, (1.000, 0.588, 0.309)),
     (0.9, (1.000, 0.303, 0.153)),
     (1.0, (1.000, 0.000, 0.000))
-]
+)
 
 
 def val_to_color(val: float, color_map: CMap = def_color_map) -> str:
@@ -118,7 +119,8 @@ class Report:
             menu_item = header
         self.divs.append((header, menu_item, str(block_obj)))
 
-    def save_to(self, output_dir: Path, pretty_html: bool = False):
+    def save_to(self, output_dir: Path, pretty_html: bool = False,
+                embed: bool = False):
 
         self.style_links.append("bootstrap.min.css")
         self.style_links.append("report.css")
@@ -128,15 +130,36 @@ class Report:
         links: List[str] = []
         static_files_dir = Path(__file__).absolute().parent.parent / "html_js_css"
 
+        def get_path(link: str) -> Tuple[bool, str]:
+            if link.startswith("http://") or link.startswith("https://"):
+                return False, link
+            fname = link.rsplit('/', 1)[1]
+            return True, static_files_dir / fname
+
         for link in self.style_links + self.script_links:
-            fname = link.rsplit('/', 1)[-1]
-            src_path = static_files_dir / fname
-            dst_path = output_dir / fname
-            if src_path.exists():
-                if not dst_path.is_dir():
-                    shutil.copyfile(src_path, dst_path)
-                link = fname
-            links.append(link)
+            local, fname = get_path(link)
+            data = None
+
+            if local:
+                if embed:
+                    data = open(fname).read()
+                else:
+                    dst_path = output_dir / fname
+                    if not dst_path.is_dir():
+                        shutil.copyfile(fname, dst_path)
+            else:
+                try:
+                    data = urllib.request.urlopen(fname, timeout=10)
+                except (TimeoutError, urllib.request.URLError):
+                    logger.warning(f"Can't retrive {fname}")
+
+            if data is not None:
+                if link in self.style_links:
+                    self.style.append(data)
+                else:
+                    self.scripts.append(data)
+            else:
+                links.append(fname)
 
         css_links = links[:len(self.style_links)]
         js_links = links[len(self.style_links):]
@@ -1211,7 +1234,7 @@ def parse_args(argv):
     p.add_argument("-p", "--pretty-html", help="Prettify index.html", action="store_true")
     p.add_argument("data_folder", help="Folder with data, or .tar.gz archive")
     p.add_argument("--profile", help="Profile report creation", action="store_true")
-
+    p.add_argument("-e", "--embed", action='store_true', help="Embed js/css files into report to make it stand-alone")
     return p.parse_args(argv[1:])
 
 
@@ -1307,7 +1330,7 @@ def main(argv: List[str]):
         for _, host in sorted(cluster.hosts.items()):
             report.add_block(None, host_info(host))
 
-        report.save_to(Path(opts.out), opts.pretty_html)
+        report.save_to(Path(opts.out), opts.pretty_html, embed=opts.embed)
         logger.info("Report successfully stored to %r", index_path)
     finally:
         if remove_folder:

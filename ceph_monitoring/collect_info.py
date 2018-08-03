@@ -66,7 +66,7 @@ class INode(metaclass=abc.ABCMeta):
         return ExecResult(code, raw, raw.decode(encoding))
 
     @abc.abstractmethod
-    def file_exists(self, fname: str) -> bool:
+    def exists(self, fname: str) -> bool:
         pass
 
     @abc.abstractmethod
@@ -132,7 +132,7 @@ class Node(INode):
             info += " osds=[" + ",".join(str(osd.id) for osd in self.osds) + "]"
         return info
 
-    def file_exists(self, fname: str) -> bool:
+    def exists(self, fname: str) -> bool:
         return self.rpc.fs.file_exists(fname)
 
     def listdir(self, path: str) -> Iterable[str]:
@@ -152,7 +152,7 @@ class Local(INode):
     def get_file(self, name: str, compress: bool = False) -> bytes:
         return open(name, 'rb').read()
 
-    def file_exists(self, fname: str) -> bool:
+    def exists(self, fname: str) -> bool:
         return os.path.exists(fname)
 
     def listdir(self, path: str) -> Iterable[str]:
@@ -785,8 +785,9 @@ class NodeCollector(Collector):
                     logger.warning("Failed to run %r on node %s: %s", cmd, self.node, exc)
 
             # collect_bonds_info
-            for fname in self.node.listdir("/proc/net/bonding"):
-                self.save_file("bond_" + fname, "/proc/net/bonding/" + fname)
+            if self.node.exists("/proc/net/bonding"):
+                for fname in self.node.listdir("/proc/net/bonding"):
+                    self.save_file("bond_" + fname, "/proc/net/bonding/" + fname)
 
             for fpath in self.node_files:
                 try:
@@ -804,7 +805,7 @@ class NodeCollector(Collector):
             self.collect_block_devs()
 
             try:
-                if self.node.file_exists("/etc/debian_version"):
+                if self.node.exists("/etc/debian_version"):
                     self.save_output("packages_deb", "dpkg -l", frmt="txt")
                 else:
                     self.save_output("packages_rpm", "yum list installed", frmt="txt")
