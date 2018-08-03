@@ -230,6 +230,12 @@ class NetworkAdapter:
 
 
 @dataclass
+class NetworkBond:
+    name: str
+    sources: List[str]
+
+
+@dataclass
 class DFInfo:
     path: str
     name: str
@@ -300,6 +306,7 @@ class Host:
     storage_devs: Dict[str, Mountable]
     hw_info: Optional[HWInfo]
     df_info: Dict[str, DFInfo]
+    bonds: Dict[str, NetworkBond]
 
     uptime: float
     perf_monitoring: Any

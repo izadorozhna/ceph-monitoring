@@ -34,6 +34,11 @@ td { padding: 6px; }
 .table_cr td {text-align: right;}
 .table_cr tr td:first-child {text-align: center;}
 
+.table_lc th {text-align: center;}
+.table_lc td {text-align: center;}
+.table_lc tr td:first-child {text-align: left;}
+
+
 
 .menu-ceph {
     width: 15%;
@@ -100,7 +105,7 @@ a.link:visited {color: #551A8B;}
 a.link:hover {cursor: pointer; color: #a1a1ff;}
 
 .hostinfo-net {width: 40%;}
-.hostinfo-disks {width: 60%;}
+.hostinfo-disks {width: 80%;}
 .hostinfo-mountable {width: 80%;}
 .hostinfo-mountable tr td:first-child {text-align: left;}
 

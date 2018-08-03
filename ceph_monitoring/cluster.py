@@ -261,6 +261,18 @@ def parse_adapter_info(interface: Dict[str, Any]) -> Tuple[Optional[int], Option
     return speed, speed_s, duplex
 
 
+def load_bonds(stor_node: AttredStorage, jstor_node: AttredStorage) -> Dict[str, NetworkBond]:
+    if 'bonds.json' not in jstor_node:
+        return {}
+
+    res = {}
+    slave_rr = re.compile(r"Slave Interface: (?P<name>[^\s]+)")
+    for name, file in jstor_node.bonds.items():
+        slaves = [slave_info.group('name') for slave_info in slave_rr.finditer(stor_node[file])]
+        res[name] = NetworkBond(name, slaves)
+    return res
+
+
 def load_interfaces(dtime: Optional[float],
                     hostname: str,
                     perf_monitoring: Any,
@@ -704,12 +716,14 @@ class Loader:
                 dtime = None
 
             net_adapters = load_interfaces(dtime, hostname, perf_monitoring, jstor_node, stor_node)
+            bonds = load_bonds(stor_node, jstor_node)
 
             info = parse_meminfo(stor_node.meminfo)
             host = Host(name=hostname,
                         stor_id=hostname,
                         net_adapters=net_adapters,
                         disks=disks,
+                        bonds=bonds,
                         storage_devs=storage_devs,
                         uptime=float(stor_node.uptime.split()[0]),
                         perf_monitoring=perf_monitoring,

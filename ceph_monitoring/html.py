@@ -106,6 +106,7 @@ class TableAlign(Enum):
     center = 0
     left_right = 1
     center_right = 2
+    left_center = 3
 
 
 class HTMLTable:
@@ -140,6 +141,8 @@ class HTMLTable:
             classes.add('table_lr')
         elif align == TableAlign.center_right:
             classes.add('table_cr')
+        elif align == TableAlign.left_center:
+            classes.add('table_lc')
         else:
             raise ValueError(f"Unknown align type: {align}")
 

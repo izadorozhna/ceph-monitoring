@@ -15,6 +15,7 @@ import collections
 import urllib.request
 import logging.config
 from pathlib import Path
+from ipaddress import IPv4Network
 from typing import Dict, List, Tuple, Any, Union, Set, Sequence, Optional, Iterable, TypeVar
 
 import dataclasses
@@ -455,13 +456,17 @@ def show_pools_info(ceph: CephInfo) -> Tuple[str, Any]:
         if ceph.sum_per_osd is None:
             table.add_cell('-')
         else:
-            row = [osd_pg.get(pool.name, 0) for osd_pg in ceph.osd_pool_pg_2d.values()]
-            row = [i for i in row if i != 0]
-            avg = float(sum(row)) / len(row)
-            if len(row) < 2:
+            osds = list(ceph.crush.iter_osds_for_rule(pool.crush_rule))
+            osds_pgs = []
+
+            for osd in osds:
+                osds_pgs.append(ceph.osd_pool_pg_2d[osd.id].get(pool.name, 0))
+
+            avg = float(sum(osds_pgs)) / len(osds_pgs)
+            if len(osds_pgs) < 2:
                 dev = None
             else:
-                dev = (sum((i - avg) ** 2.0 for i in row) / (len(row) - 1)) ** 0.5
+                dev = (sum((i - avg) ** 2.0 for i in osds_pgs) / (len(osds_pgs) - 1)) ** 0.5
 
             if avg < 1E-5:
                 table.add_cell('--')
@@ -1088,7 +1093,7 @@ def show_hosts_info(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
     return "Host's info:", str(table) + hosts_pg_info(cluster, ceph)
 
 
-def show_osd_pool_PG_distribution(ceph: CephInfo) -> Tuple[str, Any]:
+def show_osd_pool_pg_distribution(ceph: CephInfo) -> Tuple[str, Any]:
     if ceph.sum_per_osd is None:
         return "PG copy per OSD: No pg dump data. Probably too many PG", ""
 
@@ -1126,32 +1131,93 @@ def show_osd_pool_PG_distribution(ceph: CephInfo) -> Tuple[str, Any]:
     return "PG copy per OSD:", table
 
 
-def host_info(host: Host) -> str:
+def host_info(host: Host, ceph: CephInfo) -> str:
+    cluster_networks = [(ceph.public_net, 'ceph-public'), (ceph.cluster_net, 'ceph-cluster')]
+
     doc = html.Doc()
     with doc.div(id=f"host-{host.name}", _class="data-ceph"):
         doc.center.H3(host.name)
         doc.br
         doc.center.H4("Interfaces")
         doc.br
-        table = html.HTMLTable(headers=["Name", "Is PHY", "Duplex", "MTU", "Speed", "IP's"],
-                               extra_cls=["hostinfo-net"])
-        for name, adapter in sorted(host.net_adapters.items()):
+
+        table = html.HTMLTable(headers=["Name", "Type", "Duplex", "MTU", "Speed", "IP's", "Roles"],
+                               extra_cls=["hostinfo-net"],
+                               sortable=False,
+                               align=html.TableAlign.left_center)
+
+        def add_adapter_line(adapter, name):
+            tp = "phy" if adapter.is_phy else ('bond' if adapter.dev in host.bonds else 'virt')
+            roles = [role for net, role in cluster_networks if any((ip.ip in net) for ip in adapter.ips)]
             table.add_row(
                 [name,
-                 str(adapter.is_phy),
+                 tp,
                  "" if adapter.duplex is None else str(adapter.duplex),
                  "" if adapter.mtu is None else str(adapter.mtu),
                  "" if adapter.speed is None else str(adapter.speed),
-                 "<br>".join(f"{ip.ip} / {ip.net.prefixlen}" for ip in adapter.ips)])
+                 "<br>".join(f"{ip.ip} / {ip.net.prefixlen}" for ip in adapter.ips),
+                 "<br>".join(roles)])
+
+        all_ifaces = set(host.net_adapters)
+
+        # first show bonds
+        for _, bond in sorted(host.bonds.items()):
+            assert bond.name in all_ifaces
+            all_ifaces.remove(bond.name)
+            adapter = host.net_adapters[bond.name]
+            add_adapter_line(adapter, adapter.dev)
+
+            for src in bond.sources:
+                assert src in all_ifaces
+                all_ifaces.remove(src)
+                add_adapter_line(host.net_adapters[src],
+                                 f'<div class="disk-children-1">+{src}</dev>')
+
+            for adapter_name in list(all_ifaces):
+                if adapter_name.startswith(bond.name + '.'):
+                    all_ifaces.remove(adapter_name)
+                    add_adapter_line(host.net_adapters[adapter_name],
+                                     f'<div class="disk-children-2">->{adapter_name}</dev>')
+
+            table.add_row(["-------"] * len(table.headers))
+
+        for name in sorted(all_ifaces):
+            if name != 'lo':
+                add_adapter_line(host.net_adapters[name], name)
+
         doc.center(str(table))
         doc.br
         doc.center.H4("HW disks")
         doc.br
-        table = html.HTMLTable(headers=["Name", "Type", "Size", "Rota", "Scheduler",
-                                        "Model info", "RQ-size", "Phy Sec", "Min IO"],
-                                extra_cls=["hostinfo-disks"])
 
         mib_and_mb = lambda x: f"{b2ssize(x)}B / {b2ssize_10(x)}B"
+
+        stor_roles = collections.defaultdict(lambda: collections.defaultdict(list))
+
+        for osd in ceph.osds:
+            if osd.host is host:
+                stor_roles[osd.storage_info.data_partition]['data'].append(osd.id)
+                stor_roles[osd.storage_info.data_dev]['data'].append(osd.id)
+                if osd.storage_type == OSDStoreType.filestore:
+                    assert isinstance(osd.storage_info, FileStoreInfo)
+                    stor_roles[osd.storage_info.journal_partition]['journal'].append(osd.id)
+                    stor_roles[osd.storage_info.journal_dev]['journal'].append(osd.id)
+                else:
+                    assert isinstance(osd.storage_info, BlueStoreInfo)
+                    stor_roles[osd.storage_info.db_partition]['db'].append(osd.id)
+                    stor_roles[osd.storage_info.db_dev]['db'].append(osd.id)
+                    stor_roles[osd.storage_info.wal_partition]['wal'].append(osd.id)
+                    stor_roles[osd.storage_info.wal_dev]['wal'].append(osd.id)
+
+        order = ['data', 'journal', 'db', 'wal']
+
+        def html_roles(name: str) -> str:
+            return "<br>".join(name + ": " + ", ".join(map(str, sorted(ids)))
+                               for name, ids in sorted(stor_roles[name].items(), key=lambda x: order.index(x[0])))
+
+        table = html.HTMLTable(headers=["Name", "Type", "Size", "Roles", "Rota", "Scheduler",
+                                        "Model info", "RQ-size", "Phy Sec", "Min IO"],
+                                extra_cls=["hostinfo-disks"])
 
         for _, disk in sorted(host.disks.items()):
 
@@ -1174,6 +1240,7 @@ def host_info(host: Host) -> str:
                 info = ""
 
             table.add_row([disk.name, disk.tp, mib_and_mb(disk.size),
+                           html_roles(disk.path),
                            str(disk.rota),
                            "" if disk.scheduler is None else str(disk.scheduler),
                            info,
@@ -1185,13 +1252,14 @@ def host_info(host: Host) -> str:
         doc.br
         doc.center.H4("Mountable")
         doc.br
-        table = html.HTMLTable(headers=["Name", "Size", "Mountpoint", "Fs", "Free space", "Label"],
+        table = html.HTMLTable(headers=["Name", "Size", "Mountpoint", "Ceph role", "Fs", "Free space", "Label"],
                                extra_cls=["hostinfo-mountable"], sortable=False)
 
         def run_over_children(obj, level: int):
             table.add_row([f'<div class="disk-children-{level}">{obj.name}</div>',
                            mib_and_mb(obj.size),
                            obj.mountpoint if obj.mountpoint else '',
+                           "" if level == 0 else html_roles(obj.path),
                            obj.fs if obj.fs else '',
                            mib_and_mb(obj.free_space) if obj.free_space is not None else '',
                            "" if obj.label is None else obj.label])
@@ -1303,7 +1371,7 @@ def main(argv: List[str]):
             show_osd_perf_info,
             show_pools_info,
             show_pg_state,
-            show_osd_pool_PG_distribution,
+            show_osd_pool_pg_distribution,
             show_host_io_load_in_color,
             show_host_network_load_in_color,
             show_osd_used_space_histo,
@@ -1330,7 +1398,7 @@ def main(argv: List[str]):
                 report.add_block(*new_block)
 
         for _, host in sorted(cluster.hosts.items()):
-            report.add_block(None, host_info(host))
+            report.add_block(None, host_info(host, ceph))
 
         report.save_to(Path(opts.out), opts.pretty_html, embed=opts.embed)
         logger.info("Report successfully stored to %r", index_path)

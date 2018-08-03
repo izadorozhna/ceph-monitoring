@@ -785,9 +785,12 @@ class NodeCollector(Collector):
                     logger.warning("Failed to run %r on node %s: %s", cmd, self.node, exc)
 
             # collect_bonds_info
+            bondmap = {}
             if self.node.exists("/proc/net/bonding"):
                 for fname in self.node.listdir("/proc/net/bonding"):
                     self.save_file("bond_" + fname, "/proc/net/bonding/" + fname)
+                    bondmap[fname] = "bond_" + fname
+            self.save("bonds", 'json', 0, json.dumps(bondmap))
 
             for fpath in self.node_files:
                 try:
@@ -871,11 +874,11 @@ class NodeCollector(Collector):
 
             if is_phy:
                 code, _, eth_out = self.node.run("ethtool " + dev)
-                if code:
+                if code == 0:
                     interface['ethtool'] = eth_out
 
                 code, _, iwconfig_out = self.node.run("iwconfig " + dev)
-                if code:
+                if code == 0:
                     interface['iwconfig'] = iwconfig_out
 
         self.save('interfaces', 'json', 0, json.dumps(interfaces))
