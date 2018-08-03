@@ -29,7 +29,7 @@ from .cluster_classes import (CephInfo, Cluster, OSDStoreType, Host, FileStoreIn
                               OSDSInfo)
 from .cluster import NO_VALUE, load_all, get_all_versions, get_nodes_pg_info
 
-from .plot_data import (per_info_required, show_osd_used_space_histo,
+from .plot_data import (per_info_required, plot, show_osd_used_space_histo,
                         show_osd_load, show_osd_lat_heatmaps, show_osd_ops_boxplot, get_histo_img, get_kde_img)
 
 H = html.rtag
@@ -125,7 +125,7 @@ class Report:
         self.style_links.append("bootstrap.min.css")
         self.style_links.append("report.css")
         self.script_links.append("report.js")
-        self.script_links.append("sorttable.js")
+        self.script_links.append("sorttable_utf.js")
 
         links: List[str] = []
         static_files_dir = Path(__file__).absolute().parent.parent / "html_js_css"
@@ -133,7 +133,7 @@ class Report:
         def get_path(link: str) -> Tuple[bool, str]:
             if link.startswith("http://") or link.startswith("https://"):
                 return False, link
-            fname = link.rsplit('/', 1)[1]
+            fname = link.rsplit('/', 1)[-1]
             return True, static_files_dir / fname
 
         for link in self.style_links + self.script_links:
@@ -142,11 +142,9 @@ class Report:
 
             if local:
                 if embed:
-                    data = open(fname).read()
+                    data = open(fname, 'rb').read().decode("utf8")
                 else:
-                    dst_path = output_dir / fname
-                    if not dst_path.is_dir():
-                        shutil.copyfile(fname, dst_path)
+                    shutil.copyfile(fname, output_dir / Path(fname).name)
             else:
                 try:
                     data = urllib.request.urlopen(fname, timeout=10)
@@ -159,7 +157,7 @@ class Report:
                 else:
                     self.scripts.append(data)
             else:
-                links.append(fname)
+                links.append(link)
 
         css_links = links[:len(self.style_links)]
         js_links = links[len(self.style_links):]
@@ -1208,6 +1206,7 @@ def host_info(host: Host) -> str:
     return str(doc)
 
 
+@plot
 def show_osd_pg_histo(ceph: CephInfo) -> Optional[Tuple[str, Any]]:
     vals = [osd.pg_count for osd in ceph.osds if osd.pg_count is not None]
     if vals:
@@ -1215,6 +1214,7 @@ def show_osd_pg_histo(ceph: CephInfo) -> Optional[Tuple[str, Any]]:
     return None
 
 
+@plot
 def show_pg_size_kde(ceph: CephInfo) -> Optional[Tuple[str, Any]]:
     if ceph.pgs:
         vals = [pg.stat_sum.num_bytes for pg in ceph.pgs.pgs.values()]
@@ -1318,6 +1318,8 @@ def main(argv: List[str]):
 
         for reporter in cluster_reporters:
             if getattr(reporter, "perf_info_required", False) and not cluster.has_performance_data:
+                continue
+            if getattr(reporter, 'plot', False) and opts.no_plots:
                 continue
             sig = inspect.signature(reporter)
             curr_params = {name: params[name] for name in sig.parameters}

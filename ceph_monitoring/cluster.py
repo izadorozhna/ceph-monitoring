@@ -89,17 +89,25 @@ def parse_lsblkjs(data: List[Dict[str, Any]], hostname: str) -> Iterable[Disk]:
                            hostname, name, disk_js['type'])
             continue
 
+        tp = disk_js["tran"]
+        if tp is None:
+            if disk_js['subsystems'] == 'block:scsi:pci':
+                tp = 'sas'
+            elif disk_js['subsystems'] == 'block:nvme:pci':
+                tp = 'nvme'
+
         stor_tp = {
             ('sata', '1'): 'hdd',
             ('sata', '0'): 'ssd',
             ('nvme', '0'): 'nvme',
             ('sas',  '1'): 'sas hdd',
             ('sas',  '0'): 'ssd',
-        }.get((disk_js["tran"], disk_js["rota"]))
+        }.get((tp, disk_js["rota"]))
 
         if stor_tp is None:
-            logger.warning("Can't detect disk type for %r in node %r. tran=%r and rota=%r. Treating it as hdd",
-                           name, hostname, disk_js['tran'], disk_js['rota'])
+            logger.warning("Can't detect disk type for %r in node %r. tran=%r, rota=%r, subsystem=%r." +
+                           "Treating it as hdd",
+                           name, hostname, disk_js['tran'], disk_js['rota'], disk_js['subsystems'])
             stor_tp = 'hdd'
 
         dsk = Disk(name=name,
@@ -539,7 +547,8 @@ def load_ceph_status(storage: TypedStorage, is_luminous: bool) -> CephStatus:
     mstorage = storage.json.master
     pgmap = mstorage.status['pgmap']
     health = mstorage.status['health']
-    return CephStatus(overall_status=CephStatusCode.from_str(health['overall_status']),
+    overall_status = health.get('overall_status', health['status'])
+    return CephStatus(overall_status=CephStatusCode.from_str(overall_status),
                       status=CephStatusCode.from_str(health['status']),
                       health_summary=health['checks' if is_luminous else 'summary'],
                       num_pgs=pgmap['num_pgs'],
@@ -721,7 +730,7 @@ class Loader:
                     ip_s = str(ip.ip)
                     if not ip_s.startswith('127.'):
                         if ip_s in ip2host:
-                            logger.error("Ip %s beelong to both %s and %s. Skipping new host",
+                            logger.error("Ip %s belong to both %s and %s. Skipping new host",
                                          ip_s, hostname, ip2host[ip_s].name)
                             continue
                         ip2host[ip_s] = host

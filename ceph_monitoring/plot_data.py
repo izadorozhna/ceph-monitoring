@@ -5,12 +5,16 @@ from typing import Callable, Any, AnyStr, Union, List
 from typing_extensions import Protocol
 
 import numpy
+
+import matplotlib
+matplotlib.use('Agg')
+from matplotlib import pyplot
+
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
     import seaborn
 
 import networkx
-from matplotlib import pyplot
 
 from cephlib.plot import plot_histo, hmap_from_2d, plot_hmap_with_histo
 
@@ -29,6 +33,11 @@ logger = logging.getLogger('cephlib.report')
 
 def per_info_required(func):
     func.perf_info_required = True
+    return func
+
+
+def plot(func):
+    func.plot = True
     return func
 
 
@@ -63,6 +72,7 @@ def plot_img(func: Callable, *args, **kwargs) -> Any:
     return get_img(fig)
 
 
+@plot
 def show_osd_used_space_histo(report: ReportProto, ceph: CephInfo):
     min_osd: int = 3
     vals = [(100 - osd.free_perc) for osd in ceph.osds if osd.free_perc is not None]
@@ -81,6 +91,7 @@ def get_kde_img(vals: numpy.ndarray) -> str:
     return get_img(fig)
 
 
+@plot
 @per_info_required
 def show_osd_load(report: ReportProto, cluster: Cluster, ceph: CephInfo):
     max_xbins: int = 25
@@ -120,6 +131,7 @@ def show_osd_load(report: ReportProto, cluster: Cluster, ceph: CephInfo):
     #     report.add_block(6, "OSD journal QD", img)
 
 
+@plot
 @per_info_required
 def show_osd_lat_heatmaps(report: ReportProto, ceph: CephInfo):
     max_xbins: int = 25
@@ -144,6 +156,7 @@ def show_osd_lat_heatmaps(report: ReportProto, ceph: CephInfo):
             report.add_block(header, img)
 
 
+@plot
 @per_info_required
 def show_osd_ops_boxplot(report: ReportProto, ceph: CephInfo):
     logger.info("Loading ceph historic ops data")
