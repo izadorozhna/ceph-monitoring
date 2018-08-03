@@ -15,7 +15,6 @@ import collections
 import urllib.request
 import logging.config
 from pathlib import Path
-from ipaddress import IPv4Network
 from typing import Dict, List, Tuple, Any, Union, Set, Sequence, Optional, Iterable, TypeVar
 
 import dataclasses
@@ -27,7 +26,7 @@ from cephlib.common import flatten
 
 from . import html
 from .cluster_classes import (CephInfo, Cluster, OSDStoreType, Host, FileStoreInfo, BlueStoreInfo, DiskLoad, OSDStatus,
-                              OSDSInfo)
+                              OSDSInfo, DiskType)
 from .cluster import NO_VALUE, load_all, get_all_versions, get_nodes_pg_info
 
 from .plot_data import (per_info_required, plot, show_osd_used_space_histo,
@@ -263,6 +262,180 @@ def show_cluster_summary(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
     return "Status:", t
 
 
+# TODO: need to move this into checks.py module
+def show_issues_table(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
+    t = html.HTMLTable("table-issues", ["Check", "Result", "Comment"], sortable=False)
+
+    failed = html_fail("Failed")
+    passed = html_ok("Passed")
+
+    # ---------------------------------  No scrub errors ---------------------------------------------------------------
+
+    if ceph.osds_info:
+        total_scrub_err = 0
+        for osd_info in ceph.osds_info.osds.values():
+            total_scrub_err += osd_info.pg_stats.scrub_errors + \
+                               osd_info.pg_stats.deep_scrub_errors + \
+                               osd_info.pg_stats.shallow_scrub_errors
+
+        t.add_cells("No scrub errors",
+                    passed if total_scrub_err == 0 else failed,
+                    "" if total_scrub_err == 0 else f"Error count {total_scrub_err}")
+    else:
+        t.add_cells("No scrub errors", failed, "No data available")
+
+    # ---------------------------------  SSD/NVME journals -------------------------------------------------------------
+
+    count = 0
+    for osd in ceph.osds:
+        if isinstance(osd.storage_info, FileStoreInfo):
+            if not osd.host.disks[osd.storage_info.journal_dev].tp.is_fast():
+                count += 1
+        else:
+            if not osd.host.disks[osd.storage_info.wal_dev].tp.is_fast():
+                count += 1
+            elif not osd.host.disks[osd.storage_info.db_dev].tp.is_fast():
+                count += 1
+
+    t.add_cells("SSD/NVME used for journals/wal/dev",
+                passed if count == 0 else failed,
+                "" if 0 == count else f"{count} OSD's failed")
+
+    # ---------------------------------  separated ceph nets -----------------------------------------------------------
+
+    t.add_cells("Separated client/cluster ceph networks",
+                passed if ceph.cluster_net != ceph.public_net else failed,
+                "" if ceph.cluster_net != ceph.public_net else f"Same net {ceph.public_net}<br>is used for both")
+
+    # ---------------------------------  journal per drive count -------------------------------------------------------
+
+    host_dev_j_count = collections.Counter()
+    for osd in ceph.osds:
+        if isinstance(osd.storage_info, FileStoreInfo):
+            host_dev_j_count[f"{osd.host.name}/{osd.storage_info.journal_dev}"] += 1
+        else:
+            host_dev_j_count[f"{osd.host.name}/{osd.storage_info.wal_dev}"] += 1
+            if osd.storage_info.db_dev != osd.storage_info.wal_dev:
+                host_dev_j_count[f"{osd.host.name}/{osd.storage_info.db_dev}"] += 1
+
+    fcount = 0
+    for host in cluster.hosts.values():
+        for disk in host.disks.values():
+            count = host_dev_j_count[f"{host.name}/{disk.name}"]
+            if (count > 1 and not disk.tp.is_fast()) or (count > 4 and disk.tp != DiskType.nvme) or (count > 6):
+                fcount += 1
+
+    t.add_cells("Max 6 journals per nvme, 4 per SSD, 1 per HDD",
+                passed if fcount == 0 else failed,
+                "" if fcount == 0 else f"Failed for {fcount} drives")
+
+    # ---------------------------------  PG counts for OSD's -----------------------------------------------------------
+
+    wrong_pg_count = 0
+
+    for osd in ceph.osds:
+        if osd.pg_count < 100 or osd.pg_count > 400:
+            wrong_pg_count += 1
+
+    t.add_cells("400 >= OSD PG count >= 100",
+                passed if wrong_pg_count == 0 else failed,
+                "" if wrong_pg_count == 0 else f"Failed for {wrong_pg_count} drives")
+
+    # ---------------------------------  Pool size ---------------------------------------------------------------------
+
+    wrong_size = 0
+    for name, pool in ceph.pools.items():
+        expected_size = (2, 1) if name == 'gnocci' else (3, 2)
+        if (pool.size, pool.min_size) != expected_size:
+            wrong_size += 1
+
+    t.add_cells("3/2 for all major pools, 2/1 for gnocci",
+                passed if wrong_size == 0 else failed,
+                "" if wrong_size == 0 else f"Failed for {wrong_size} pools")
+
+    # ---------------------------------  PG counts for pools -----------------------------------------------------------
+
+    # ---------------------------------  Net performance ---------------------------------------------------------------
+
+    # ---------------------------------  Scrubbing at night ------------------------------------------------------------
+
+    # ---------------------------------  OSD threads and tcp connections -----------------------------------------------
+
+    # ---------------------------------  Same pg and pgp for all pools -------------------------------------------------
+
+    pg_ne_pgp = 0
+    for name, pool in ceph.pools.items():
+        if pool.pg != pool.pgp:
+            pg_ne_pgp += 1
+
+    t.add_cells("PG == PGP for all pools",
+                passed if pg_ne_pgp == 0 else failed,
+                "" if pg_ne_pgp == 0 else f"Failed for {pg_ne_pgp} pools")
+    # ---------------------------------  OSD nodes load ----------------------------------------------------------------
+
+    # ---------------------------------  OSD ram consumption -----------------------------------------------------------
+
+    # ---------------------------------  Second level nodes for all crush roots either count > 3 or same size ----------
+
+    # ---------------------------------  OSD of the same type data evenly distributed ----------------------------------
+
+    data_per_osd = collections.defaultdict(list)
+    for osd in ceph.osds:
+        total_space = osd.used_space + osd.free_space
+        data_per_osd[total_space].append(osd.free_space / total_space)
+
+    # for key, vals in data_per_osd.items():
+    #     print(f"{key} => {min(vals):.3f}, {max(vals):.3f}")
+
+    for sz, free in data_per_osd.items():
+        if abs(max(free) - min(free)) > 0.2:
+            t.add_cells("(Max used OSD - min used OSD) < 0.2 for same OSD sizes", failed, "")
+            break
+    else:
+        t.add_cells("(Max used OSD - min used OSD) < 0.2 for same OSD sizes", passed, "")
+
+    # ---------------------------------  OSD of the same type load evenly distributed ----------------------------------
+
+    # ---------------------------------  Journal & wal & db sizes ------------------------------------------------------
+
+    bad_size_count = 0
+    for osd in ceph.osds:
+        osd_info = ceph.osds_info.osds[osd.id]
+        if osd_info.j_info:
+            sync = float(osd.run_info.config['filestore_max_sync_interval']) if osd.run_info else 5
+            min_j_size = osd_info.data_drive_type.bandwith_mbps() * 2 * sync
+
+            if osd_info.j_info.size / 2 ** 20 < min_j_size:
+                bad_size_count += 1
+        else:
+            assert osd_info.wal_db_info
+            assert isinstance(osd.storage_info, BlueStoreInfo)
+            data_part_size = osd.host.storage_devs[osd.storage_info.data_partition].size
+            wal_part_size = osd.host.storage_devs[osd.storage_info.wal_partition].size
+
+            min_wal_size =  data_part_size * 0.005
+            min_db_size = data_part_size * 0.05
+
+            if osd_info.wal_db_info.wal_size is not None:
+                if osd_info.wal_db_info.wal_size < min_wal_size:
+                    bad_size_count += 1
+            else:
+                if osd.storage_info.wal_partition == osd.storage_info.db_partition:
+                    if wal_part_size < min_wal_size + min_db_size:
+                        bad_size_count += 1
+                elif wal_part_size < min_wal_size:
+                    bad_size_count += 1
+                elif osd.host.storage_devs[osd.storage_info.db_partition].size < min_db_size:
+                    bad_size_count += 1
+
+
+    t.add_cells("Journal and DB has enough space",
+                passed if bad_size_count == 0 else failed,
+                "" if fcount == 0 else f"Failed for {bad_size_count} journals/wal/db")
+
+    return "Issues:", t
+
+
 def show_osd_summary(ceph: CephInfo) -> Tuple[str, Any]:
     osd_count = len(ceph.osds)
     stor_set = {osd.storage_type for osd in ceph.osds}
@@ -275,7 +448,8 @@ def show_osd_summary(ceph: CephInfo) -> Tuple[str, Any]:
     else:
         t = html.HTMLTable("table-osd-summary", ["Setting", "Value"], sortable=False)
         t.add_cells("Count", str(osd_count))
-        t.add_cells("Average PG per OSD", str(ceph.status.num_pgs // osd_count))
+        pgcount = sum(pool.size * pool.pg for pool in ceph.pools.values())
+        t.add_cells("Average PG copy per OSD", str(pgcount // osd_count))
         t.add_cells("Cluster net", str(ceph.cluster_net))
         t.add_cells("Public net", str(ceph.public_net))
         t.add_cells("Near full ratio", "%0.3f" % (float(ceph.settings.mon_osd_nearfull_ratio,)))
@@ -437,7 +611,10 @@ def show_pools_info(ceph: CephInfo) -> Tuple[str, Any]:
     for _, pool in sorted(ceph.pools.items()):
         table.add_cell(pool.name)
         table.add_cell(str(pool.id))
-        table.add_cell(f"{pool.size} / {pool.min_size}", sorttable_customkey=str(pool.size))
+        vl = f"{pool.size} / {pool.min_size}"
+        if pool.size != 3 or pool.min_size != 2:
+            vl = html_fail(vl)
+        table.add_cell(vl, sorttable_customkey=str(pool.size))
         table.add_cell_b2ssize_10(pool.df.num_objects)
         table.add_cell_b2ssize(pool.df.size_bytes)
         table.add_cell(str(pool.crush_rule))
@@ -630,8 +807,8 @@ def show_osd_info(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
             table.add_cell(str(osd.storage_type))
 
         # STORAGE DEV TYPE
-        data_drive_color_fn = html_ok if osd_info.data_drive_type in ('ssd', 'nvme') else lambda x: x
-        table.add_cell(data_drive_color_fn(osd_info.data_drive_type))
+        data_drive_color_fn = html_ok if osd_info.data_drive_type.is_fast() else lambda x: x
+        table.add_cell(data_drive_color_fn(osd_info.data_drive_type.name))
 
         #  USED & FREE SPACE
         color = "red" if osd.free_perc < 20 else ( "yellow" if osd.free_perc < 40 else "green")
@@ -642,7 +819,7 @@ def show_osd_info(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
         # JOURNAL/WAL/DB info
         if osd_info.j_info:
             table.add_cell(str(osd_info.j_info.collocation))
-            table.add_cell(osd_info.j_info.drive_type)
+            table.add_cell(osd_info.j_info.drive_type.name)
             table.add_cell(str(osd_info.j_info.on_file))
 
             if osd_info.j_info.size is None:
@@ -664,8 +841,8 @@ def show_osd_info(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
             wal_on_same_drive = html_ok("no") if wd_info.wal_collocation else html_fail("yes")
 
             table.add_cell(wal_on_same_drive)
-            wal_drive_type_color_fn = html_ok if wd_info.wal_drive_type in ('ssd', 'nvme') else html_fail
-            table.add_cell(wal_drive_type_color_fn(wd_info.wal_drive_type))
+            wal_drive_type_color_fn = html_ok if wd_info.wal_drive_type.is_fast() else html_fail
+            table.add_cell(wal_drive_type_color_fn(wd_info.wal_drive_type.name))
 
             if osds_info.has_fs:
                 table.add_cell('-')
@@ -678,7 +855,7 @@ def show_osd_info(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
                 table.add_cell('-')
 
             db_colocation = html_ok("no") if wd_info.db_collocation else html_fail("yes")
-            db_drive_type_color_fn = html_ok if wd_info.wal_drive_type in ('ssd', 'nvme') else html_fail
+            db_drive_type_color_fn = html_ok if wd_info.wal_drive_type.is_fast() else html_fail
             if wd_info.db_size is not None:
                 db_size_s = b2ssize(wd_info.db_size) + "B"
                 size_sort_by = str(wd_info.db_size)
@@ -688,7 +865,7 @@ def show_osd_info(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
                 size_sort_by = ''
 
             table.add_cell(db_colocation)
-            table.add_cell(db_drive_type_color_fn(wd_info.wal_drive_type))
+            table.add_cell(db_drive_type_color_fn(wd_info.wal_drive_type.name))
             table.add_cell(db_size_s, sorttable_customkey=size_sort_by)
 
         table.next_row()
@@ -1052,12 +1229,12 @@ def show_hosts_info(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
         srv_strs = []
         for mon in ceph.mons:
             if mon.host == host.name:
-                srv_strs.append(f"Mon: {host.name}")
+                srv_strs.append(f'''<font color="#8080FF">Mon</font>: {host.name}''')
 
         table.add_cell(host_link(host.name))
         osd_services = [str(osd.id) for osd in ceph.osds if osd.host is host]
         if osd_services:
-            srv_strs.append("OSD's: " + ", ".join(osd_services[:3]))
+            srv_strs.append('''<font color="#c77405">OSD's</font>: ''' + ", ".join(osd_services[:3]))
             for ids in partition(osd_services[3:], 4):
                 srv_strs.append(", ".join(ids))
 
@@ -1239,7 +1416,7 @@ def host_info(host: Host, ceph: CephInfo) -> str:
             else:
                 info = ""
 
-            table.add_row([disk.name, disk.tp, mib_and_mb(disk.size),
+            table.add_row([disk.name, disk.tp.name, mib_and_mb(disk.size),
                            html_roles(disk.path),
                            str(disk.rota),
                            "" if disk.scheduler is None else str(disk.scheduler),
@@ -1252,12 +1429,13 @@ def host_info(host: Host, ceph: CephInfo) -> str:
         doc.br
         doc.center.H4("Mountable")
         doc.br
-        table = html.HTMLTable(headers=["Name", "Size", "Mountpoint", "Ceph role", "Fs", "Free space", "Label"],
+        table = html.HTMLTable(headers=["Name", "Size", "Type", "Mountpoint", "Ceph role", "Fs", "Free space", "Label"],
                                extra_cls=["hostinfo-mountable"], sortable=False)
 
         def run_over_children(obj, level: int):
             table.add_row([f'<div class="disk-children-{level}">{obj.name}</div>',
                            mib_and_mb(obj.size),
+                           obj.tp.name if level == 0 else '',
                            obj.mountpoint if obj.mountpoint else '',
                            "" if level == 0 else html_roles(obj.path),
                            obj.fs if obj.fs else '',
@@ -1361,6 +1539,7 @@ def main(argv: List[str]):
 
         cluster_reporters = [
             show_cluster_summary,
+            show_issues_table,
             show_osd_summary,
             show_io_status,
             show_health_messages,

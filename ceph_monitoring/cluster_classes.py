@@ -215,6 +215,7 @@ class Pool:
 class NetAdapterAddr:
     ip: IPv4Address
     net: IPv4Network
+    is_routable: bool
 
 
 @dataclass
@@ -275,9 +276,31 @@ class HWModel:
     vendor: str
 
 
+class DiskType(Enum):
+    sata_hdd = 0
+    sas_hdd = 1
+    nvme = 2
+    sata_ssd = 3
+    sas_ssd = 4
+    virtio = 5
+    unknown = 6
+
+    def is_fast(self) -> bool:
+        res = self.value in (self.nvme.value, self.sata_ssd.value, self.sas_ssd.value)
+        return res
+
+    def bandwith_mbps(self) -> int:
+        if self.is_fast():
+            return 200
+        elif self.value == self.sas_hdd.value:
+            return 100
+        else:
+            return 50
+
+
 @dataclass
 class Disk:
-    tp: str
+    tp: DiskType
     extra: Dict[str, Any]
     name: str
     path: str
@@ -590,17 +613,18 @@ class PGDump:
 class JInfo:
     collocation: bool
     on_file: bool
-    drive_type: str
+    drive_type: DiskType
     size: Optional[int]
+
 
 @dataclass
 class WALDBInfo:
     wal_collocation: bool
-    wal_drive_type: str
+    wal_drive_type: DiskType
     wal_size: Optional[int]
 
     db_collocation: bool
-    db_drive_type: str
+    db_drive_type: DiskType
     db_size: Optional[int]
 
 
@@ -653,7 +677,7 @@ class OSDInfo:
     free_space: int
     total_user_data: int
     crush_trees_weights: Dict[str, Tuple[bool, float, float]]
-    data_drive_type: str
+    data_drive_type: DiskType
     data_part_size: int
 
     # FS/BS info

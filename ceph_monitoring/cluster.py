@@ -77,6 +77,10 @@ def parse_txt_ceph_config(data: str) -> Dict[str, str]:
     return config
 
 
+def is_routable(ip: IPv4Address, net: IPv4Network) -> bool:
+    return not (ip.is_loopback or net.prefixlen == 32)
+
+
 def parse_lsblkjs(data: List[Dict[str, Any]], hostname: str) -> Iterable[Disk]:
     for disk_js in data:
         name = disk_js['name']
@@ -95,20 +99,25 @@ def parse_lsblkjs(data: List[Dict[str, Any]], hostname: str) -> Iterable[Disk]:
                 tp = 'sas'
             elif disk_js['subsystems'] == 'block:nvme:pci':
                 tp = 'nvme'
+            elif disk_js['subsystems'] == 'block:virtio:pci':
+                tp = 'virtio'
 
         stor_tp = {
-            ('sata', '1'): 'hdd',
-            ('sata', '0'): 'ssd',
-            ('nvme', '0'): 'nvme',
-            ('sas',  '1'): 'sas hdd',
-            ('sas',  '0'): 'ssd',
+            ('sata', '1'): DiskType.sata_hdd,
+            ('sata', '0'): DiskType.sata_ssd,
+            ('nvme', '0'): DiskType.nvme,
+            ('nvme', '1'): DiskType.unknown,
+            ('sas',  '1'): DiskType.sas_hdd,
+            ('sas',  '0'): DiskType.sas_ssd,
+            ('virtio', '0'): DiskType.virtio,
+            ('virtio', '1'): DiskType.virtio,
         }.get((tp, disk_js["rota"]))
 
         if stor_tp is None:
             logger.warning("Can't detect disk type for %r in node %r. tran=%r, rota=%r, subsystem=%r." +
-                           "Treating it as hdd",
+                           " Treating it as " + DiskType.sata_hdd.name,
                            name, hostname, disk_js['tran'], disk_js['rota'], disk_js['subsystems'])
-            stor_tp = 'hdd'
+            stor_tp = DiskType.sata_hdd
 
         dsk = Disk(name=name,
                    path='/dev/' + name,
@@ -325,7 +334,7 @@ def load_interfaces(dtime: Optional[float],
             dev_name = match.group('adapter')
             try:
                 adapter = net_adapters[dev_name]
-                adapter.ips.append(NetAdapterAddr(ip_addr, net_addr))
+                adapter.ips.append(NetAdapterAddr(ip_addr, net_addr, is_routable=is_routable(ip_addr, net_addr)))
             except KeyError:
                 logger.warning("Can't find adapter %r for ip %r", dev_name, ip_addr)
 
@@ -741,8 +750,8 @@ class Loader:
 
             for adapter in net_adapters.values():
                 for ip in adapter.ips:
-                    ip_s = str(ip.ip)
-                    if not ip_s.startswith('127.'):
+                    if ip.is_routable:
+                        ip_s = str(ip.ip)
                         if ip_s in ip2host:
                             logger.error("Ip %s belong to both %s and %s. Skipping new host",
                                          ip_s, hostname, ip2host[ip_s].name)

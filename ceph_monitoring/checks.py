@@ -3,7 +3,7 @@ from typing import List, Set
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
 
-from .cluster_classes import Cluster, CephInfo
+from .cluster_classes import Cluster, CephInfo, DiskType
 
 
 # Check
@@ -106,7 +106,7 @@ def check_osds_disk_types_and_sizes(ceph: CephInfo) -> List[CheckResult]:
     for osd in ceph.osds:
         osd_info = ceph.osds_info.osds[osd.id]
         if osd_info.j_info:
-            if osd_info.j_info.drive_type not in ("ssd", "nvme"):
+            if osd_info.j_info.drive_type.is_fast():
                 wrong_j_devices.append(osd.id)
 
             if osd.run_info:
@@ -114,24 +114,19 @@ def check_osds_disk_types_and_sizes(ceph: CephInfo) -> List[CheckResult]:
             else:
                 sync = 5
 
-            if osd_info.data_drive_type == 'hdd':
-                min_j_size = 50 * 2 * sync
-            elif  osd_info.data_drive_type == 'sas hdd':
-                min_j_size = 100 * 2 * sync
-            else:
-                min_j_size = 200 * 2 * sync
+            min_j_size = osd_info.data_drive_type.bandwith_mbps() * 2 * sync
 
             if osd_info.j_info.size / 2 ** 20 < min_j_size:
                 wrong_j_size.append((osd.id, (osd_info.j_info.size, 2 ** 20 < min_j_size)))
         else:
             assert osd_info.wal_db_info
-            if osd_info.wal_db_info.wal_drive_type not in ("ssd", "nvme"):
+            if not osd_info.wal_db_info.wal_drive_type.is_fast():
                 wrong_wal_devices.append(osd.id)
 
             min_db_size = osd_info.data_part_size * 0.02
             min_db_size = 0
 
-            if osd_info.wal_db_info.db_drive_type not in ("ssd", "nvme"):
+            if not osd_info.wal_db_info.db_drive_type.is_fast():
                 wrong_db_devices.append(osd.id)
 
 
