@@ -1,7 +1,7 @@
 import logging
 import warnings
 from io import BytesIO
-from typing import Callable, Any, AnyStr, Union, List
+from typing import Callable, Any, AnyStr, Optional, Tuple
 from typing_extensions import Protocol
 
 import numpy
@@ -31,7 +31,7 @@ logger = logging.getLogger('cephlib.report')
 # ----------------------------------------------------------------------------------------------------------------------
 
 
-def per_info_required(func):
+def perf_info_required(func):
     func.perf_info_required = True
     return func
 
@@ -42,7 +42,7 @@ def plot(func):
 
 
 class ReportProto(Protocol):
-    def add_block(self, name: str, img: AnyStr):
+    def add_block(self, tag: str, name: str, img: AnyStr):
         ...
 
 
@@ -73,12 +73,12 @@ def plot_img(func: Callable, *args, **kwargs) -> Any:
 
 
 @plot
-def show_osd_used_space_histo(report: ReportProto, ceph: CephInfo):
+def show_osd_used_space_histo(ceph: CephInfo) -> Optional[Tuple[str, Any]]:
     min_osd: int = 3
     vals = [(100 - osd.free_perc) for osd in ceph.osds if osd.free_perc is not None]
     if len(vals) >= min_osd:
         img = plot_img(plot_histo, numpy.array(vals), left=0, right=100, ax=True)
-        report.add_block("OSD used space (GiB)", img)
+        return "OSD used space (GiB)", img
 
 
 def get_histo_img(vals: numpy.ndarray) -> str:
@@ -92,7 +92,7 @@ def get_kde_img(vals: numpy.ndarray) -> str:
 
 
 @plot
-@per_info_required
+@perf_info_required
 def show_osd_load(report: ReportProto, cluster: Cluster, ceph: CephInfo):
     max_xbins: int = 25
     logger.info("Plot osd load")
@@ -104,16 +104,16 @@ def show_osd_load(report: ReportProto, cluster: Cluster, ceph: CephInfo):
 
     logger.warning("Show only data disk load for now")
 
-    report.add_block("OSD data write (MiBps)", img)
+    report.add_block("OSD_write_MiBps", "OSD data write (MiBps)", img)
 
     pyplot.clf()
     data, chunk_ranges = hmap_from_2d(usage.data.wio, max_xbins=max_xbins)
     img = plot_img(plot_hmap_with_histo, data, chunk_ranges)
-    report.add_block("OSD data write IOPS", img)
+    report.add_block("OSD_write_IOPS", "OSD data write IOPS", img)
 
     data, chunk_ranges = hmap_from_2d(usage.data.qd, max_xbins=max_xbins)
     img = plot_img(plot_hmap_with_histo, data, chunk_ranges)
-    report.add_block("OSD data write QD", img)
+    report.add_block("OSD_write_QD", "OSD data write QD", img)
 
     # if not usage.colocated_journals:
     #     hm_vals, ranges = hmap_from_2d(usage.ceph_j_dev_wbytes, max_xbins=max_xbins)
@@ -132,10 +132,15 @@ def show_osd_load(report: ReportProto, cluster: Cluster, ceph: CephInfo):
 
 
 @plot
-@per_info_required
+@perf_info_required
 def show_osd_lat_heatmaps(report: ReportProto, ceph: CephInfo):
+    for osd in ceph.osds:
+        if osd.osd_perf is None:
+            return
+
     max_xbins: int = 25
     logger.info("Plot osd latency heatmaps")
+
     for field, header in (('journal_latency', "Journal latency, ms"),
                           ('apply_latency',  "Apply latency, ms"),
                           ('commitcycle_latency', "Commit cycle latency, ms")):
@@ -153,12 +158,12 @@ def show_osd_lat_heatmaps(report: ReportProto, ceph: CephInfo):
 
         if len(hmap) != 0:
             img = plot_img(plot_hmap_with_histo, hmap, ranges)
-            report.add_block(header, img)
+            report.add_block("OSD_" + field, header, img)
 
 
 @plot
-@per_info_required
-def show_osd_ops_boxplot(report: ReportProto, ceph: CephInfo):
+@perf_info_required
+def show_osd_ops_boxplot(ceph: CephInfo) -> Tuple[str, Any]:
     logger.info("Loading ceph historic ops data")
     ops = []
 
@@ -186,11 +191,10 @@ def show_osd_ops_boxplot(report: ReportProto, ceph: CephInfo):
     seaborn.boxplot(data=stage_times, ax=ax)
     ax.set_yscale("log")
     ax.set_xticklabels([STAGES_PRINTABLE_NAMES[name] for name in stage_names], size=14, rotation=35)
-    report.add_block("Ceph OPS time", get_img(plt))
-    logger.info("Done")
+    return "Ceph OPS time", get_img(plt)
 
 
-def plot_crush(report: ReportProto, ceph: CephInfo):
+def show_crush(ceph: CephInfo) -> Tuple[str, Any]:
     logger.info("Plot crushmap")
 
     G = networkx.DiGraph()
@@ -208,4 +212,4 @@ def plot_crush(report: ReportProto, ceph: CephInfo):
     pyplot.clf()
     pos = networkx.fruchterman_reingold_layout(G)
     networkx.draw(G, pos, with_labels=False, arrows=False)
-    report.add_block("nodes", get_img(pyplot))
+    return "nodes", get_img(pyplot)

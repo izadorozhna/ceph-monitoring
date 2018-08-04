@@ -301,10 +301,13 @@ def load_interfaces(dtime: Optional[float],
     for name, adapter_dct in jstor_node.interfaces.items():
         if dtime is not None and dtime > 1.0 and perf_monitoring:
             params: Dict[str, numpy.ndarray[int]] = {}
-            load_node = perf_monitoring.get('net-io', {}).get(adapter_dct['dev'], {})
-            for metric in 'send_bytes send_packets recv_packets recv_bytes'.split():
-                params[metric] = numpy.array(load_node[metric])
-            load: Optional[NetLoad] = NetLoad(**params)  # type: ignore
+            load_node = perf_monitoring.get('net-io', {}).get('/dev/' + adapter_dct['dev'])
+            if load_node:
+                for metric in 'send_bytes send_packets recv_packets recv_bytes'.split():
+                    params[metric] = numpy.array(load_node[metric])
+                load: Optional[NetLoad] = NetLoad(**params)  # type: ignore
+            else:
+                load = None
         else:
             load = None
 
@@ -631,12 +634,17 @@ class Loader:
         self.storage = storage
         self.ip2host: Dict[str, Host] = {}
         self.perf_data: Any = None
+        self.hosts: Any = {}
+        self.osd_perf_dump: Any = None
+        self.osd_historic_ops_paths: Any = None
+
+    def load_perf_monitoring(self):
+        self.perf_data, self.osd_perf_dump, self.osd_historic_ops_paths = load_perf_monitoring(self.storage)
 
     def load_cluster(self) -> Cluster:
         coll_time = self.storage.txt['master/collected_at'].strip()
         report_collected_at_local, report_collected_at_gmt, _ = coll_time.split("\n")
-        hosts, self.ip2host = self.load_hosts()
-        return Cluster(hosts=hosts,
+        return Cluster(hosts=self.hosts,
                        ip2host=self.ip2host,
                        report_collected_at_local=report_collected_at_local,
                        report_collected_at_gmt=report_collected_at_gmt,
@@ -654,7 +662,6 @@ class Loader:
             is_luminous = False
 
         crush = load_crushmap(content=self.storage.txt.master.crushmap)
-        perf_data, osd_perf_dump, osd_historic_ops_paths = load_perf_monitoring(self.storage)
 
         status = load_ceph_status(self.storage, is_luminous)
 
@@ -665,7 +672,7 @@ class Loader:
 
         osd_pool_pg_2d, sum_per_pool, sum_per_osd = load_PG_distribution(self.storage, pg_dump)
 
-        osd_map = self.load_osds(sum_per_osd, osd_perf_dump, osd_historic_ops_paths)
+        osd_map = self.load_osds(sum_per_osd, self.osd_perf_dump, self.osd_historic_ops_paths)
 
         pools = load_pools(self.storage, is_luminous)
         mons = load_monitors(self.storage, is_luminous)
@@ -694,10 +701,8 @@ class Loader:
                         pgs_second=pgs_second)
 
     def load_hosts(self) -> Tuple[Dict[str, Host], Dict[str, Host]]:
-        hosts: Dict[str, Host] = {}
         tcp_sock_re = re.compile('(?im)^tcp6?\\b')
         udp_sock_re = re.compile('(?im)^udp6?\\b')
-        ip2host: Dict[str, Host] = {}
 
         for is_file, hostname in self.storage.txt.hosts:
             assert not is_file
@@ -746,19 +751,19 @@ class Loader:
                         hw_info=hw_info,
                         df_info=df_info)
 
-            hosts[host.name] = host
+            self.hosts[host.name] = host
 
             for adapter in net_adapters.values():
                 for ip in adapter.ips:
                     if ip.is_routable:
                         ip_s = str(ip.ip)
-                        if ip_s in ip2host:
+                        if ip_s in self.ip2host:
                             logger.error("Ip %s belong to both %s and %s. Skipping new host",
-                                         ip_s, hostname, ip2host[ip_s].name)
+                                         ip_s, hostname, self.ip2host[ip_s].name)
                             continue
-                        ip2host[ip_s] = host
+                        self.ip2host[ip_s] = host
 
-        return hosts, ip2host
+        return self.hosts, self.ip2host
 
     def load_osds(self,
                   sum_per_osd: Optional[Dict[int, int]],
@@ -848,8 +853,7 @@ class Loader:
 
                     if self.perf_data is not None:
                         assert isinstance(stor_info, FileStoreInfo)  # make mypy happy
-                        j_dev = get_dev_file_name(stor_info.journal_dev)
-                        stor_info.j_stor_stats = osd.host.disks[j_dev].load
+                        stor_info.j_stor_stats = osd.host.disks[stor_info.journal_dev].load
                 else:
                     assert osd.storage_type == OSDStoreType.bluestore
 
@@ -864,18 +868,17 @@ class Loader:
 
                     if self.perf_data is not None:
                         assert isinstance(stor_info, BlueStoreInfo)  # make mypy happy
-                        w_dev = get_dev_file_name(stor_info.wal_dev)
-                        stor_info.wal_stor_stats = osd.host.disks[w_dev].load
-                        db_dev = get_dev_file_name(stor_info.db_dev)
-                        stor_info.db_stor_stats = osd.host.disks[db_dev].load
+                        stor_info.wal_stor_stats = osd.host.disks[stor_info.wal_dev].load
+                        stor_info.db_stor_stats = osd.host.disks[stor_info.db_dev].load
 
                 if osd_perf_dump is not None and osd.id in osd_perf_dump:
                     osd.osd_perf = load_osd_perf_data(osd.id, osd.storage_type, osd_perf_dump)  # type: ignore
                     osd.osd_perf.update(osd_perf_scalar[osd_id])  # type: ignore
-                    stor_info.data_stor_stats = osd.host.disks[stor_info.data_dev].load
 
-                    if osd_historic_ops_paths is not None:
-                        osd.historic_ops_storage_path = osd_historic_ops_paths.get(osd.id)
+                stor_info.data_stor_stats = osd.host.disks[stor_info.data_dev].load
+
+                if osd_historic_ops_paths is not None:
+                    osd.historic_ops_storage_path = osd_historic_ops_paths.get(osd.id)
 
                 osd.storage_info = stor_info
 
@@ -884,8 +887,10 @@ class Loader:
 
 def load_all(storage: TypedStorage) -> Tuple[Cluster, CephInfo]:
     l = Loader(storage)
-    cluster = l.load_cluster()
+    l.load_perf_monitoring()
+    l.load_hosts()
     ceph = l.load_ceph()
+    cluster = l.load_cluster()
     ceph.osds_info = get_osds_info(cluster, ceph)
     return cluster, ceph
 

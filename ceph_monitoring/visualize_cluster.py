@@ -17,8 +17,9 @@ import logging.config
 from pathlib import Path
 from typing import Dict, List, Tuple, Any, Union, Set, Sequence, Optional, Iterable, TypeVar
 
-import dataclasses
+import yaml
 import numpy
+import dataclasses
 
 from cephlib.storage import make_storage, TypedStorage
 from cephlib.units import b2ssize, b2ssize_10
@@ -26,10 +27,10 @@ from cephlib.common import flatten
 
 from . import html
 from .cluster_classes import (CephInfo, Cluster, OSDStoreType, Host, FileStoreInfo, BlueStoreInfo, DiskLoad, OSDStatus,
-                              OSDSInfo, DiskType)
+                              OSDSInfo)
 from .cluster import NO_VALUE, load_all, get_all_versions, get_nodes_pg_info
-
-from .plot_data import (per_info_required, plot, show_osd_used_space_histo,
+from .checks import run_all_checks
+from .plot_data import (perf_info_required, plot, show_osd_used_space_histo,
                         show_osd_load, show_osd_lat_heatmaps, show_osd_ops_boxplot, get_histo_img, get_kde_img)
 
 H = html.rtag
@@ -111,13 +112,12 @@ class Report:
         self.style_links: List[str] = []
         self.script_links: List[str] = []
         self.scripts: List[str] = []
-        self.onload: List[str] = []
-        self.divs: List[Tuple[Optional[str], Optional[str], str]] = []
+        self.divs: List[Tuple[str, Optional[str], Optional[str], str]] = []
 
-    def add_block(self, header: Optional[str], block_obj: Any, menu_item: str = None):
+    def add_block(self, name: str, header: Optional[str], block_obj: Any, menu_item: str = None):
         if menu_item is None:
             menu_item = header
-        self.divs.append((header, menu_item, str(block_obj)))
+        self.divs.append((name, header, menu_item, str(block_obj)))
 
     def save_to(self, output_dir: Path, pretty_html: bool = False,
                 embed: bool = False):
@@ -179,35 +179,30 @@ class Report:
                 for script in self.scripts:
                     doc.script(script, type="text/javascript")
 
-            with doc.body(onload=";".join(self.onload)):
+            with doc.body(onload="onHashChanged()"):
                 with doc.div(_class="menu-ceph"):
                     with doc.ul():
-                        for sid, div_cnt in enumerate(self.divs):
-                            if div_cnt is not None:
-                                _, menu, _ = div_cnt
+                        for div in self.divs:
+                            if div is not None:
+                                name, _, menu, _ = div
                                 if menu:
                                     if menu.endswith(":"):
                                         menu = menu[:-1]
-                                    doc.li.a(menu, onclick=f"clicked('{sid}')")
+                                    doc.li.a(menu, onclick=f"clicked('{name}')")
 
-                for sid, div_cnt in enumerate(self.divs):
+                for div in self.divs:
                     doc("\n")
-                    if div_cnt is not None:
-                        header, menu_item, block = div_cnt
-                        if menu_item:
-                            doc._enter("div", _class="main-ceph" if sid == 0 else "data-ceph", id=f"{sid}")
+                    if div is not None:
+                        name, header, menu_item, block = div
+                        with doc.div(_class="data-ceph", id=name):
+                            if header is None:
+                                doc(block)
+                            else:
+                                doc.H3.center(header)
+                                doc.br
 
-                        if header is None:
-                            doc(block)
-                        else:
-                            doc.H3.center(header)
-                            doc.br
-
-                            if block != "":
-                                doc.center(block)
-
-                        if menu_item:
-                            doc._exit()
+                                if block != "":
+                                    doc.center(block)
 
         index = f"<!doctype html>{doc}"
         index_path = output_dir / self.output_file_name
@@ -262,176 +257,17 @@ def show_cluster_summary(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
     return "Status:", t
 
 
-# TODO: need to move this into checks.py module
 def show_issues_table(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
+    config = yaml.load((Path(__file__).parent / 'check_conf.yaml').open())
+    report, fails = run_all_checks(config, cluster, ceph)
+
     t = html.HTMLTable("table-issues", ["Check", "Result", "Comment"], sortable=False)
 
     failed = html_fail("Failed")
     passed = html_ok("Passed")
 
-    # ---------------------------------  No scrub errors ---------------------------------------------------------------
-
-    if ceph.osds_info:
-        total_scrub_err = 0
-        for osd_info in ceph.osds_info.osds.values():
-            total_scrub_err += osd_info.pg_stats.scrub_errors + \
-                               osd_info.pg_stats.deep_scrub_errors + \
-                               osd_info.pg_stats.shallow_scrub_errors
-
-        t.add_cells("No scrub errors",
-                    passed if total_scrub_err == 0 else failed,
-                    "" if total_scrub_err == 0 else f"Error count {total_scrub_err}")
-    else:
-        t.add_cells("No scrub errors", failed, "No data available")
-
-    # ---------------------------------  SSD/NVME journals -------------------------------------------------------------
-
-    count = 0
-    for osd in ceph.osds:
-        if isinstance(osd.storage_info, FileStoreInfo):
-            if not osd.host.disks[osd.storage_info.journal_dev].tp.is_fast():
-                count += 1
-        else:
-            if not osd.host.disks[osd.storage_info.wal_dev].tp.is_fast():
-                count += 1
-            elif not osd.host.disks[osd.storage_info.db_dev].tp.is_fast():
-                count += 1
-
-    t.add_cells("SSD/NVME used for journals/wal/dev",
-                passed if count == 0 else failed,
-                "" if 0 == count else f"{count} OSD's failed")
-
-    # ---------------------------------  separated ceph nets -----------------------------------------------------------
-
-    t.add_cells("Separated client/cluster ceph networks",
-                passed if ceph.cluster_net != ceph.public_net else failed,
-                "" if ceph.cluster_net != ceph.public_net else f"Same net {ceph.public_net}<br>is used for both")
-
-    # ---------------------------------  journal per drive count -------------------------------------------------------
-
-    host_dev_j_count = collections.Counter()
-    for osd in ceph.osds:
-        if isinstance(osd.storage_info, FileStoreInfo):
-            host_dev_j_count[f"{osd.host.name}/{osd.storage_info.journal_dev}"] += 1
-        else:
-            host_dev_j_count[f"{osd.host.name}/{osd.storage_info.wal_dev}"] += 1
-            if osd.storage_info.db_dev != osd.storage_info.wal_dev:
-                host_dev_j_count[f"{osd.host.name}/{osd.storage_info.db_dev}"] += 1
-
-    fcount = 0
-    for host in cluster.hosts.values():
-        for disk in host.disks.values():
-            count = host_dev_j_count[f"{host.name}/{disk.name}"]
-            if (count > 1 and not disk.tp.is_fast()) or (count > 4 and disk.tp != DiskType.nvme) or (count > 6):
-                fcount += 1
-
-    t.add_cells("Max 6 journals per nvme, 4 per SSD, 1 per HDD",
-                passed if fcount == 0 else failed,
-                "" if fcount == 0 else f"Failed for {fcount} drives")
-
-    # ---------------------------------  PG counts for OSD's -----------------------------------------------------------
-
-    wrong_pg_count = 0
-
-    for osd in ceph.osds:
-        if osd.pg_count < 100 or osd.pg_count > 400:
-            wrong_pg_count += 1
-
-    t.add_cells("400 >= OSD PG count >= 100",
-                passed if wrong_pg_count == 0 else failed,
-                "" if wrong_pg_count == 0 else f"Failed for {wrong_pg_count} drives")
-
-    # ---------------------------------  Pool size ---------------------------------------------------------------------
-
-    wrong_size = 0
-    for name, pool in ceph.pools.items():
-        expected_size = (2, 1) if name == 'gnocci' else (3, 2)
-        if (pool.size, pool.min_size) != expected_size:
-            wrong_size += 1
-
-    t.add_cells("3/2 for all major pools, 2/1 for gnocci",
-                passed if wrong_size == 0 else failed,
-                "" if wrong_size == 0 else f"Failed for {wrong_size} pools")
-
-    # ---------------------------------  PG counts for pools -----------------------------------------------------------
-
-    # ---------------------------------  Net performance ---------------------------------------------------------------
-
-    # ---------------------------------  Scrubbing at night ------------------------------------------------------------
-
-    # ---------------------------------  OSD threads and tcp connections -----------------------------------------------
-
-    # ---------------------------------  Same pg and pgp for all pools -------------------------------------------------
-
-    pg_ne_pgp = 0
-    for name, pool in ceph.pools.items():
-        if pool.pg != pool.pgp:
-            pg_ne_pgp += 1
-
-    t.add_cells("PG == PGP for all pools",
-                passed if pg_ne_pgp == 0 else failed,
-                "" if pg_ne_pgp == 0 else f"Failed for {pg_ne_pgp} pools")
-    # ---------------------------------  OSD nodes load ----------------------------------------------------------------
-
-    # ---------------------------------  OSD ram consumption -----------------------------------------------------------
-
-    # ---------------------------------  Second level nodes for all crush roots either count > 3 or same size ----------
-
-    # ---------------------------------  OSD of the same type data evenly distributed ----------------------------------
-
-    data_per_osd = collections.defaultdict(list)
-    for osd in ceph.osds:
-        total_space = osd.used_space + osd.free_space
-        data_per_osd[total_space].append(osd.free_space / total_space)
-
-    # for key, vals in data_per_osd.items():
-    #     print(f"{key} => {min(vals):.3f}, {max(vals):.3f}")
-
-    for sz, free in data_per_osd.items():
-        if abs(max(free) - min(free)) > 0.2:
-            t.add_cells("(Max used OSD - min used OSD) < 0.2 for same OSD sizes", failed, "")
-            break
-    else:
-        t.add_cells("(Max used OSD - min used OSD) < 0.2 for same OSD sizes", passed, "")
-
-    # ---------------------------------  OSD of the same type load evenly distributed ----------------------------------
-
-    # ---------------------------------  Journal & wal & db sizes ------------------------------------------------------
-
-    bad_size_count = 0
-    for osd in ceph.osds:
-        osd_info = ceph.osds_info.osds[osd.id]
-        if osd_info.j_info:
-            sync = float(osd.run_info.config['filestore_max_sync_interval']) if osd.run_info else 5
-            min_j_size = osd_info.data_drive_type.bandwith_mbps() * 2 * sync
-
-            if osd_info.j_info.size / 2 ** 20 < min_j_size:
-                bad_size_count += 1
-        else:
-            assert osd_info.wal_db_info
-            assert isinstance(osd.storage_info, BlueStoreInfo)
-            data_part_size = osd.host.storage_devs[osd.storage_info.data_partition].size
-            wal_part_size = osd.host.storage_devs[osd.storage_info.wal_partition].size
-
-            min_wal_size =  data_part_size * 0.005
-            min_db_size = data_part_size * 0.05
-
-            if osd_info.wal_db_info.wal_size is not None:
-                if osd_info.wal_db_info.wal_size < min_wal_size:
-                    bad_size_count += 1
-            else:
-                if osd.storage_info.wal_partition == osd.storage_info.db_partition:
-                    if wal_part_size < min_wal_size + min_db_size:
-                        bad_size_count += 1
-                elif wal_part_size < min_wal_size:
-                    bad_size_count += 1
-                elif osd.host.storage_devs[osd.storage_info.db_partition].size < min_db_size:
-                    bad_size_count += 1
-
-
-    t.add_cells("Journal and DB has enough space",
-                passed if bad_size_count == 0 else failed,
-                "" if fcount == 0 else f"Failed for {bad_size_count} journals/wal/db")
+    for msg, sev, is_passed, comment in report:
+        t.add_cells(msg, passed if is_passed else failed, comment)
 
     return "Issues:", t
 
@@ -669,7 +505,7 @@ def show_pools_info(ceph: CephInfo) -> Tuple[str, Any]:
     return "Pool's stats:", f"<center>{table}<br><br><br><H4>Load info</H4><br>{table2}</center>"
 
 
-def get_osd_load_table(cluster: Cluster, ceph: CephInfo, osds_info: OSDSInfo) -> str:
+def get_osd_load_table(ceph: CephInfo, osds_info: OSDSInfo) -> str:
     table = html.HTMLTable("table-osd-load",
                            ["ID", "node", "PG's", "open<br>files", "ip<br>conn", "thr", "RSS", "VMM", "CPU<br>Used, s",
                             "Total<br>data", "Read<br>ops", "Read", "Write<br>ops", "Write"] +
@@ -870,11 +706,11 @@ def show_osd_info(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
 
         table.next_row()
 
-    load_table = get_osd_load_table(cluster, ceph, osds_info)
+    load_table = get_osd_load_table(ceph, osds_info)
     return "OSD's info:", f"<center>{table}<br><br><br><H4>Run info:</H4><br>{load_table}</center>"
 
 
-@per_info_required
+@perf_info_required
 def show_osd_perf_info(ceph: CephInfo) -> Tuple[str, Any]:
     table = html.HTMLTable(headers=["OSD",
                                     "node",
@@ -977,8 +813,8 @@ def show_osd_perf_info(ceph: CephInfo) -> Tuple[str, Any]:
     return "OSD's current load:", table
 
 
-@per_info_required
-def show_host_network_load_in_color(report: Report, cluster: Cluster, ceph: CephInfo):
+@perf_info_required
+def show_host_network_load_in_color(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
     send_net_io: Dict[str, List[Tuple]] = collections.defaultdict(list)
     recv_net_io: Dict[str, List[Tuple]] = collections.defaultdict(list)
 
@@ -1002,7 +838,7 @@ def show_host_network_load_in_color(report: Report, cluster: Cluster, ceph: Ceph
 
     std_nets = {'public', 'cluster'}
     ceph_net_count = len(std_nets)
-    report.add_block("Network load", "")
+    tables = []
 
     for io, name in [(send_net_io, "Send (KiBps/Pps)"), (recv_net_io, "Receive (KiBps/Pps)")]:
 
@@ -1033,7 +869,9 @@ def show_host_network_load_in_color(report: Report, cluster: Cluster, ceph: Ceph
 
             table.next_row()
 
-        report.add_block(name, table, "Network - " + name)
+        tables.append(table)
+
+    return "Net load", "<br>".join(map(str, tables))
 
 
 @dataclasses.dataclass
@@ -1071,8 +909,8 @@ class CephHDDInfo:
                    roles=set())
 
 
-@per_info_required
-def show_host_io_load_in_color(report: Report, ceph: CephInfo):
+@perf_info_required
+def show_host_io_load_in_color(ceph: CephInfo) -> Tuple[str, Any]:
     devs: Dict[str, Dict[str, CephHDDInfo]] = collections.defaultdict(dict)
 
     for osd in ceph.osds:
@@ -1102,10 +940,6 @@ def show_host_io_load_in_color(report: Report, ceph: CephInfo):
                 hset[dev] = CephHDDInfo.from_disk_info(osd.host.name, dev, stat)
             hset[dev].roles.update(roles)
 
-    if len(devs) == 0:
-        report.add_block("No current IO load available", "")
-        return
-
     loads = [
         ('iops', b2ssize_10, 'IOPS', 50),
         ('riops', b2ssize_10, 'Read IOPS', 30),
@@ -1120,16 +954,16 @@ def show_host_io_load_in_color(report: Report, ceph: CephInfo):
         ('io_time', None, 'Active time %', 100),
     ]
 
-    report.add_block("Current disk IO load", "")
+    tables = []
 
     for pos, (target_attr, tostrfunc, tp, min_max_val) in enumerate(loads, 1):
         if target_attr == 'lat':
             max_val = 300.0
         else:
-            max_val = max(map(max, [getattr(dev, target_attr)  # type: ignore
-                                    for all_host_devs in devs.values()
-                                    for dev in all_host_devs.values()]))
-            max_val = max(min_max_val, max_val)
+            mvals = []
+            for all_host_devs in devs.values():
+                mvals.append(max(getattr(dev, target_attr) for dev in all_host_devs.values()))
+            max_val = max(min_max_val, max(mvals))
 
         max_len = max(map(len, devs.values()))
 
@@ -1157,7 +991,9 @@ def show_host_io_load_in_color(report: Report, ceph: CephInfo):
                 table.add_cell("-", sorttable_customkey='0')
             table.next_row()
 
-        report.add_block(tp, table, "Disk IO - " + tp)
+        tables.append(table)
+
+    return "IO load", "<br>".join(map(str, tables))
 
 
 def host_link(hostname: str) -> str:
@@ -1312,142 +1148,141 @@ def host_info(host: Host, ceph: CephInfo) -> str:
     cluster_networks = [(ceph.public_net, 'ceph-public'), (ceph.cluster_net, 'ceph-cluster')]
 
     doc = html.Doc()
-    with doc.div(id=f"host-{host.name}", _class="data-ceph"):
-        doc.center.H3(host.name)
-        doc.br
-        doc.center.H4("Interfaces")
-        doc.br
+    doc.center.H3(host.name)
+    doc.br
+    doc.center.H4("Interfaces")
+    doc.br
 
-        table = html.HTMLTable(headers=["Name", "Type", "Duplex", "MTU", "Speed", "IP's", "Roles"],
-                               extra_cls=["hostinfo-net"],
-                               sortable=False,
-                               align=html.TableAlign.left_center)
+    table = html.HTMLTable(headers=["Name", "Type", "Duplex", "MTU", "Speed", "IP's", "Roles"],
+                           extra_cls=["hostinfo-net"],
+                           sortable=False,
+                           align=html.TableAlign.left_center)
 
-        def add_adapter_line(adapter, name):
-            tp = "phy" if adapter.is_phy else ('bond' if adapter.dev in host.bonds else 'virt')
-            roles = [role for net, role in cluster_networks if any((ip.ip in net) for ip in adapter.ips)]
-            table.add_row(
-                [name,
-                 tp,
-                 "" if adapter.duplex is None else str(adapter.duplex),
-                 "" if adapter.mtu is None else str(adapter.mtu),
-                 "" if adapter.speed is None else str(adapter.speed),
-                 "<br>".join(f"{ip.ip} / {ip.net.prefixlen}" for ip in adapter.ips),
-                 "<br>".join(roles)])
+    def add_adapter_line(adapter, name):
+        tp = "phy" if adapter.is_phy else ('bond' if adapter.dev in host.bonds else 'virt')
+        roles = [role for net, role in cluster_networks if any((ip.ip in net) for ip in adapter.ips)]
+        table.add_row(
+            [name,
+             tp,
+             "" if adapter.duplex is None else str(adapter.duplex),
+             "" if adapter.mtu is None else str(adapter.mtu),
+             "" if adapter.speed is None else str(adapter.speed),
+             "<br>".join(f"{ip.ip} / {ip.net.prefixlen}" for ip in adapter.ips),
+             "<br>".join(roles)])
 
-        all_ifaces = set(host.net_adapters)
+    all_ifaces = set(host.net_adapters)
 
-        # first show bonds
-        for _, bond in sorted(host.bonds.items()):
-            assert bond.name in all_ifaces
-            all_ifaces.remove(bond.name)
-            adapter = host.net_adapters[bond.name]
-            add_adapter_line(adapter, adapter.dev)
+    # first show bonds
+    for _, bond in sorted(host.bonds.items()):
+        assert bond.name in all_ifaces
+        all_ifaces.remove(bond.name)
+        adapter = host.net_adapters[bond.name]
+        add_adapter_line(adapter, adapter.dev)
 
-            for src in bond.sources:
-                assert src in all_ifaces
-                all_ifaces.remove(src)
-                add_adapter_line(host.net_adapters[src],
-                                 f'<div class="disk-children-1">+{src}</dev>')
+        for src in bond.sources:
+            assert src in all_ifaces
+            all_ifaces.remove(src)
+            add_adapter_line(host.net_adapters[src],
+                             f'<div class="disk-children-1">+{src}</dev>')
 
-            for adapter_name in list(all_ifaces):
-                if adapter_name.startswith(bond.name + '.'):
-                    all_ifaces.remove(adapter_name)
-                    add_adapter_line(host.net_adapters[adapter_name],
-                                     f'<div class="disk-children-2">->{adapter_name}</dev>')
+        for adapter_name in list(all_ifaces):
+            if adapter_name.startswith(bond.name + '.'):
+                all_ifaces.remove(adapter_name)
+                add_adapter_line(host.net_adapters[adapter_name],
+                                 f'<div class="disk-children-2">->{adapter_name}</dev>')
 
-            table.add_row(["-------"] * len(table.headers))
+        table.add_row(["-------"] * len(table.headers))
 
-        for name in sorted(all_ifaces):
-            if name != 'lo':
-                add_adapter_line(host.net_adapters[name], name)
+    for name in sorted(all_ifaces):
+        if name != 'lo':
+            add_adapter_line(host.net_adapters[name], name)
 
-        doc.center(str(table))
-        doc.br
-        doc.center.H4("HW disks")
-        doc.br
+    doc.center(str(table))
+    doc.br
+    doc.center.H4("HW disks")
+    doc.br
 
-        mib_and_mb = lambda x: f"{b2ssize(x)}B / {b2ssize_10(x)}B"
+    mib_and_mb = lambda x: f"{b2ssize(x)}B / {b2ssize_10(x)}B"
 
-        stor_roles = collections.defaultdict(lambda: collections.defaultdict(list))
+    stor_roles = collections.defaultdict(lambda: collections.defaultdict(list))
 
-        for osd in ceph.osds:
-            if osd.host is host:
-                stor_roles[osd.storage_info.data_partition]['data'].append(osd.id)
-                stor_roles[osd.storage_info.data_dev]['data'].append(osd.id)
-                if osd.storage_type == OSDStoreType.filestore:
-                    assert isinstance(osd.storage_info, FileStoreInfo)
-                    stor_roles[osd.storage_info.journal_partition]['journal'].append(osd.id)
-                    stor_roles[osd.storage_info.journal_dev]['journal'].append(osd.id)
-                else:
-                    assert isinstance(osd.storage_info, BlueStoreInfo)
-                    stor_roles[osd.storage_info.db_partition]['db'].append(osd.id)
-                    stor_roles[osd.storage_info.db_dev]['db'].append(osd.id)
-                    stor_roles[osd.storage_info.wal_partition]['wal'].append(osd.id)
-                    stor_roles[osd.storage_info.wal_dev]['wal'].append(osd.id)
-
-        order = ['data', 'journal', 'db', 'wal']
-
-        def html_roles(name: str) -> str:
-            return "<br>".join(name + ": " + ", ".join(map(str, sorted(ids)))
-                               for name, ids in sorted(stor_roles[name].items(), key=lambda x: order.index(x[0])))
-
-        table = html.HTMLTable(headers=["Name", "Type", "Size", "Roles", "Rota", "Scheduler",
-                                        "Model info", "RQ-size", "Phy Sec", "Min IO"],
-                                extra_cls=["hostinfo-disks"])
-
-        for _, disk in sorted(host.disks.items()):
-
-            if disk.hw_model.model and disk.hw_model.vendor:
-                model = f"Model: {disk.hw_model.vendor.strip()} / {disk.hw_model.model}"
-            elif disk.hw_model.model:
-                model = f"Model: {disk.hw_model.model}"
-            elif disk.hw_model.vendor:
-                model = f"Vendor: {disk.hw_model.vendor.strip()}"
+    for osd in ceph.osds:
+        if osd.host is host:
+            stor_roles[osd.storage_info.data_partition]['data'].append(osd.id)
+            stor_roles[osd.storage_info.data_dev]['data'].append(osd.id)
+            if osd.storage_type == OSDStoreType.filestore:
+                assert isinstance(osd.storage_info, FileStoreInfo)
+                stor_roles[osd.storage_info.journal_partition]['journal'].append(osd.id)
+                stor_roles[osd.storage_info.journal_dev]['journal'].append(osd.id)
             else:
-                model = ""
+                assert isinstance(osd.storage_info, BlueStoreInfo)
+                stor_roles[osd.storage_info.db_partition]['db'].append(osd.id)
+                stor_roles[osd.storage_info.db_dev]['db'].append(osd.id)
+                stor_roles[osd.storage_info.wal_partition]['wal'].append(osd.id)
+                stor_roles[osd.storage_info.wal_dev]['wal'].append(osd.id)
 
-            serial = "" if disk.hw_model.serial is None else ("Serial: " + disk.hw_model.serial)
+    order = ['data', 'journal', 'db', 'wal']
 
-            if model and serial:
-                info = f"{model}<br>{serial}"
-            elif model or serial:
-                info = model if model else serial
-            else:
-                info = ""
+    def html_roles(name: str) -> str:
+        return "<br>".join(name + ": " + ", ".join(map(str, sorted(ids)))
+                           for name, ids in sorted(stor_roles[name].items(), key=lambda x: order.index(x[0])))
 
-            table.add_row([disk.name, disk.tp.name, mib_and_mb(disk.size),
-                           html_roles(disk.path),
-                           str(disk.rota),
-                           "" if disk.scheduler is None else str(disk.scheduler),
-                           info,
-                           str(disk.rq_size),
-                           str(disk.phy_sec),
-                           str(disk.min_io)])
+    table = html.HTMLTable(headers=["Name", "Type", "Size", "Roles", "Rota", "Scheduler",
+                                    "Model info", "RQ-size", "Phy Sec", "Min IO"],
+                            extra_cls=["hostinfo-disks"])
 
-        doc.center(str(table))
-        doc.br
-        doc.center.H4("Mountable")
-        doc.br
-        table = html.HTMLTable(headers=["Name", "Size", "Type", "Mountpoint", "Ceph role", "Fs", "Free space", "Label"],
-                               extra_cls=["hostinfo-mountable"], sortable=False)
+    for _, disk in sorted(host.disks.items()):
 
-        def run_over_children(obj, level: int):
-            table.add_row([f'<div class="disk-children-{level}">{obj.name}</div>',
-                           mib_and_mb(obj.size),
-                           obj.tp.name if level == 0 else '',
-                           obj.mountpoint if obj.mountpoint else '',
-                           "" if level == 0 else html_roles(obj.path),
-                           obj.fs if obj.fs else '',
-                           mib_and_mb(obj.free_space) if obj.free_space is not None else '',
-                           "" if obj.label is None else obj.label])
-            for _, ch in sorted(obj.children.items()):
-                run_over_children(ch, level + 1)
+        if disk.hw_model.model and disk.hw_model.vendor:
+            model = f"Model: {disk.hw_model.vendor.strip()} / {disk.hw_model.model}"
+        elif disk.hw_model.model:
+            model = f"Model: {disk.hw_model.model}"
+        elif disk.hw_model.vendor:
+            model = f"Vendor: {disk.hw_model.vendor.strip()}"
+        else:
+            model = ""
 
-        for _, disk in sorted(host.disks.items()):
-            run_over_children(disk, 0)
+        serial = "" if disk.hw_model.serial is None else ("Serial: " + disk.hw_model.serial)
 
-        doc.center(str(table))
+        if model and serial:
+            info = f"{model}<br>{serial}"
+        elif model or serial:
+            info = model if model else serial
+        else:
+            info = ""
+
+        table.add_row([disk.name, disk.tp.name, mib_and_mb(disk.size),
+                       html_roles(disk.path),
+                       str(disk.rota),
+                       "" if disk.scheduler is None else str(disk.scheduler),
+                       info,
+                       str(disk.rq_size),
+                       str(disk.phy_sec),
+                       str(disk.min_io)])
+
+    doc.center(str(table))
+    doc.br
+    doc.center.H4("Mountable")
+    doc.br
+    table = html.HTMLTable(headers=["Name", "Size", "Type", "Mountpoint", "Ceph role", "Fs", "Free space", "Label"],
+                           extra_cls=["hostinfo-mountable"], sortable=False)
+
+    def run_over_children(obj, level: int):
+        table.add_row([f'<div class="disk-children-{level}">{obj.name}</div>',
+                       mib_and_mb(obj.size),
+                       obj.tp.name if level == 0 else '',
+                       obj.mountpoint if obj.mountpoint else '',
+                       "" if level == 0 else html_roles(obj.path),
+                       obj.fs if obj.fs else '',
+                       mib_and_mb(obj.free_space) if obj.free_space is not None else '',
+                       "" if obj.label is None else obj.label])
+        for _, ch in sorted(obj.children.items()):
+            run_over_children(ch, level + 1)
+
+    for _, disk in sorted(host.disks.items()):
+        run_over_children(disk, 0)
+
+    doc.center(str(table))
 
     return str(doc)
 
@@ -1557,7 +1392,7 @@ def main(argv: List[str]):
             show_osd_pg_histo,
             show_osd_load,
             show_osd_lat_heatmaps,
-            show_osd_ops_boxplot,
+            # show_osd_ops_boxplot,
             show_pg_size_kde
         ]
 
@@ -1574,10 +1409,10 @@ def main(argv: List[str]):
 
             if new_block is not None:
                 assert 'report' not in sig.parameters
-                report.add_block(*new_block)
+                report.add_block(reporter.__name__.replace("show_", ""), *new_block)
 
         for _, host in sorted(cluster.hosts.items()):
-            report.add_block(None, host_info(host, ceph))
+            report.add_block(host.name, None, host_info(host, ceph))
 
         report.save_to(Path(opts.out), opts.pretty_html, embed=opts.embed)
         logger.info("Report successfully stored to %r", index_path)

@@ -1,0 +1,88 @@
+max_scrub_errors: 0
+
+classes_for_j: [sata_ssd, sas_ssd, nvme]
+classes_for_wal: [sata_ssd, sas_ssd, nvme]
+classes_for_db: [sata_ssd, sas_ssd, nvme]
+
+max_journals_per_class:
+    virstio: 1
+    unknown: 1
+    sata_hdd: 1
+    sas_hdd: 1
+    sata_ssd: 6
+    sas_ssd: 6
+    nvme: 8
+
+min_osd_per_class:
+    virtio: 1
+    unknown: 1
+    sata_hdd: 1
+    sas_hdd: 1
+    sata_ssd: 2
+    sas_ssd: 2
+    nvme: 4
+
+max_osd_per_class:
+    virtio: 1
+    unknown: 1
+    sata_hdd: 1
+    sas_hdd: 1
+    sata_ssd: 4
+    sas_ssd: 4
+    nvme: 8
+
+separated_nets: true
+
+min_net_bw_cluster_gib: 20
+min_net_bw_public_gib: 20
+
+osd:
+    max_threads: 100
+    max_fd_bs: 500
+    max_fd_fs: 10000
+    max_sockets: 1000
+
+max_pg_per_osd: 400
+min_pg_per_osd: 100
+
+pool_size: 3/2
+gnocci_pool_size: 2/1
+
+pg_eq_pgp: true
+
+almost_empty_pool:
+    min_total_GiB: 100  # min data in whole cluster to run this check
+    data_part: 0.0001
+    max_pg: 128
+    max_pg_per_osd: 1
+
+large_pools:
+    min_total_GiB: 100
+    large_pool_data_part: 0.05
+    min_size_diff: 1.5
+
+replication_level_same_size: true
+
+osd_under_same_root:
+    max_size_diff: 0.01
+    all_eq_types: true
+
+max_used_space_diff: 0.2
+
+max_load_diff:
+    min_mops: 1
+    min_GiB: 100
+    max_diff: 0.2
+
+# part of storage space
+wal_part_min: 0.005
+db_part_min: 0.05
+
+fs_max_sync_interval:
+    max: 30
+    min: 10
+
+bs_node_ram:
+    osd_extra_gb: 1
+    min_free: 16
+    max_free_: 32
