@@ -16,8 +16,5 @@ pylint:
 pylint_e:
 		python3 -m pylint -E '${PYLINT_FMT}' --rcfile=pylint.rc ${ALL_FILES}
 
-prepare:
-		bash prepare.sh
-
 archive:
-		bash scripts/makearch.sh binary/ceph_report_v2.sh
+		bash scripts/makearch.sh binary/ceph_report.sh
