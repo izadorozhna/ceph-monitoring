@@ -15,7 +15,7 @@ import collections
 import urllib.request
 import logging.config
 from pathlib import Path
-from typing import Dict, List, Tuple, Any, Union, Set, Sequence, Optional, Iterable, TypeVar
+from typing import Dict, List, Tuple, Any, Union, Set, Sequence, Optional, Iterable, TypeVar, Callable
 
 import yaml
 import numpy
@@ -217,6 +217,32 @@ class Report:
         index_path.open("w").write(index)
 
 
+def seconds_to_str(seconds: Union[int, float]) -> str:
+    seconds = int(seconds)
+
+    s = seconds % 60
+    m = (seconds // 60) % 60
+    h = (seconds // 3600) % 24
+    d = seconds // (3600 * 24)
+
+    if s != 0 and h != 0:
+        if d == 0:
+            return f"{h}:{m:<02d}:{s:<02d}"
+        return f"{d} days {h}:{m:<02d}:{s:<02d}"
+
+    data = []
+    if d != 0:
+        data.append(f"{d} days")
+    if h != 0:
+        data.append(f"{h}h")
+    if m != 0:
+        data.append(f"{m}m")
+    if s != 0:
+        data.append(f"{s}s")
+
+    return " ".join(data)
+
+
 def show_cluster_summary(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
     t = html.HTMLTable("table-summary", ["Setting", "Value"], sortable=False)
     t.add_cells("Collected at", cluster.report_collected_at_local)
@@ -242,18 +268,7 @@ def show_cluster_summary(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
     t.add_cells("Monmap version", str(ceph.status.monmap_stat['epoch']))
     mon_tm = time.mktime(time.strptime(ceph.status.monmap_stat['modified'], "%Y-%m-%d %H:%M:%S.%f"))
     collect_tm = time.mktime(time.strptime(cluster.report_collected_at_local, "%Y-%m-%d %H:%M:%S"))
-    diff = int(collect_tm - mon_tm)
-
-    h = diff // 3600
-    m = (diff % 3600) % 60
-    s = diff % 60
-    if h < 24:
-        t.add_cells("Monmap modified in", f'{h}:{m:<02d}:{s:<02d}')
-    else:
-        d = h // 24
-        h %= 24
-        t.add_cells("Monmap modified in", f'{d}d {h}:{m:<02d}:{s:<02d}')
-
+    t.add_cells("Monmap modified in", seconds_to_str(int(collect_tm - mon_tm)))
     return "Status:", t
 
 
@@ -278,41 +293,6 @@ def show_issues_table(cluster: Cluster, ceph: CephInfo, report: Report):
 
     for block_id, errs in err_per_test.items():
         report.add_block('err-' + block_id, None, "<br>".join(errs))
-
-
-def show_osd_summary(ceph: CephInfo) -> Tuple[str, Any]:
-    osd_count = len(ceph.osds)
-    stor_set = {osd.storage_type for osd in ceph.osds}
-    stor_set_names = {stor.name for stor in stor_set}
-    has_bs = OSDStoreType.bluestore in stor_set
-    has_fs = OSDStoreType.filestore in stor_set
-
-    if ceph.settings is None:
-        t = H.font("No live OSD found!", color="red")
-    else:
-        t = html.HTMLTable("table-osd-summary", ["Setting", "Value"], sortable=False)
-        t.add_cells("Count", str(osd_count))
-        pgcount = sum(pool.size * pool.pg for pool in ceph.pools.values())
-        t.add_cells("Average PG copy per OSD", str(pgcount // osd_count))
-        t.add_cells("Cluster net", str(ceph.cluster_net))
-        t.add_cells("Public net", str(ceph.public_net))
-        t.add_cells("Near full ratio", "%0.3f" % (float(ceph.settings.mon_osd_nearfull_ratio,)))
-        t.add_cells("Full ratio", "%0.3f" % (float(ceph.settings.mon_osd_full_ratio,)))
-        t.add_cells("Backfill full ratio", getattr(ceph.settings, "osd_backfill_full_ratio", "?"))
-        t.add_cells("Filesafe full ratio", "%0.3f" % (float(ceph.settings.osd_failsafe_full_ratio,)))
-        t.add_cells("Storage types", list(stor_set_names)[0]
-                                     if len(stor_set_names) == 1
-                                     else html_fail(",".join(map(str, stor_set_names))))
-
-        if has_fs:
-            t.add_cells("Journal aio", ceph.settings.journal_aio)
-            t.add_cells("Journal dio", ceph.settings.journal_dio)
-            t.add_cells("Filestorage sync", str(int(float(ceph.settings.filestore_max_sync_interval))) + 's')
-        elif has_bs:
-            # TODO: add BS info
-            pass
-
-    return "OSD:", t
 
 
 def show_io_status(ceph: CephInfo) -> Tuple[str, Any]:
@@ -430,6 +410,169 @@ def show_osd_state(ceph: CephInfo) -> Tuple[str, Any]:
     return "OSD's state:", table
 
 
+def show_primary_settings(ceph: CephInfo) -> Tuple[str, Any]:
+    if ceph.settings is None:
+        return "Settings", '<H4><font color="red">No live OSD found!"</font></H4>'
+
+    table = html.HTMLTable("table-settings", ["Name", "Value"])
+
+    table.add_cell("<b>Common</b>", colspan="2")
+    table.next_row()
+
+    table.add_cells("Cluster net", str(ceph.cluster_net))
+    table.add_cells("Public net", str(ceph.public_net))
+    table.add_cells("Near full ratio", "%0.3f" % (float(ceph.settings.mon_osd_nearfull_ratio,)))
+    table.add_cells("Full ratio", "%0.3f" % (float(ceph.settings.mon_osd_full_ratio,)))
+    table.add_cells("Backfill full ratio", getattr(ceph.settings, "osd_backfill_full_ratio", "?"))
+    table.add_cells("Filesafe full ratio", "%0.3f" % (float(ceph.settings.osd_failsafe_full_ratio,)))
+
+    def show_opt(name: str, tr_func: Callable[[str], str] = None):
+        name_under = name.replace(" ", "_")
+        if name_under in ceph.settings:
+            vl = ceph.settings[name_under]
+            if tr_func is not None:
+                vl = tr_func(vl)
+            table.add_cells(name.capitalize(), vl)
+
+    table.add_cell("<b>Fail detection</b>", colspan="2")
+    table.next_row()
+
+    show_opt("mon osd down out interval", lambda x: seconds_to_str(int(x)))
+    show_opt("mon osd adjust down out interval")
+    show_opt("mon osd down out subtree limit")
+    show_opt("mon osd report timeout", lambda x: seconds_to_str(int(x)))
+    show_opt("mon osd min down reporters")
+    show_opt("mon osd reporter subtree level")
+    show_opt("osd heartbeat grace", lambda x: seconds_to_str(int(x)))
+
+    table.add_cell("<b>Other</b>", colspan="2")
+    table.next_row()
+
+    show_opt("osd max object size", lambda x: b2ssize(int(x)))
+    show_opt("osd mount options xfs")
+
+    table.add_cell("<b>Scrub</b>", colspan="2")
+    table.next_row()
+
+    show_opt("osd max scrubs")
+    show_opt("osd scrub begin hour")
+    show_opt("osd scrub end hour")
+    show_opt("osd scrub during recovery")
+    show_opt("osd scrub thread timeout", lambda x: seconds_to_str(int(x)))
+    show_opt("osd scrub min interval", lambda x: seconds_to_str(int(float(x))))
+    show_opt("osd scrub chunk max", lambda x: b2ssize(int(x)))
+    show_opt("osd scrub sleep", lambda x: seconds_to_str(int(float(x))))
+    show_opt("osd deep scrub interval", lambda x: seconds_to_str(int(float(x))))
+    show_opt("osd deep scrub stride", lambda x: b2ssize(int(x)))
+
+    table.add_cell("<b>OSD io</b>", colspan="2")
+    table.next_row()
+
+    show_opt("osd op queue")
+    show_opt("osd client op priority")
+    show_opt("osd recovery op priority")
+    show_opt("osd scrub priority")
+    show_opt("osd op thread timeout", lambda x: seconds_to_str(float(x)))
+    show_opt("osd op complaint time", lambda x: seconds_to_str(float(x)))
+    show_opt("osd disk threads")
+    show_opt("osd disk thread ioprio class")
+    show_opt("osd disk thread ioprio priority")
+    show_opt("osd op history size")
+    show_opt("osd op history duration")
+    show_opt("osd recovery max chunk", lambda x: b2ssize(int(x)))
+    show_opt("osd max backfills")
+    show_opt("osd backfill scan min")
+    show_opt("osd backfill scan max")
+    show_opt("osd map cache size")
+    show_opt("osd map message max")
+    show_opt("osd recovery max active")
+    show_opt("osd recovery thread timeout")
+
+    stor_set = {osd.storage_type.name for osd in ceph.osds}
+    if OSDStoreType.bluestore.name in stor_set:
+        table.add_cell("<b>Bluestore</b>", colspan="2")
+        table.next_row()
+
+        show_opt("bluestore cache size hdd")
+        show_opt("bluestore cache size ssd")
+        show_opt("bluestore cache meta ratio")
+        show_opt("bluestore cache kv ratio")
+        show_opt("bluestore cache kv max", lambda x: b2ssize(int(x)))
+        show_opt("bluestore csum type")
+
+    if OSDStoreType.filestore.name in stor_set:
+        table.add_cell("<b>Filestore</b>", colspan="2")
+        table.next_row()
+        table.add_cells("Journal aio", ceph.settings.journal_aio)
+        table.add_cells("Journal dio", ceph.settings.journal_dio)
+        table.add_cells("Filestorage sync", str(int(float(ceph.settings.filestore_max_sync_interval))) + 's')
+
+    # show_opt("")
+    # show_opt("")
+    # pgcount = sum(pool.size * pool.pg for pool in ceph.pools.values())
+    # t.add_cells("Average PG copy per OSD", str(pgcount // osd_count))
+    #     t.add_cells("Storage types", list(stor_set_names)[0]
+    #                                  if len(stor_set_names) == 1
+    #                                  else html_fail(",".join(map(str, stor_set_names))))
+
+    return "Settings:", table
+
+
+def show_ruleset_info(ceph: CephInfo) -> Tuple[str, Any]:
+    table = html.HTMLTable("table-rules",
+                           ["Rule",
+                            "Id",
+                            "Pools",
+                            "# OSD",
+                            "Size",
+                            "Free size",
+                            "Data",
+                            "Objs",
+                            "PG",
+                            "PG/OSD",
+                            "Disk size",
+                            "Disk type",
+                            "Disk model"])
+
+    pools = {}
+    for pool in ceph.pools.values():
+        pools.setdefault(pool.crush_rule, []).append(pool)
+
+    for rule in ceph.crush.rules.values():
+        table.add_cell(rule.name)
+        table.add_cell(rule.id)
+        table.add_cell("<br>".join(pool.name for pool in pools[rule.id]))
+        osds = list(ceph.osd_map[osd_node.id] for osd_node in ceph.crush.iter_osds_for_rule(rule.id))
+        table.add_cell(str(len(osds)))
+        total_sz = sum(osd.free_space + osd.used_space for osd in osds)
+        table.add_cell_b2ssize(total_sz)
+        total_free = sum(osd.free_space for osd in osds)
+        table.add_cell(f"{b2ssize(total_free)} ({total_free * 100 // total_sz}%)")
+        table.add_cell_b2ssize(sum(pool.df.size_bytes for pool in pools[rule.id]))
+        table.add_cell_b2ssize_10(sum(pool.df.num_objects for pool in pools[rule.id]))
+        total_pg = sum(pool.pg for pool in pools[rule.id])
+        table.add_cell(total_pg)
+        table.add_cell(total_pg // len(osds))
+
+        disks_types = set()
+        disks_sizes = set()
+        disks_info = set()
+
+        for osd in osds:
+            dsk = osd.host.disks[osd.storage_info.data_dev]
+
+            disks_types.add(dsk.tp.name)
+            disks_sizes.add(dsk.size)
+            disks_info.add(f"{dsk.hw_model.vendor}::{dsk.hw_model.model}")
+
+        table.add_cell(", ".join(map(b2ssize, sorted(disks_sizes))))
+        table.add_cell(", ".join(sorted(disks_types)))
+        table.add_cell(", ".join(sorted(disks_info)))
+        table.next_row()
+
+    return "Crush rulesets", table
+
+
 def show_pools_info(ceph: CephInfo) -> Tuple[str, Any]:
     table = html.HTMLTable("table-pools",
                            ["Pool",
@@ -438,11 +581,11 @@ def show_pools_info(ceph: CephInfo) -> Tuple[str, Any]:
                             "Obj",
                             "Bytes",
                             "Ruleset",
-                            "PG(PGP)",
+                            "PG[,PGP]",
                             "PG<br>recommended",
                             "Bytes/PG",
                             "Objs/PG",
-                            "PG per OSD<br>Dev %"],
+                            "PG/OSD<br>Dev %"],
                             align=html.TableAlign.left_right)
 
     table2 = html.HTMLTable("table-pools-io", ["Pool", "Read B", "Write B", "Read ops", "Write ops", "Rd/PG", "Wr/PG"],
@@ -452,6 +595,7 @@ def show_pools_info(ceph: CephInfo) -> Tuple[str, Any]:
     # add iops per PG
     # add recommended PG count
 
+    total_objs = sum(pool.df.num_objects for pool in ceph.pools.values())
     for _, pool in sorted(ceph.pools.items()):
         table.add_cell(pool.name)
         table.add_cell(str(pool.id))
@@ -459,15 +603,22 @@ def show_pools_info(ceph: CephInfo) -> Tuple[str, Any]:
         if pool.size != 3 or pool.min_size != 2:
             vl = html_fail(vl)
         table.add_cell(vl, sorttable_customkey=str(pool.size))
-        table.add_cell_b2ssize_10(pool.df.num_objects)
-        table.add_cell_b2ssize(pool.df.size_bytes)
+
+        obj_perc = pool.df.num_objects * 100 // total_objs
+        table.add_cell(f"{b2ssize_10(pool.df.num_objects)} ({obj_perc}%)", sorttable_customkey=str(pool.df.num_objects))
+
+        bytes_perc = pool.df.size_bytes * 100 // ceph.status.data_bytes
+        table.add_cell(f"{b2ssize(pool.df.size_bytes)} ({bytes_perc}%)", sorttable_customkey=str(pool.df.size_bytes))
+
         table.add_cell(str(pool.crush_rule))
+        pg_perc = (pool.pg * 100) // ceph.status.num_pgs
 
         if pool.pgp != pool.pg:
-            table.add_cell(f"{pool.pg}({H.font(str(pool.pgp), color='red')})",
-                           sorttable_customkey=str(pool.pg))
+            pg_message = f"{pool.pg}, {H.font(str(pool.pgp), color='red')}"
         else:
-            table.add_cell(str(pool.pg))
+            pg_message = str(pool.pg)
+
+        table.add_cell(pg_message + f" ({pg_perc}%)", sorttable_customkey=str(pool.pg))
 
         table.add_cell("-")
 
@@ -1386,7 +1537,9 @@ def main(argv: List[str]):
         cluster_reporters = [
             show_cluster_summary,
             show_issues_table,
-            show_osd_summary,
+            show_primary_settings,
+            show_pools_info,
+            show_ruleset_info,
             show_io_status,
             show_health_messages,
             show_hosts_info,
@@ -1394,7 +1547,6 @@ def main(argv: List[str]):
             show_osd_state,
             show_osd_info,
             show_osd_perf_info,
-            show_pools_info,
             show_pg_state,
             show_osd_pool_pg_distribution,
             show_host_io_load_in_color,

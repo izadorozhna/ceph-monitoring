@@ -3,7 +3,7 @@ from enum import Enum
 from typing import List, Dict, Callable, Any, Sequence
 from dataclasses import dataclass
 
-from .cluster_classes import Cluster, CephInfo, FileStoreInfo, BlueStoreInfo
+from .cluster_classes import Cluster, CephInfo, FileStoreInfo, BlueStoreInfo, OSDStoreType
 from cephlib.units import b2ssize
 
 # Check
@@ -573,6 +573,23 @@ def network_mtu(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report: C
                       "" if fails == 0 else f"{fails} net adapters has too small MTU")
 
 
+@checker(Severity.warning, "Filestore sync interval")
+def check_filestore_sync_interval(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report: CheckReport):
+    stor_set = {osd.storage_type.name for osd in ceph.osds}
+    has_fs = OSDStoreType.filestore.name in stor_set
+    if has_fs:
+        cfg = config.get('fs_sync_interval', {})
+        max_i = cfg.get("max", 30)
+        min_i = cfg.get("min", 10)
+        real_i = float(ceph.settings.filestore_max_sync_interval)
+        if real_i < min_i or real_i > max_i:
+            msg = f"Filestore sync interval == {real_i} is not in recommended range [{min_i}, {max_i}]"
+            report.add_extra_message(Severity.warning, msg)
+            report.add_result(False, msg)
+        else:
+            report.add_result(True, "")
+
+
 def run_all_checks(config: CheckConfig, cluster: Cluster, ceph: CephInfo) -> List[CheckResult]:
 
     report = CheckReport()
@@ -583,257 +600,3 @@ def run_all_checks(config: CheckConfig, cluster: Cluster, ceph: CephInfo) -> Lis
 
     return report.results
 
-
-
-#
-# def show_issues_table(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
-#     t = html.HTMLTable("table-issues", ["Check", "Result", "Comment"], sortable=False)
-#
-#     failed = html_fail("Failed")
-#     passed = html_ok("Passed")
-#
-#     # ---------------------------------  No scrub errors ---------------------------------------------------------------
-#
-#     if ceph.osds_info:
-#         total_scrub_err = 0
-#         for osd_info in ceph.osds_info.osds.values():
-#             total_scrub_err += osd_info.pg_stats.scrub_errors + \
-#                                osd_info.pg_stats.deep_scrub_errors + \
-#                                osd_info.pg_stats.shallow_scrub_errors
-#
-#         t.add_cells("No scrub errors",
-#                     passed if total_scrub_err == 0 else failed,
-#                     "" if total_scrub_err == 0 else f"Error count {total_scrub_err}")
-#     else:
-#         t.add_cells("No scrub errors", failed, "No data available")
-#
-#     # ---------------------------------  SSD/NVME journals -------------------------------------------------------------
-#
-#     count = 0
-#     for osd in ceph.osds:
-#         if isinstance(osd.storage_info, FileStoreInfo):
-#             if not osd.host.disks[osd.storage_info.journal_dev].tp.is_fast():
-#                 count += 1
-#         else:
-#             if not osd.host.disks[osd.storage_info.wal_dev].tp.is_fast():
-#                 count += 1
-#             elif not osd.host.disks[osd.storage_info.db_dev].tp.is_fast():
-#                 count += 1
-#
-#     t.add_cells("SSD/NVME used for journals/wal/db",
-#                 passed if count == 0 else failed,
-#                 "" if 0 == count else f"{count} OSD's failed")
-#
-#     # ---------------------------------  separated ceph nets -----------------------------------------------------------
-#
-#     t.add_cells("Separated client/cluster ceph networks",
-#                 passed if ceph.cluster_net != ceph.public_net else failed,
-#                 "" if ceph.cluster_net != ceph.public_net else f"Same net {ceph.public_net}<br>is used for both")
-#
-#     # ---------------------------------  journal per drive count -------------------------------------------------------
-#
-#     host_dev_j_count = collections.Counter()
-#     for osd in ceph.osds:
-#         if isinstance(osd.storage_info, FileStoreInfo):
-#             host_dev_j_count[f"{osd.host.name}/{osd.storage_info.journal_dev}"] += 1
-#         else:
-#             host_dev_j_count[f"{osd.host.name}/{osd.storage_info.wal_dev}"] += 1
-#             if osd.storage_info.db_dev != osd.storage_info.wal_dev:
-#                 host_dev_j_count[f"{osd.host.name}/{osd.storage_info.db_dev}"] += 1
-#
-#     fcount = 0
-#     for host in cluster.hosts.values():
-#         for disk in host.disks.values():
-#             count = host_dev_j_count[f"{host.name}/{disk.name}"]
-#             if (count > 1 and not disk.tp.is_fast()) or (count > 4 and disk.tp != DiskType.nvme) or (count > 6):
-#                 fcount += 1
-#
-#     t.add_cells("Max 6 journals per nvme, 4 per SSD, 1 per HDD",
-#                 passed if fcount == 0 else failed,
-#                 "" if fcount == 0 else f"Failed for {fcount} drives")
-#
-#     # ---------------------------------  PG counts for OSD's -----------------------------------------------------------
-#
-#     wrong_pg_count = 0
-#
-#     for osd in ceph.osds:
-#         if osd.pg_count < 100 or osd.pg_count > 400:
-#             wrong_pg_count += 1
-#
-#     t.add_cells("400 >= OSD PG count >= 100",
-#                 passed if wrong_pg_count == 0 else failed,
-#                 "" if wrong_pg_count == 0 else f"Failed for {wrong_pg_count} drives")
-#
-#     # ---------------------------------  Pool size ---------------------------------------------------------------------
-#
-#     wrong_size = 0
-#     for name, pool in ceph.pools.items():
-#         expected_size = (2, 1) if name == 'gnocci' else (3, 2)
-#         if (pool.size, pool.min_size) != expected_size:
-#             wrong_size += 1
-#
-#     t.add_cells("3/2 for all pools, except 2/1 for gnocci",
-#                 passed if wrong_size == 0 else failed,
-#                 "" if wrong_size == 0 else f"Failed for {wrong_size} pools")
-#
-#     # ---------------------------------  Net performance ---------------------------------------------------------------
-#
-#     # ---------------------------------  Scrubbing at night ------------------------------------------------------------
-#
-#     # ---------------------------------  OSD threads and tcp connections -----------------------------------------------
-#
-#     # ---------------------------------  Same pg and pgp for all pools -------------------------------------------------
-#
-#     pg_ne_pgp = 0
-#     for name, pool in ceph.pools.items():
-#         if pool.pg != pool.pgp:
-#             pg_ne_pgp += 1
-#
-#     t.add_cells("PG == PGP for all pools",
-#                 passed if pg_ne_pgp == 0 else failed,
-#                 "" if pg_ne_pgp == 0 else f"Failed for {pg_ne_pgp} pools")
-#
-#     # ---------------------------------  Find pools with virtual no data and many PG -----------------------------------
-#     # ---------------------------------  PG counts for pools -----------------------------------------------------------
-#
-#     total_data = sum(pool.df.size_bytes for pool in ceph.pools.values())
-#     total_objs = sum(pool.df.num_objects for pool in ceph.pools.values())
-#     max_pg_for_empty_pool = max([128, len(ceph.osds)])
-#     too_many_pg = False
-#
-#     pgs_and_data = []
-#
-#     for pool in ceph.pools.values():
-#         if pool.pg > max_pg_for_empty_pool:
-#             if pool.df.size_bytes < total_data / 10000 and pool.df.num_objects < total_objs / 10000:
-#                 too_many_pg = True
-#             if pool.df.size_bytes > total_data / 20 and pool.df.size_bytes > 100 * 2 ** 30:
-#                 pgs_and_data.append((pool.df.size_bytes, pool.pg))
-#
-#     t.add_cells("Almost empty pool with too many PG's", failed if too_many_pg else passed, "")
-#
-#     pg_seq = [pg for _, pg in sorted(pgs_and_data)]
-#     pg_count_messed = False
-#     if len(pg_seq) >= 2:
-#         for (sm_data, sm_pg), (lg_data, lg_pg) in zip(pgs_and_data[1:], pgs_and_data[:-1]):
-#             if sm_data * 1.5 < lg_data and sm_pg > lg_pg:
-#                 pg_count_messed = True
-#     t.add_cells("Large pools has correct pg order", failed if pg_count_messed else passed, "")
-#     # ---------------------------------  OSD nodes load ----------------------------------------------------------------
-#
-#     # ---------------------------------  OSD ram consumption -----------------------------------------------------------
-#
-#     # ---------------------------------  Second level nodes for all crush roots either count > 3 or same size ----------
-#
-#     for root in ceph.crush.roots:
-#         childs = root.childs
-#         if len(childs) == 3:
-#             if abs(childs[0].weight - childs[1].weight) > 1 or abs(childs[2].weight - childs[1].weight) > 1:
-#                 t.add_cells(">=3 top level childs, if ==3 - all childs have the same weights", failed, "")
-#                 break
-#         if len(childs) < 3:
-#             t.add_cells(">=3 top level childs", failed, "")
-#             break
-#     else:
-#         t.add_cells("3 top level childs should have same weights", passed, "")
-#
-#     # ---------------------------------  Each root has the same OSD's --------------------------------------------------
-#
-#     different_sizes = False
-#     different_types = False
-#
-#     for root in ceph.crush.roots:
-#         osds = list(root.iter_nodes('osd'))
-#
-#         osd = ceph.osds[osds[0].id]
-#         devs = osd.host.disks
-#         parts = osd.host.storage_devs
-#         osd0_size = parts[osd.storage_info.data_partition].size
-#         osd0_data_tp = devs[osd.storage_info.data_dev].tp
-#
-#         for osd_node in osds[1:]:
-#             osd = ceph.osds[osd_node.id]
-#             parts = osd.host.storage_devs
-#             if abs(osd0_size - parts[osd.storage_info.data_partition].size) / osd0_size > 0.01:
-#                 different_sizes = True
-#             if osd.host.disks[osd.storage_info.data_dev].tp != osd0_data_tp:
-#                 different_types = True
-#
-#     t.add_cells("All osds for same root have almost same size",
-#                 failed if different_sizes else passed, "")
-#
-#     t.add_cells("All osds for same root have have same storage type",
-#                 failed if different_types else passed, "")
-#
-#     # ---------------------------------  OSD of the same type data evenly distributed ----------------------------------
-#
-#     data_per_osd = collections.defaultdict(list)
-#     for osd in ceph.osds:
-#         total_space = osd.used_space + osd.free_space
-#         data_per_osd[total_space].append(osd.free_space / total_space)
-#
-#     # for key, vals in data_per_osd.items():
-#     #     print(f"{key} => {min(vals):.3f}, {max(vals):.3f}")
-#
-#     for sz, free in data_per_osd.items():
-#         if abs(max(free) - min(free)) > 0.2:
-#             t.add_cells("(max used OSD - min used OSD) < 0.2 for same OSD sizes", failed, "")
-#             break
-#     else:
-#         t.add_cells("(max used OSD - min used OSD) < 0.2 for same OSD sizes", passed, "")
-#
-#     # ---------------------------------  OSD of the same type load evenly distributed ----------------------------------
-#     io_per_osd = collections.defaultdict(lambda: collections.defaultdict(list))
-#     for osd_info in ceph.osds_info.osds.values():
-#         for attr in ("reads", "writes", "read_b", "write_b"):
-#             io_per_osd[attr][osd_info.total_space].append(getattr(osd_info.pg_stats, attr))
-#
-#     for name, dct in io_per_osd.items():
-#         for sz, free in dct.items():
-#             mx = max(free)
-#             if name in ('reads', 'writes') and mx < 1000000:
-#                 continue
-#             if name in ('read_b', 'write_b') and mx < 100000000000:
-#                 continue
-#             if abs((mx - min(free)) / mx) > 0.2:
-#                 t.add_cells(f"(Max {name} OSD - min {name} OSD) < 0.2 for same OSD sizes", failed, "")
-#                 break
-#         else:
-#             t.add_cells(f"(Max {name} OSD - min {name} OSD) < 0.2 for same OSD sizes", passed, "")
-#     # ---------------------------------  Journal & wal & db sizes ------------------------------------------------------
-#
-#     bad_size_count = 0
-#     for osd in ceph.osds:
-#         osd_info = ceph.osds_info.osds[osd.id]
-#         if osd_info.j_info:
-#             sync = float(osd.run_info.config['filestore_max_sync_interval']) if osd.run_info else 5
-#             min_j_size = osd_info.data_drive_type.bandwith_mbps() * 2 * sync
-#
-#             if osd_info.j_info.size / 2 ** 20 < min_j_size:
-#                 bad_size_count += 1
-#         else:
-#             assert osd_info.wal_db_info
-#             assert isinstance(osd.storage_info, BlueStoreInfo)
-#             data_part_size = osd.host.storage_devs[osd.storage_info.data_partition].size
-#             wal_part_size = osd.host.storage_devs[osd.storage_info.wal_partition].size
-#
-#             min_wal_size =  data_part_size * 0.005
-#             min_db_size = data_part_size * 0.05
-#
-#             if osd_info.wal_db_info.wal_size is not None:
-#                 if osd_info.wal_db_info.wal_size < min_wal_size:
-#                     bad_size_count += 1
-#             else:
-#                 if osd.storage_info.wal_partition == osd.storage_info.db_partition:
-#                     if wal_part_size < min_wal_size + min_db_size:
-#                         bad_size_count += 1
-#                 elif wal_part_size < min_wal_size:
-#                     bad_size_count += 1
-#                 elif osd.host.storage_devs[osd.storage_info.db_partition].size < min_db_size:
-#                     bad_size_count += 1
-#
-#     t.add_cells("Journal and DB has enough space",
-#                 passed if bad_size_count == 0 else failed,
-#                 "" if fcount == 0 else f"Failed for {bad_size_count} journals/wal/db")
-#
-#     return "Issues:", t

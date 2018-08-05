@@ -90,7 +90,7 @@ max_load_diff:
 wal_part_min: 0.005
 db_part_min: 0.05
 
-fs_max_sync_interval:
+fs_sync_interval:
     max: 30
     min: 10
 

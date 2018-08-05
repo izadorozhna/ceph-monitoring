@@ -95,6 +95,8 @@ td { padding: 6px; }
 #table-osd-info {width: 100%;}
 #table-osd-load {width: 100%;}
 #table-issues {width: 80%;}
+#table-rules {width: 100%;}
+#table-settings {width: 60%;}
 
 a.link {
     color: #0000EE;
