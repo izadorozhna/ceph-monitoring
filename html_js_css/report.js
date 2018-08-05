@@ -2,7 +2,7 @@ let curr_hash = "";
 
 function clicked(el_id) {
     if (el_id === "")
-        el_id = "0";
+        el_id = "cluster_summary";
 
     for(const old of document.getElementsByClassName("main-ceph")) {
         old.classList.remove('main-ceph');
@@ -14,6 +14,7 @@ function clicked(el_id) {
     el.classList.add('main-ceph');
     curr_hash = el_id;
     window.location.hash = el_id;
+    window.scrollTo(0, 0);
 }
 
 function onHashChanged() {

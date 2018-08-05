@@ -31,7 +31,19 @@ max_osd_per_class:
     sas_ssd: 4
     nvme: 8
 
+allowed_schedulers:
+    virtio: [cfg, deadline, noop, null]
+    unknown: [cfg, deadline, noop, null]
+    sata_hdd: [cfg]
+    sas_hdd: [cfg]
+    sata_ssd: [cfg, deadline, noop]
+    sas_ssd: [cfg, deadline, noop]
+    nvme: [null]
+
+
 separated_nets: true
+jumbo_frames_required: true
+min_jumbo_size: 9000
 
 min_net_bw_cluster_gib: 20
 min_net_bw_public_gib: 20
@@ -86,3 +98,4 @@ bs_node_ram:
     osd_extra_gb: 1
     min_free: 16
     max_free_: 32
+

@@ -107,6 +107,7 @@ a.link:hover {cursor: pointer; color: #a1a1ff;}
 
 .hostinfo-net {width: 40%;}
 .hostinfo-disks {width: 80%;}
+.io_load_in_color {width: 100%;}
 .hostinfo-mountable {width: 80%;}
 .hostinfo-mountable tr td:first-child {text-align: left;}
 

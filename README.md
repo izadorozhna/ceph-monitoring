@@ -1,23 +1,19 @@
 Ceph cluster data collect tool.
 -------------------------------
 
+Tool aim to collect and render ceph cluster information into html report.
+
+
 How to collect data:
 --------------------
-On ceph cluster:
 
-* Only Jewel(10) and more resent versions of ceph are supported, for older ceph see 'master' branch
-* ssh to any node, which has ceph access (controller/compute/osd)
-* Passwordless ssh access need to be setup to all required ceph nodes. If you key are encrypted you need to decrypt it,
+* Only Jewel(10) and more resent versions of ceph are supported, for older ceph see 'old' branch
+* ssh to any node, which has ssh access to all ceph nodes
+* Passwordless ssh access need to be setup to all required nodes. If you key are encrypted you need to decrypt it,
   put decrypted key as default ~/.ssh/id_rsa file, run tool and then remove decrypted key. Usually you can
   decrypt ssh key with 'openssl rsa –in enc.key -out dec.key'.
-* SSH daemons must listen on ceph network (consult with ceph osd map),
-  if they not - you need to provide mapping from node ceph public_addr to address, where SSH daemon is listen.
-  Like this:
-
-        ceph_public_ip1 ssh_ip1
-        ceph_public_ip2 ssh_ip2
-        ...
-
+* If SSH daemons didn't listen on ceph client network - you need provide inventory file, which have IP's or names
+  of all ceph nodes, usable for ssh. Inventory must be in format one IP_or_name per line.
 * root or user with passwordless sudo need to used. In second case pass '-u USER_NAME --sudo' options.
 * Run 'curl -o ceph_report_v2.sh 'https://raw.githubusercontent.com/Mirantis/ceph-monitoring/v2.0/binary/ceph_report_v2.sh'
 * Run 'bash ceph_report_v2.sh -c node,ceph --log-level DEBUG -O OUTPUT_FOLDER -w'

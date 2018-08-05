@@ -1,6 +1,6 @@
 import collections
 from enum import Enum
-from typing import List, Tuple, Optional, Dict, Callable, Any
+from typing import List, Dict, Callable, Any, Sequence
 from dataclasses import dataclass
 
 from .cluster_classes import Cluster, CephInfo, FileStoreInfo, BlueStoreInfo
@@ -35,37 +35,45 @@ class Severity(Enum):
 
 
 @dataclass
-class CheckResult:
-    reporter: str
+class CheckMessage:
+    reporter_id: str
     severity: Severity
     message: str
-    service: str
+    affected_services: Sequence[str]
+
+
+@dataclass
+class CheckResult:
+    reporter_id: str
+    severity: Severity
+    check_description: str
+    passed: bool
+    message: str
+    readmeurls: List[str]
+    fails: List[CheckMessage]
 
 
 class CheckReport:
     def __init__(self) -> None:
-        self.results: List[Tuple[str, Severity, bool, Optional[str]]] = []
-        self.curr_msg: str = ""
-        self.curr_reporter: str = ""
-        self.curr_sev: Severity = Severity.ok
-        self.extra: Dict[str, List[CheckResult]] = {}
+        self.results: List[CheckResult] = []
+        self.curr_reporter: Any = None
+        self.curr_extra: List[CheckMessage] = []
 
-    def set_curr(self, reporter: str, msg: str, sev: Severity):
-        self.curr_msg = msg
+    def set_curr(self, reporter: Any):
         self.curr_reporter = reporter
-        self.curr_sev = sev
 
-    def add_result(self, passed: bool, comment: str = None, sev: Severity = None):
-        self.results.append((self.curr_msg, sev if sev is not None else self.curr_sev, passed, comment))
+    def add_result(self, passed: bool, message: str = None):
+        self.results.append(CheckResult(self.curr_reporter.__name__,
+                                        self.curr_reporter.severity,
+                                        self.curr_reporter.description,
+                                        passed,
+                                        message,
+                                        self.curr_reporter.readmeurls,
+                                        self.curr_extra))
+        self.curr_extra = []
 
     def add_extra_message(self, sev: Severity, message: str, *affected_services: str):
-        for affected_service in affected_services:
-            self.extra.setdefault(self.curr_reporter, []).append(
-                CheckResult(self.curr_reporter, sev, message, affected_service))
-
-        if not affected_services:
-            self.extra.setdefault(self.curr_reporter, []).append(
-                CheckResult(self.curr_reporter, sev, message, 'cluster'))
+        self.curr_extra.append(CheckMessage(self.curr_reporter.__name__, sev, message, affected_services))
 
 
 CheckConfig = Dict[str, Any]
@@ -73,10 +81,12 @@ CheckerFunc = Callable[[CheckConfig, Cluster, CephInfo, CheckReport], None]
 
 ALL_CHECKS = []
 
-def checker(severity: Severity, message: str) -> Callable[[CheckerFunc], CheckerFunc]:
+
+def checker(severity: Severity, description: str, *readmeurls: str) -> Callable[[CheckerFunc], CheckerFunc]:
     def closure(func: CheckerFunc) -> CheckerFunc:
         func.severity = severity
-        func.message = message
+        func.description = description
+        func.readmeurls = readmeurls
         ALL_CHECKS.append(func)
         return func
     return closure
@@ -354,7 +364,7 @@ def all_osds_in_root_the_same(config: CheckConfig, cluster: Cluster, ceph: CephI
 
             sz = osd.host.storage_devs[osd.storage_info.data_partition].size
 
-            if abs(abs(sz - most_often_size) / sz - 1) > max_size_diff:
+            if abs(sz - most_often_size) / max([sz, most_often_size, 1]) > max_size_diff:
                 report.add_extra_message(Severity.warning,
                     f"OSD {osd.id} has size {b2ssize(sz)} which is too different " +
                     f"from most often one {b2ssize(most_often_size)} for root {root.name}")
@@ -489,26 +499,92 @@ def osd_of_same_size_has_close_load(config: CheckConfig, cluster: Cluster, ceph:
                                            if bad_size_count != 0 else "")
 
 
-def run_all_checks(config: CheckConfig, cluster: Cluster, ceph: CephInfo) \
-        -> Tuple[List[Tuple[str, Severity, bool, Optional[str]]], Dict[str, List[str]]]:
+@checker(Severity.warning, "Disks schedulers")
+def storage_devs_schedulers(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report: CheckReport):
+    allowed_schedulers_dct = config.get("allowed_schedulers", {})
+    err_count = 0
+    for node in cluster.hosts.values():
+        for name, disk in node.disks.items():
+            allowed_schedulers = allowed_schedulers_dct.get(disk.tp.name, ['cfg', 'noop', 'deadline', None])
+            if disk.scheduler not in allowed_schedulers:
+                err_count += 1
+                report.add_extra_message(Severity.warning,
+                    f"Disk {disk.name} on node {node.name} has type {disk.tp.name} and scheduler {disk.scheduler}. " +
+                    f"Only {', '.join(allowed_schedulers)} schedulers recommended for this class")
+
+    report.add_result(err_count == 0,
+                      "" if err_count == 0 else f"{err_count} disks has non-optimal schedulers")
+
+
+@checker(Severity.warning, "Ceph networks should have jumbo frames enabled")
+def network_mtu(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report: CheckReport):
+    if not config.get("jumbo_frames_required", True):
+        return
+
+    min_j_size = config.get("min_jumbo_size", 9000)
+    fails = 0
+
+    for host in cluster.hosts.values():
+        cl = host.find_interface(ceph.cluster_net)
+        pb = host.find_interface(ceph.public_net)
+
+        all = []
+        if cl:
+            all.append(cl)
+        if pb and pb is not cl:
+            all.append(pb)
+
+        for adapter in all:
+            tp = 'cluster' if adapter is cl else 'public'
+            if adapter:
+                parent_name = None
+                if adapter.mtu < min_j_size:
+                    report.add_extra_message(Severity.warning,
+                        f"Network device {adapter.dev} on node {host.name}, responcible for {tp} ceph net " +
+                        f"has MTU {adapter.mtu} < required {min_j_size}")
+                    fails += 1
+                elif '.' in adapter.dev:
+                    parent_name = adapter.dev.split(".")[0]
+                    mtu = host.net_adapters[parent_name].mtu
+                    if mtu < min_j_size:
+                        report.add_extra_message(Severity.warning,
+                            f"Network device {parent_name} on node {host.name}, responcible for {tp} ceph net, " +
+                            f"which is parent for {adapter.dev} " +
+                            f"has MTU {mtu} < required {min_j_size}")
+                        fails += 1
+
+                if parent_name in host.bonds:
+                    sources = host.bonds[parent_name].sources
+                elif adapter.dev in host.bonds:
+                    sources = host.bonds[adapter.dev].sources
+                else:
+                    sources = []
+
+                for src in sources:
+                    mtu = host.net_adapters[src].mtu
+                    if mtu < min_j_size:
+                        report.add_extra_message(Severity.warning,
+                            f"Network device {src} on node {host.name}, which is source for ceph bond, " +
+                            f"responcible for {tp} ceph net " +
+                            f"has MTU {mtu} < required {min_j_size}")
+                        fails += 1
+
+    report.add_result(fails == 0,
+                      "" if fails == 0 else f"{fails} net adapters has too small MTU")
+
+
+def run_all_checks(config: CheckConfig, cluster: Cluster, ceph: CephInfo) -> List[CheckResult]:
 
     report = CheckReport()
 
     for check in ALL_CHECKS:
-        report.set_curr(check.__name__, check.message, check.severity)
+        report.set_curr(check)
         check(config, cluster, ceph, report)
 
-    services_parent_mapping = {osd_name(osd.id): osd.host.name for osd in ceph.osds}
-    service_errors = collections.defaultdict(list)
+    return report.results
 
-    for name, results in report.extra.items():
-        service_errors[name].extend(results)
-        for parent in services_parent_mapping.get(name, []):
-            service_errors[parent].extend(results)
 
-    return report.results, service_errors
 
-#
 #
 # def show_issues_table(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
 #     t = html.HTMLTable("table-issues", ["Check", "Result", "Comment"], sortable=False)

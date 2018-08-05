@@ -257,19 +257,27 @@ def show_cluster_summary(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
     return "Status:", t
 
 
-def show_issues_table(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
+def show_issues_table(cluster: Cluster, ceph: CephInfo, report: Report):
     config = yaml.load((Path(__file__).parent / 'check_conf.yaml').open())
-    report, fails = run_all_checks(config, cluster, ceph)
+    check_results = run_all_checks(config, cluster, ceph)
 
     t = html.HTMLTable("table-issues", ["Check", "Result", "Comment"], sortable=False)
 
     failed = html_fail("Failed")
     passed = html_ok("Passed")
 
-    for msg, sev, is_passed, comment in report:
-        t.add_cells(msg, passed if is_passed else failed, comment)
+    err_per_test = collections.defaultdict(list)
 
-    return "Issues:", t
+    for result in check_results:
+        t.add_cells(result.check_description, passed if result.passed else failed,
+                    f'''<a class="link" onclick="clicked('err-{result.reporter_id}')">{result.message}</a>''')
+        for err in result.fails:
+            err_per_test[err.reporter_id].append(err.message)
+
+    report.add_block('issues', "Issues:", str(t))
+
+    for block_id, errs in err_per_test.items():
+        report.add_block('err-' + block_id, None, "<br>".join(errs))
 
 
 def show_osd_summary(ceph: CephInfo) -> Tuple[str, Any]:
@@ -945,16 +953,16 @@ def show_host_io_load_in_color(ceph: CephInfo) -> Tuple[str, Any]:
         ('riops', b2ssize_10, 'Read IOPS', 30),
         ('wiops', b2ssize_10, 'Write IOPS', 30),
 
-        ('bts', b2ssize, 'Bps', 100 * 1024 ** 2),
-        ('rbts', b2ssize, 'Read Bps', 100 * 1024 ** 2),
-        ('wbts', b2ssize, 'Write Bps', 100 * 1024 ** 2),
+        ('bts', lambda x: str(int(x / 2 ** 20)), 'MiBps', 100 * 1024 ** 2),
+        ('rbts', lambda x: str(int(x / 2 ** 20)), 'Read MiBps', 100 * 1024 ** 2),
+        ('wbts', lambda x: str(int(x / 2 ** 20)), 'Write MiBps', 100 * 1024 ** 2),
 
         ('lat', None, 'Latency, ms', 20),
         ('queue_depth', None, 'Average QD', 3),
         ('io_time', None, 'Active time %', 100),
     ]
 
-    tables = []
+    blocks = []
 
     for pos, (target_attr, tostrfunc, tp, min_max_val) in enumerate(loads, 1):
         if target_attr == 'lat':
@@ -967,7 +975,7 @@ def show_host_io_load_in_color(ceph: CephInfo) -> Tuple[str, Any]:
 
         max_len = max(map(len, devs.values()))
 
-        table = html.HTMLTable(headers=['host'] + ['load'] * max_len, zebra=False)
+        table = html.HTMLTable(headers=['host'] + ['load'] * max_len, zebra=False, extra_cls=["io_load_in_color"])
         for host_name, devices in sorted(devs.items()):
             # TODO: mark devices with data/journal/wal/db tags
             table.add_cell(host_name)
@@ -982,22 +990,25 @@ def show_host_io_load_in_color(ceph: CephInfo) -> Tuple[str, Any]:
                 elif tostrfunc is None:
                     s_val = "%.1f" % (val,)
                 else:
-                    s_val = tostrfunc(val)
+                    if val < 1:
+                        s_val = 0
+                    else:
+                        s_val = tostrfunc(val)
 
-                cell_data = H.div(dev_name, _class="left") + H.div(s_val, _class="right")
+                cell_data = H.div(dev_name.replace('/dev/', '') + " ", _class="left") + H.div(s_val, _class="right")
                 table.add_cell(cell_data, bgcolor=color, sorttable_customkey=str(val))
 
             for i in range(max_len - len(devices)):
                 table.add_cell("-", sorttable_customkey='0')
             table.next_row()
 
-        tables.append(table)
+        blocks.append(f"<br><H4>{tp}</H4><br><br>{table}")
 
-    return "IO load", "<br>".join(map(str, tables))
+    return "IO load", "<br>".join(blocks)
 
 
 def host_link(hostname: str) -> str:
-    return f"""<a class="link" onclick="clicked('host-{hostname}')">{hostname}</a>"""
+    return f"""<a class="link" onclick="clicked('{hostname}')">{hostname}</a>"""
 
 
 def hosts_pg_info(cluster: Cluster, ceph: CephInfo) -> str:
