@@ -26,17 +26,17 @@ from cephlib.units import b2ssize, b2ssize_10
 from cephlib.common import flatten
 
 from . import html
-from .cluster_classes import (CephInfo, Cluster, OSDStoreType, Host, FileStoreInfo, BlueStoreInfo, DiskLoad, OSDStatus,
-                              OSDSInfo)
-from .cluster import NO_VALUE, load_all, get_all_versions, get_nodes_pg_info
+from .cluster_classes import (CephInfo, Cluster, Host, FileStoreInfo, BlueStoreInfo, OSDStatus,
+                              CephOSD, CephMonitor, CephVersion, DiskType, CephDevInfo, DevPath)
+from .cluster import NO_VALUE, load_all, get_nodes_pg_info
 from .checks import run_all_checks
 from .plot_data import (perf_info_required, plot, show_osd_used_space_histo,
                         show_osd_load, show_osd_lat_heatmaps, show_osd_ops_boxplot, get_histo_img, get_kde_img)
 
-H = html.rtag
 logger = logging.getLogger('cephlib.report')
 
 
+H = html.rtag
 HTML_UNKNOWN = H.font('???', color="orange")
 
 
@@ -243,6 +243,13 @@ def seconds_to_str(seconds: Union[int, float]) -> str:
     return " ".join(data)
 
 
+def get_all_versions(services: Iterable[Union[CephOSD, CephMonitor]]) -> Dict[CephVersion, int]:
+    all_version: Dict[CephVersion, int] = collections.Counter()
+    for srv in services:
+        all_version[srv.version] += 1
+    return all_version
+
+
 def show_cluster_summary(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
     t = html.HTMLTable("table-summary", ["Setting", "Value"], sortable=False)
     t.add_cells("Collected at", cluster.report_collected_at_local)
@@ -259,10 +266,10 @@ def show_cluster_summary(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
     t.add_cells("Mon count", str(len(ceph.mons)))
     t.add_cells("OSD count", str(len(ceph.osds)))
 
-    mon_vers = get_all_versions(ceph.mons)
+    mon_vers = get_all_versions(ceph.mons.values())
     t.add_cells("Mon version", ", ".join(map(str, sorted(mon_vers))))
 
-    osd_vers = get_all_versions(ceph.osds)
+    osd_vers = get_all_versions(ceph.osds.values())
     t.add_cells("OSD version", ", ".join(map(str, sorted(osd_vers))))
 
     t.add_cells("Monmap version", str(ceph.status.monmap_stat['epoch']))
@@ -332,10 +339,10 @@ def show_health_messages(ceph: CephInfo) -> Optional[Tuple[str, Any]]:
     return None
 
 
-def show_mons_info(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
+def show_mons_info(ceph: CephInfo) -> Tuple[str, Any]:
     table = html.HTMLTable("table-mon-info", ["Name", "Health", "Role", "Disk free<br>B (%)"])
 
-    for mon in sorted(ceph.mons, key=lambda x: x.name):
+    for _, mon in sorted(ceph.mons):
         role = "Unknown"
         health = html_fail("HEALTH_FAIL")
         if mon.status is None:
@@ -350,22 +357,8 @@ def show_mons_info(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
             role = mon.role
 
         if mon.kb_avail is None:
-            mon_db_root = "/var/lib/ceph/mon"
-            root = ""
-            blocks = 0
-            available = 0
-            for df_info in cluster.hosts[mon.host].df_info.values():
-                if mon_db_root.startswith(df_info.mountpoint) and len(root) < len(df_info.mountpoint):
-                    root = df_info.mountpoint
-                    blocks = df_info.size
-                    available = df_info.free
-
-            if root == "":
-                perc = "Unknown"
-                sort_by = "0"
-            else:
-                perc = f"{b2ssize(available * 1024)} ({available * 100 // blocks})"
-                sort_by = str(available)
+            perc = "Unknown"
+            sort_by = "0"
         else:
             perc = f"{b2ssize(mon.kb_avail * 1024)} ({mon.avail_percent})"
             sort_by = str(mon.kb_avail)
@@ -397,7 +390,7 @@ def show_pg_state(ceph: CephInfo) -> Tuple[str, Any]:
 def show_osd_state(ceph: CephInfo) -> Tuple[str, Any]:
     statuses: Dict[OSDStatus, List[str]] = collections.defaultdict(list)
 
-    for osd in ceph.osds:
+    for osd in ceph.osds.values():
         statuses[osd.status].append(str(osd.id))
 
     table = html.HTMLTable("table-osds-state", ["Status", "Count", "ID's"])
@@ -488,8 +481,7 @@ def show_primary_settings(ceph: CephInfo) -> Tuple[str, Any]:
     show_opt("osd recovery max active")
     show_opt("osd recovery thread timeout")
 
-    stor_set = {osd.storage_type.name for osd in ceph.osds}
-    if OSDStoreType.bluestore.name in stor_set:
+    if ceph.has_bs:
         table.add_cell("<b>Bluestore</b>", colspan="2")
         table.next_row()
 
@@ -500,20 +492,12 @@ def show_primary_settings(ceph: CephInfo) -> Tuple[str, Any]:
         show_opt("bluestore cache kv max", lambda x: b2ssize(int(x)))
         show_opt("bluestore csum type")
 
-    if OSDStoreType.filestore.name in stor_set:
+    if ceph.has_fs:
         table.add_cell("<b>Filestore</b>", colspan="2")
         table.next_row()
         table.add_cells("Journal aio", ceph.settings.journal_aio)
         table.add_cells("Journal dio", ceph.settings.journal_dio)
         table.add_cells("Filestorage sync", str(int(float(ceph.settings.filestore_max_sync_interval))) + 's')
-
-    # show_opt("")
-    # show_opt("")
-    # pgcount = sum(pool.size * pool.pg for pool in ceph.pools.values())
-    # t.add_cells("Average PG copy per OSD", str(pgcount // osd_count))
-    #     t.add_cells("Storage types", list(stor_set_names)[0]
-    #                                  if len(stor_set_names) == 1
-    #                                  else html_fail(",".join(map(str, stor_set_names))))
 
     return "Settings:", table
 
@@ -542,7 +526,7 @@ def show_ruleset_info(ceph: CephInfo) -> Tuple[str, Any]:
         table.add_cell(rule.name)
         table.add_cell(rule.id)
         table.add_cell("<br>".join(pool.name for pool in pools[rule.id]))
-        osds = list(ceph.osd_map[osd_node.id] for osd_node in ceph.crush.iter_osds_for_rule(rule.id))
+        osds = list(ceph.osds[osd_node.id] for osd_node in ceph.crush.iter_osds_for_rule(rule.id))
         table.add_cell(str(len(osds)))
         total_sz = sum(osd.free_space + osd.used_space for osd in osds)
         table.add_cell_b2ssize(total_sz)
@@ -562,7 +546,7 @@ def show_ruleset_info(ceph: CephInfo) -> Tuple[str, Any]:
             dsk = osd.host.disks[osd.storage_info.data_dev]
 
             disks_types.add(dsk.tp.name)
-            disks_sizes.add(dsk.size)
+            disks_sizes.add(dsk.logic_dev.size)
             disks_info.add(f"{dsk.hw_model.vendor}::{dsk.hw_model.model}")
 
         table.add_cell(", ".join(map(b2ssize, sorted(disks_sizes))))
@@ -664,7 +648,7 @@ def show_pools_info(ceph: CephInfo) -> Tuple[str, Any]:
     return "Pool's stats:", f"<center>{table}<br><br><br><H4>Load info</H4><br>{table2}</center>"
 
 
-def get_osd_load_table(ceph: CephInfo, osds_info: OSDSInfo) -> str:
+def get_osd_load_table(ceph: CephInfo) -> str:
     table = html.HTMLTable("table-osd-load",
                            ["ID", "node", "PG's", "open<br>files", "ip<br>conn", "thr", "RSS", "VMM", "CPU<br>Used, s",
                             "Total<br>data", "Read<br>ops", "Read", "Write<br>ops", "Write"] +
@@ -672,83 +656,82 @@ def get_osd_load_table(ceph: CephInfo, osds_info: OSDSInfo) -> str:
                              if ceph.pgs_second else []),
                            align=html.TableAlign.left_right)
 
-    for osd in sorted(ceph.osds, key=lambda x: x.id):
-        osd_info = osds_info.osds[osd.id]
-
+    for _, osd in sorted(ceph.osds.items()):
         table.add_cell(str(osd.id))
         table.add_cell(osd.host.name)
 
         #   PG COUNT
-        if osd.pg_count is None:
+        if osd.pg_count:
             table.add_cell(HTML_UNKNOWN, sorttable_customkey="0")
         else:
             table.add_cell(str(osd.pg_count))
 
         #  RUN INFO - FD COUNT, TCP CONN, THREADS
-        if osd_info.run_info is not None:
-            table.add_cell(str(osd_info.run_info.fd_count))
-            table.add_cell(str(osd_info.run_info.opened_socks))
-            table.add_cell(str(osd_info.run_info.th_count))
-            table.add_cell_b2ssize(osd_info.run_info.vm_rss)
-            table.add_cell_b2ssize(osd_info.run_info.vm_size)
-            table.add_cell_b2ssize_10(osd_info.run_info.cpu_usage)
+        if osd.run_info:
+            table.add_cell(str(osd.run_info.fd_count))
+            table.add_cell(str(osd.run_info.opened_socks))
+            table.add_cell(str(osd.run_info.th_count))
+            table.add_cell_b2ssize(osd.run_info.vm_rss)
+            table.add_cell_b2ssize(osd.run_info.vm_size)
+            table.add_cell_b2ssize_10(osd.run_info.cpu_usage)
         else:
             for i in range(6):
                 table.add_cell("")
 
-        #  USER DATA SIZE & TOTAL IO
-        if osd_info.pg_stats:
-            table.add_cell_b2ssize(osd_info.pg_stats.bytes)
-            table.add_cell_b2ssize_10(osd_info.pg_stats.reads)
-            table.add_cell_b2ssize(osd_info.pg_stats.read_b)
-            table.add_cell_b2ssize_10(osd_info.pg_stats.writes)
-            table.add_cell_b2ssize(osd_info.pg_stats.write_b)
-        else:
-            for i in range(5):
-                table.add_cell("")
-
-        # USER DATA SIZE DELTA
-        if osd_info.d_stats:
-            table.add_cell_b2ssize(osd_info.d_stats.d_used_space)
-            table.add_cell_b2ssize_10(osd_info.d_stats.d_reads)
-            table.add_cell_b2ssize(osd_info.d_stats.d_read_b)
-            table.add_cell_b2ssize_10(osd_info.d_stats.d_writes)
-            table.add_cell_b2ssize(osd_info.d_stats.d_write_b)
-        else:
-            for i in range(5):
-                table.add_cell("")
+        for stats in (osd.pg_stats, osd.d_pg_stats):
+            if stats:
+                table.add_cell_b2ssize(osd.pg_stats.bytes)
+                table.add_cell_b2ssize_10(osd.pg_stats.reads)
+                table.add_cell_b2ssize(osd.pg_stats.read_b)
+                table.add_cell_b2ssize_10(osd.pg_stats.writes)
+                table.add_cell_b2ssize(osd.pg_stats.write_b)
+            else:
+                for i in range(5):
+                    table.add_cell("")
 
         table.next_row()
 
     return str(table)
 
 
-def show_osd_info(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
-    osds_info = ceph.osds_info
-
+def show_osd_info(ceph: CephInfo) -> Tuple[str, Any]:
     headers = ["ID", "node", "status", "version [hash]", "daemon<br>run", ] + \
               ["weight<br>" + root.name for root in ceph.crush.roots] + \
               ["reweight", "PG", "Scrub<br>ERR"] + \
-              (["Type"] if osds_info.has_bs and osds_info.has_fs else []) + \
+              (["Type"] if ceph.has_bs and ceph.has_fs else []) + \
               ["Storage<br>dev type", "Storage<br>total", "Storage<br>free %"]
 
-    if osds_info.has_bs and osds_info.has_fs:
+    if ceph.has_bs and ceph.has_fs:
         headers.extend(["Journal<br>or wal<br>colocated", "Journal<br>or wal<br>dev type",
-                        "Journal<br>on file", "Journal<br>or wal<br>size"])
-    elif osds_info.has_fs and not osds_info.has_bs:
-        headers.extend(["Journal<br>colocated", "Journal<br>dev type",
-                        "Journal<br>on file", "Journal<br>size"])
+                        "Journal<br>or wal<br>size", "Journal<br>on file", ])
+    elif ceph.has_fs and not ceph.has_bs:
+        headers.extend(["Journal<br>colocated", "Journal<br>dev type", "Journal<br>size", "Journal<br>on file"])
     else:
         headers.extend(["wal<br>colocated", "wal<br>dev type", "wal<br>size"])
 
-    if osds_info.has_bs:
+    if ceph.has_bs:
         headers.extend(["DB<br>colocated", "DB<br>dev type", "DB<br>size"])
 
     table = html.HTMLTable("table-osd-info", headers, align=html.TableAlign.left_right)
 
-    for osd in sorted(ceph.osds, key=lambda x: x.id):
-        osd_info = osds_info.osds[osd.id]
+    all_versions = [osd.version for osd in ceph.osds.values()]
+    all_versions += [mon.version for mon in ceph.mons.values()]
+    all_versions_set = set(all_versions)
+    largest_ver = max(all_versions_set)
 
+    fast_drives = {DiskType.nvme, DiskType.sata_ssd, DiskType.sas_ssd}
+
+    expected_wr_speed = {
+        DiskType.sata_hdd: 50,
+        DiskType.sas_hdd: 75,
+        DiskType.nvme: 200,
+        DiskType.sata_ssd: 100,
+        DiskType.sas_ssd: 100,
+        DiskType.virtio: 50,
+        DiskType.unknown: 50
+    }
+
+    for _, osd in sorted(ceph.osds.items()):
         if osd.daemon_runs is None:
             daemon_msg = HTML_UNKNOWN
         else:
@@ -761,18 +744,18 @@ def show_osd_info(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
         if osd.version is None:
             table.add_cell("Unknown")
         else:
-            if len(osds_info.all_versions) != 1:
-                color = html_ok if osd.version == osds_info.largest_ver else html_fail
+            if len(all_versions_set) != 1:
+                color = html_ok if osd.version == largest_ver else html_fail
             else:
                 color = lambda x: x
             table.add_cell(color(str(osd.version)))
         table.add_cell(daemon_msg)
 
         for root in ceph.crush.roots:
-            if root.name not in osd_info.crush_trees_weights:
+            if root.name not in osd.crush_trees_weights:
                 table.add_cell("-")
             else:
-                wok, weight, expected_weight = osd_info.crush_trees_weights[root.name]
+                wok, weight, expected_weight = osd.crush_trees_weights[root.name]
 
                 if not wok:
                     table.add_cell("+")
@@ -790,82 +773,67 @@ def show_osd_info(cluster: Cluster, ceph: CephInfo) -> Tuple[str, Any]:
         else:
             table.add_cell(str(osd.pg_count))
 
-        if osd_info.pg_stats:
-            table.add_cell(str(osd_info.pg_stats.scrub_errors +
-                               osd_info.pg_stats.deep_scrub_errors +
-                               osd_info.pg_stats.shallow_scrub_errors))
+        if osd.pg_stats:
+            table.add_cell(str(osd.pg_stats.scrub_errors +
+                               osd.pg_stats.deep_scrub_errors +
+                               osd.pg_stats.shallow_scrub_errors))
         else:
             table.add_cell("")
 
         # STORAGE TYPE
-        if osds_info.has_fs and osds_info.has_bs:
-            table.add_cell(str(osd.storage_type))
+        if ceph.has_fs and ceph.has_bs:
+            table.add_cell("bluestore" if isinstance(osd.storage_info, BlueStoreInfo) else "filestore")
 
         # STORAGE DEV TYPE
-        data_drive_color_fn = html_ok if osd_info.data_drive_type.is_fast() else lambda x: x
-        table.add_cell(data_drive_color_fn(osd_info.data_drive_type.name))
+        data_drive_color_fn = html_ok if osd.storage_info.data.dev_info.tp in fast_drives else lambda x: x
+        table.add_cell(data_drive_color_fn(osd.storage_info.data.dev_info.tp.name))
 
         #  USED & FREE SPACE
         color = "red" if osd.free_perc < 20 else ( "yellow" if osd.free_perc < 40 else "green")
         avail_perc_str = H.font(osd.free_perc, color=color)
-        table.add_cell_b2ssize(osd_info.total_space)
+        table.add_cell_b2ssize(osd.total_space)
         table.add_cell(avail_perc_str, sorttable_customkey=str(osd.free_perc))
 
+        def add_dev_info(info: CephDevInfo, min_size: int, data_dev_path: DevPath):
+            table.add_cell(html_ok("no") if info.dev_info.dev_path == data_dev_path else html_fail("yes"))
+            color = html_ok if info.dev_info.tp in fast_drives else html_fail
+            table.add_cell(color(info.dev_info.tp))
+
+            if info.dev_info.size is None:
+                table.add_cell('-', sorttable_customkey='0')
+            else:
+                size_s = b2ssize(info.dev_info.size)
+                size_s = size_s if info.dev_info.size >= min_size else html_fail(size_s)
+                table.add_cell(size_s, sorttable_customkey=str(info.dev_info.size))
+
         # JOURNAL/WAL/DB info
-        if osd_info.j_info:
-            table.add_cell(str(osd_info.j_info.collocation))
-            table.add_cell(osd_info.j_info.drive_type.name)
-            table.add_cell(str(osd_info.j_info.on_file))
-
-            if osd_info.j_info.size is None:
-                j_size_s = '-'
-            else:
-                j_size_s = b2ssize(osd_info.j_info.size)
-                assert osd.run_info is not None
+        if isinstance(osd.storage_info, FileStoreInfo):
+            if osd.run_info:
                 osd_sync = float(osd.run_info.config['filestore_max_sync_interval'])
-                j_size_s = j_size_s if osd_info.j_info.size >= osd_sync * 100 * (1024 ** 2) else html_fail(j_size_s)
-            table.add_cell(j_size_s)
+                min_size = osd_sync * expected_wr_speed[osd.storage_info.data.dev_info.tp] * (1024 ** 2)
+            else:
+                min_size = 0
+            add_dev_info(osd.storage_info.journal, min_size, osd.storage_info.data.dev_info.dev_path)
 
-            if osds_info.has_bs:
-                table.add_cell('-')
-                table.add_cell('-')
-                table.add_cell('-')
+            if ceph.has_bs:
+                for i in range(3):
+                    table.add_cell('-')
         else:
-            assert osd_info.wal_db_info is not None
-            wd_info = osd_info.wal_db_info
-            wal_on_same_drive = html_ok("no") if wd_info.wal_collocation else html_fail("yes")
+            assert isinstance(osd.storage_info, BlueStoreInfo)
+            add_dev_info(osd.storage_info.wal, 512 * 1024 * 1024, osd.storage_info.data.dev_info.dev_path)
 
-            table.add_cell(wal_on_same_drive)
-            wal_drive_type_color_fn = html_ok if wd_info.wal_drive_type.is_fast() else html_fail
-            table.add_cell(wal_drive_type_color_fn(wd_info.wal_drive_type.name))
-
-            if osds_info.has_fs:
+            if ceph.has_fs:
                 table.add_cell('-')
 
-            if wd_info.wal_size is not None:
-                wal_size_s = b2ssize(wd_info.wal_size) + 'B'
-                table.add_cell(html_fail(wal_size_s) if wd_info.wal_size < 512 * 1024 * 1024 else wal_size_s,
-                               sorttable_customkey=str(wd_info.wal_size))
+            if osd.storage_info.db.dev_info.size is not None:
+                min_db_size = osd.storage_info.data.dev_info.size * 0.0095
             else:
-                table.add_cell('-')
-
-            db_colocation = html_ok("no") if wd_info.db_collocation else html_fail("yes")
-            db_drive_type_color_fn = html_ok if wd_info.wal_drive_type.is_fast() else html_fail
-            if wd_info.db_size is not None:
-                db_size_s = b2ssize(wd_info.db_size) + "B"
-                size_sort_by = str(wd_info.db_size)
-                db_size_s = html_fail(db_size_s) if wd_info.db_size < osd_info.data_part_size * 0.0095 else db_size_s
-            else:
-                db_size_s = '-'
-                size_sort_by = ''
-
-            table.add_cell(db_colocation)
-            table.add_cell(db_drive_type_color_fn(wd_info.wal_drive_type.name))
-            table.add_cell(db_size_s, sorttable_customkey=size_sort_by)
+                min_db_size = 0
+            add_dev_info(osd.storage_info.db, min_db_size, osd.storage_info.data.dev_info.dev_path)
 
         table.next_row()
 
-    load_table = get_osd_load_table(ceph, osds_info)
+    load_table = get_osd_load_table(ceph)
     return "OSD's info:", f"<center>{table}<br><br><br><H4>Run info:</H4><br>{load_table}</center>"
 
 

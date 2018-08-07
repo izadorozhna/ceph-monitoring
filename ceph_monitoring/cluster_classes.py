@@ -1,7 +1,7 @@
 from enum import Enum
 import datetime
 from ipaddr import IPv4Address, IPv4Network
-from typing import Optional, List, Set, Dict, Any, Callable, Union, Tuple
+from typing import Optional, List, Set, Dict, Any, Callable, Union, Tuple, NewType
 
 import numpy
 from dataclasses import dataclass, field
@@ -9,6 +9,11 @@ from dataclasses import dataclass, field
 from cephlib.crush import Crush
 from cephlib.units import b2ssize
 from cephlib.common import AttredDict
+
+
+# -----------  HW DEVICES CLASSES  -------------------------------------------------------------------------------------
+
+# ---------------  LSHW ------------------------------------------------------------------------------------------------
 
 
 @dataclass
@@ -19,23 +24,23 @@ class LSHWNetInfo:
 
 
 @dataclass
-class DiskInfo:
+class LSHWDiskInfo:
     size: int
     mount_point: Optional[str]
     device: Optional[str]
 
 
 @dataclass
-class CPUInfo:
+class LSHWCPUInfo:
     model: str
     cores: int
 
 
 @dataclass
-class HWInfo:
+class LSHWInfo:
     hostname: Optional[str]
-    cpu_info: List[CPUInfo]
-    disks_info: Dict[str, DiskInfo]
+    cpu_info: List[LSHWCPUInfo]
+    disks_info: Dict[str, LSHWDiskInfo]
     ram_size: int
     sys_name: Optional[str]
     mb: Optional[str]
@@ -43,29 +48,16 @@ class HWInfo:
     disks_raw_info: Dict[str, str]
     net_info: Dict[str, LSHWNetInfo]
     storage_controllers: List[str]
+    summary: Dict[str, int] = field(default_factory=dict)
 
-    def get_HDD_count(self):
-        # SATA HDD COUNT, SAS 10k HDD COUNT, SAS SSD count, PCI-E SSD count
-        return []
-
-    def get_summary(self):
-        cores = sum(count for _, count in self.cpu_info)
-        disks = sum(info.size for info in self.disks_info.values())
-
-        return {'cores': cores,
-                'ram': self.ram_size,
-                'storage': disks,
-                'disk_count': len(self.disks_info)}
+    def __post_init__(self):
+        self.summary = {'cores': sum(count for _, count in self.cpu_info),
+                        'ram': self.ram_size,
+                        'storage': sum(info.size for info in self.disks_info.values()),
+                        'disk_count': len(self.disks_info)}
 
     def __str__(self):
-        res = []
-
-        summ = self.get_summary()
-        summary = "Simmary: {cores} cores, {ram}B RAM, {disk}B storage"
-        res.append(summary.format(cores=summ['cores'],
-                                  ram=b2ssize(summ['ram']),
-                                  disk=b2ssize(summ['storage'])))
-        res.append(str(self.sys_name))
+        res = ["Simmary: {cores} cores, {ram}B RAM, {storage}B storage".format(**self.summary), str(self.sys_name)]
         if self.mb is not None:
             res.append("Motherboard: " + self.mb)
 
@@ -110,46 +102,90 @@ class HWInfo:
         return str(self.hostname) + ":\n" + "\n".join("    " + i for i in res)
 
 
-@dataclass
-class HDDsResourceUsage:
-    # 2D arrays for entire cluster load
-    wio: numpy.ndarray
-    wbytes: numpy.ndarray
-    rio: numpy.ndarray
-    rbytes: numpy.ndarray
-    qd: numpy.ndarray
+# --------------------------------  COMMON -----------------------------------------------------------------------------
 
 
 @dataclass
-class CephDisksResourceUsage:
-    # 2D arrays for entire cluster load
-    data: HDDsResourceUsage
-    journal: Optional[HDDsResourceUsage]
-    wal: Optional[HDDsResourceUsage]
-    db: Optional[HDDsResourceUsage]
+class HWModel:
+    model: str
+    serial: str
+    vendor: str
+
+
+# ---------------------------  NETWORK ---------------------------------------------------------------------------------
+
+@dataclass
+class NetAdapterAddr:
+    ip: IPv4Address
+    net: IPv4Network
+    is_routable: bool
 
 
 @dataclass
-class NetLoad:
-    send_bytes: numpy.ndarray
-    recv_bytes: numpy.ndarray
-    send_packets: numpy.ndarray
-    recv_packets: numpy.ndarray
-
-    send_bytes_avg: float = 0.0
-    recv_bytes_avg: float = 0.0
-    send_packets_avg: float = 0.0
-    recv_packets_avg: float = 0.0
-
-    def __post_init__(self):
-        self.send_bytes_avg = self.send_bytes.mean()
-        self.recv_bytes_avg = self.recv_bytes.mean()
-        self.send_packets_avg = self.send_packets.mean()
-        self.recv_packets_avg = self.recv_packets.mean()
+class NetworkAdapter:
+    dev: str
+    is_phy: bool
+    duplex: Optional[bool] = None
+    mtu: Optional[int] = None
+    speed: Optional[str] = None
+    ips: List[NetAdapterAddr] = field(default_factory=list)
+    speed_s: Optional[str] = None
 
 
 @dataclass
-class DiskLoad:
+class NetworkBond:
+    name: str
+    sources: List[str]
+
+
+@dataclass
+class NetStats:
+    recv_bytes: int
+    recv_packets: int
+    rerrs: int
+    rdrop: int
+    rfifo: int
+    rframe: int
+    rcompressed: int
+    rmulticast: int
+    send_bytes: int
+    send_packets: int
+    serrs: int
+    sdrop: int
+    sfifo: int
+    scolls: int
+    scarrier: int
+    scompressed: int
+
+
+@dataclass
+class IPANetDevInfo:
+    name: str
+    mtu: int
+
+
+# ----------------------------------------  DISKS ----------------------------------------------------------------------
+
+
+class BlockDevType(Enum):
+    hwdisk = 0
+    partition = 1
+    lvm_lv = 2
+    unknown = 3
+
+
+class DiskType(Enum):
+    sata_hdd = 0
+    sas_hdd = 1
+    nvme = 2
+    sata_ssd = 3
+    sas_ssd = 4
+    virtio = 5
+    unknown = 6
+
+
+@dataclass
+class BlockUsage:
     read_bytes: float
     write_bytes: float
     read_iops: float
@@ -160,20 +196,126 @@ class DiskLoad:
     queue_depth: float
     lat: Optional[float]
 
-    read_bytes_v: numpy.ndarray
-    write_bytes_v: numpy.ndarray
-    read_iops_v: numpy.ndarray
-    write_iops_v: numpy.ndarray
-    io_time_v: numpy.ndarray
-    w_io_time_v: numpy.ndarray
-    iops_v: numpy.ndarray
-    queue_depth_v: numpy.ndarray
+
+DevPath = NewType('DevPath', str)
 
 
-class OSDStoreType(Enum):
-    filestore = 0
-    bluestore = 1
-    unknown = 2
+@dataclass
+class LogicBlockDev:
+    tp: BlockDevType
+    name: str
+    dev_path: DevPath
+    size: int
+    usage: BlockUsage
+    mountpoint: Optional[str] = None
+    fs: Optional[str] = None
+    free_space: Optional[int] = None
+    parent: Optional[Callable[[], Optional['Disk']]] = None
+    children: Dict[str, 'LogicBlockDev'] = field(default_factory=dict)
+    label: Optional[str] = None
+
+    def __post_init__(self):
+        assert '/dev/' + self.name == self.dev_path
+
+
+@dataclass
+class Disk:
+    logic_dev: LogicBlockDev
+    tp: DiskType
+    extra: Dict[str, Any]
+    scheduler: Optional[str]
+    hw_model: HWModel
+    rota: bool
+    rq_size: int
+    phy_sec: int
+    min_io: int
+    parent: Optional[Callable[[], Optional['Disk']]] = None
+
+    def __post_init__(self):
+        assert '/dev/' + self.name == self.dev_path
+
+    # have to simulate LogicBlockDev inheritance, as mypy/pycharm works poorly with dataclass inheritance
+    @property
+    def name(self) -> str:
+        return self.logic_dev.name
+
+    @property
+    def dev_path(self) -> DevPath:
+        return self.logic_dev.dev_path
+
+    @property
+    def children(self) -> Dict[str, 'LogicBlockDev']:
+        return self.logic_dev.children
+
+
+# ----------------   CLUSTER  ------------------------------------------------------------------------------------------
+
+
+@dataclass
+class Host:
+    name: str
+    stor_id: str
+    net_adapters: Dict[str, NetworkAdapter]
+    disks: Dict[str, Disk]
+    logic_block_devs: Dict[str, LogicBlockDev]
+    hw_info: Optional[LSHWInfo]
+    bonds: Dict[str, NetworkBond]
+
+    uptime: float
+    open_tcp_sock: int
+    open_udp_sock: int
+    mem_total: int
+    mem_free: int
+    swap_total: int
+    swap_free: int
+    load_5m: Optional[float]
+
+    perf_monitoring: Any
+
+    def find_interface(self, net: IPv4Network) -> Optional[NetworkAdapter]:
+        for adapter in self.net_adapters.values():
+            for ip in adapter.ips:
+                if ip.ip in net:
+                    return adapter
+        return None
+
+
+@dataclass
+class Cluster:
+    hosts: Dict[str, Host]
+    ip2host: Dict[str, Host]
+    report_collected_at_local: str
+    report_collected_at_gmt: str
+    perf_data: Any = None
+
+    @property
+    def has_performance_data(self) -> bool:
+        return self.perf_data is not None
+
+
+# ----------------  CEPH -----------------------------------------------------------------------------------------------
+
+
+class CephVersions(Enum):
+    jewel = 10
+    kraken = 11
+    luminous = 12
+    mimic = 13
+
+
+@dataclass(order=True, unsafe_hash=True)
+class CephVersion:
+    major: int
+    minor: int
+    bugfix: int
+    commit_hash: str
+
+    def __str__(self) -> str:
+        return f"{self.major}.{self.minor}.{self.bugfix}  [{self.commit_hash[:8]}]"
+
+    @property
+    def version(self) -> CephVersions:
+        return CephVersions(self.major)
 
 
 class MonRole(Enum):
@@ -212,144 +354,6 @@ class Pool:
 
 
 @dataclass
-class NetAdapterAddr:
-    ip: IPv4Address
-    net: IPv4Network
-    is_routable: bool
-
-
-@dataclass
-class NetworkAdapter:
-    dev: str
-    is_phy: bool
-    duplex: Optional[bool] = None
-    mtu: Optional[int] = None
-    speed: Optional[str] = None
-    ips: List[NetAdapterAddr] = field(default_factory=list)
-    speed_s: Optional[str] = None
-    load: Optional[NetLoad] = None
-
-
-@dataclass
-class NetworkBond:
-    name: str
-    sources: List[str]
-
-
-@dataclass
-class DFInfo:
-    path: str
-    name: str
-    size: int
-    free: int
-    mountpoint: str
-
-
-@dataclass
-class Mountable:
-    name: str
-    path: str
-    size: int
-    mountpoint: Optional[str] = None
-    fs: Optional[str] = None
-    free_space: Optional[int] = None
-    parent: Optional[Callable[[], Optional['Disk']]] = None
-    children: Dict[str, 'Mountable'] = field(default_factory=dict)
-    label: Optional[str] = None
-
-
-@dataclass(order=True, unsafe_hash=True)
-class CephVersion:
-    major: int
-    minor: int
-    bugfix: int
-    commit_hash: str
-
-    def __str__(self) -> str:
-        return f"{self.major}.{self.minor}.{self.bugfix}  [{self.commit_hash[:8]}]"
-
-
-@dataclass
-class HWModel:
-    model: str
-    serial: str
-    vendor: str
-
-
-class DiskType(Enum):
-    sata_hdd = 0
-    sas_hdd = 1
-    nvme = 2
-    sata_ssd = 3
-    sas_ssd = 4
-    virtio = 5
-    unknown = 6
-
-    def is_fast(self) -> bool:
-        res = self.value in (self.nvme.value, self.sata_ssd.value, self.sas_ssd.value)
-        return res
-
-    def bandwith_mbps(self) -> int:
-        if self.is_fast():
-            return 200
-        elif self.value == self.sas_hdd.value:
-            return 100
-        else:
-            return 50
-
-
-@dataclass
-class Disk:
-    tp: DiskType
-    extra: Dict[str, Any]
-    name: str
-    path: str
-    size: int
-    rota: bool
-    scheduler: Optional[str]
-    hw_model: HWModel
-    rq_size: int
-    phy_sec: int
-    min_io: int
-    load: Optional[DiskLoad] = None
-    children: Dict[str, Mountable] = field(default_factory=dict)
-    mountpoint: Optional[str] = None
-    fs: Optional[str] = None
-    free_space: Optional[int] = None
-    parent: Optional[Callable[[], Optional['Disk']]] = None
-    label = None
-
-
-@dataclass
-class Host:
-    name: str
-    stor_id: str
-    net_adapters: Dict[str, NetworkAdapter]
-    disks: Dict[str, Disk]
-    storage_devs: Dict[str, Mountable]
-    hw_info: Optional[HWInfo]
-    df_info: Dict[str, DFInfo]
-    bonds: Dict[str, NetworkBond]
-
-    uptime: float
-    perf_monitoring: Any
-    open_tcp_sock: int
-    open_udp_sock: int
-    mem_total: int
-    mem_free: int
-    swap_total: int
-    swap_free: int
-    load_5m: Optional[float]
-
-    def find_interface(self, net: IPv4Network) -> Optional[NetworkAdapter]:
-        for adapter in self.net_adapters.values():
-            for ip in adapter.ips:
-                if ip.ip in net:
-                    return adapter
-        return None
-
-
-@dataclass
 class CephMonitor:
     name: str
     status: Optional[str]
@@ -361,98 +365,10 @@ class CephMonitor:
     avail_percent: Optional[int] = None
 
 
-@dataclass
-class BlueStoreInfo:
-    data_dev: str
-    data_partition: str
-    db_dev: str
-    db_partition: str
-    wal_dev: str
-    wal_partition: str
-
-    data_stor_stats: Optional[DiskLoad] = None
-    wal_stor_stats: Optional[DiskLoad] = None
-    db_stor_stats: Optional[DiskLoad] = None
-
-
-@dataclass
-class FileStoreInfo:
-    data_dev: str
-    data_partition: str
-    journal_dev: str
-    journal_partition: str
-
-    data_stor_stats: Optional[DiskLoad] = None
-    j_stor_stats: Optional[DiskLoad] = None
-
-
 class OSDStatus(Enum):
     up = 0
     down = 1
     out = 2
-
-
-@dataclass
-class OSDRunInfo:
-    procinfo: Dict[str, Any]
-    cmdline: List[str]
-    config: Dict[str, str]
-
-
-@dataclass
-class CephOSD:
-    id: int
-    host: Host
-    version: CephVersion
-    status: OSDStatus
-
-    cluster_ip: str
-    public_ip: str
-    pg_count: Optional[int]
-    reweight: float
-    used_space: int
-    free_space: int
-    free_perc: int
-
-    storage_type: OSDStoreType = OSDStoreType.unknown
-    storage_info: Union[BlueStoreInfo, FileStoreInfo, None] = None
-
-    run_info: Optional[OSDRunInfo] = None
-    osd_perf: Optional[Dict[str, Union[numpy.ndarray, float]]] = None
-    historic_ops_storage_path: Optional[str] = None
-
-    @property
-    def daemon_runs(self) -> bool:
-        return self.run_info is not None
-
-    def __str__(self) -> str:
-        return "OSD(id={0.id}, host={0.host.name}, free_perc={0.free_perc})".format(self)
-
-
-@dataclass
-class NetStats:
-    recv_bytes: int
-    recv_packets: int
-    rerrs: int
-    rdrop: int
-    rfifo: int
-    rframe: int
-    rcompressed: int
-    rmulticast: int
-    send_bytes: int
-    send_packets: int
-    serrs: int
-    sdrop: int
-    sfifo: int
-    scolls: int
-    scarrier: int
-    scompressed: int
-
-
-@dataclass
-class IPANetDevInfo:
-    name: str
-    mtu: int
 
 
 class CephStatusCode(Enum):
@@ -469,19 +385,6 @@ class CephStatusCode(Enum):
             return cls.warn
         assert val_l in ('ok', 'health_ok'), val_l
         return cls.ok
-
-
-@dataclass
-class Cluster:
-    hosts: Dict[str, Host]
-    ip2host: Dict[str, Host]
-    report_collected_at_local: str
-    report_collected_at_gmt: str
-    perf_data: Any = None
-
-    @property
-    def has_performance_data(self) -> bool:
-        return self.perf_data is not None
 
 
 @dataclass
@@ -610,26 +513,34 @@ class PGDump:
 
 
 @dataclass
-class JInfo:
-    collocation: bool
-    on_file: bool
-    drive_type: DiskType
-    size: Optional[int]
+class CephDevInfo:
+    hostname: str
+    name: str
+    path: DevPath
+    partition_name: str
+    partition_path: DevPath
+    dev_info: LogicBlockDev
+    partition_info: LogicBlockDev
+    d_usage: Optional[BlockUsage]
 
 
 @dataclass
-class WALDBInfo:
-    wal_collocation: bool
-    wal_drive_type: DiskType
-    wal_size: Optional[int]
+class BlueStoreInfo:
+    data: CephDevInfo
+    db: CephDevInfo
+    wal: CephDevInfo
 
-    db_collocation: bool
-    db_drive_type: DiskType
-    db_size: Optional[int]
+
+@dataclass
+class FileStoreInfo:
+    data: CephDevInfo
+    journal: CephDevInfo
 
 
 @dataclass
 class OSDProcessInfo:
+    procinfo: Dict[str, Any]
+    cmdline: List[str]
     opened_socks: int
     fd_count: int
     th_count: int
@@ -653,36 +564,33 @@ class OSDPGStats:
 
 
 @dataclass
-class OSDDStats:
-    d_used_space: int
-    d_reads: int
-    d_read_b: int
-    d_writes: int
-    d_write_b: int
-
-
-@dataclass
 class NodePGStats:
     name: str
     pgs: List[PG]
-    io_stat: OSDPGStats
-    dio_stat: Optional[OSDDStats]
+    pg_stat: OSDPGStats
+    d_pg_stat: Optional[OSDPGStats]
 
 
 @dataclass
-class OSDInfo:
-    pgs: Optional[List[PG]]
-    total_space: int
+class CephOSD:
+    id: int
+    host: Host
+    version: CephVersion
+    status: OSDStatus
+    config: Dict[str, str]
+
+    cluster_ip: str
+    public_ip: str
+    pg_count: Optional[int]
+    reweight: float
+
+    free_perc: int
     used_space: int
     free_space: int
-    total_user_data: int
-    crush_trees_weights: Dict[str, Tuple[bool, float, float]]
-    data_drive_type: DiskType
-    data_part_size: int
+    total_space: int
 
-    # FS/BS info
-    j_info: Optional[JInfo]
-    wal_db_info: Optional[WALDBInfo]
+    pgs: Optional[List[PG]]
+    crush_trees_weights: Dict[str, Tuple[bool, float, float]]
 
     run_info: Optional[OSDProcessInfo]
 
@@ -690,39 +598,76 @@ class OSDInfo:
     pg_stats: Optional[OSDPGStats]
 
     # load during report collection for all owned PG's
-    d_stats: Optional[OSDDStats]
+    d_pg_stats: Optional[OSDPGStats]
+
+    storage_info: Union[BlueStoreInfo, FileStoreInfo, None]
+
+    osd_perf: Optional[Dict[str, Union[numpy.ndarray, float]]]
+    historic_ops_storage_path: Optional[str]
+
+    @property
+    def daemon_runs(self) -> bool:
+        return self.run_info is not None
+
+    def __str__(self) -> str:
+        return "OSD(id={0.id}, host={0.host.name}, free_perc={0.free_perc})".format(self)
 
 
-@dataclass
-class OSDSInfo:
-    has_fs: bool
-    has_bs: bool
-    osds: Dict[int, OSDInfo]
-    all_versions: Dict[CephVersion, int]
-    largest_ver: CephVersion
+class OSDStorageTypes(Enum):
+    fs = 0
+    bs = 1
+    fs_and_bs = 2
+
+
+class CephMGR:
+    pass
+
+
+class RadosGW:
+    pass
 
 
 @dataclass
 class CephInfo:
-    osds: List[CephOSD]
-    mons: List[CephMonitor]
+    osds: Dict[int, CephOSD]
+    mons: Dict[str, CephMonitor]
+    mgrs: Optional[Dict[str, CephMGR]]
+    radosgw: Optional[Dict[str, RadosGW]]
     pools: Dict[str, Pool]
-    osd_map: Dict[int, CephOSD]
+
+    version: CephVersion  # largest monitor version
+    status: CephStatus
 
     # pg distribution
     osd_pool_pg_2d: Dict[int, Dict[str, int]]
     sum_per_pool: Dict[str, int]
     sum_per_osd: Dict[int, int]
 
-    is_luminous: bool
-
     crush: Crush
     cluster_net: IPv4Network
     public_net: IPv4Network
     settings: AttredDict
 
-    status: CephStatus
-
     pgs: Optional[PGDump]
     pgs_second: Optional[PGDump]
-    osds_info: Optional[OSDSInfo] = None
+
+    has_fs: bool = field(init=False)
+    has_bs: bool = field(init=False)
+
+    def __post_init__(self):
+        self.has_fs = any(isinstance(osd, FileStoreInfo) for osd in self.osds.values())
+        self.has_bs = any(isinstance(osd, BlueStoreInfo) for osd in self.osds.values())
+        assert self.has_fs or self.has_bs
+
+    @property
+    def is_luminous(self) -> bool:
+        return self.version.major >= 12
+
+    @property
+    def fs_types(self) -> OSDStorageTypes:
+        if self.has_bs and self.has_fs:
+            return OSDStorageTypes.fs_and_bs
+        elif self.has_bs:
+            return OSDStorageTypes.bs
+        else:
+            return OSDStorageTypes.fs

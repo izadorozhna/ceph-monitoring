@@ -567,14 +567,6 @@ class CephDataCollector(Collector):
                 self.save_file('osdmap', osd_fname, 'bin')
                 self.save_output('osdmap', "osdmaptool --print " + osd_fname, "txt")
 
-    def second_pg_dump(self):
-        if self.__class__.num_pgs > self.opts.max_pg_dump_count:
-            logger.warning(
-                ("pg dump skipped, as num_pg ({}) > max_pg_dump_count ({})." +
-                 " Use --max-pg-dump-count NUM option to change the limit").format(
-                     self.__class__.num_pgs, self.opts.max_pg_dump_count))
-        self.save_output("master/pg_dump_second", self.ceph_cmd + "pg dump", 'json')
-
     def collect_osd(self):
         assert isinstance(self.node, Node)
 
@@ -613,6 +605,8 @@ class CephDataCollector(Collector):
             with self.chdir('osd/{}'.format(osd.id)):
                 cmd = "tail -n {} /var/log/ceph/ceph-osd.{}.log".format(self.opts.ceph_log_max_lines, osd.id)
                 self.save_output("log", cmd)
+
+                self.save_output("perf_dump", f"ceph --admin-daemon /var/run/ceph/ceph-osd.{osd.id}.asok perf dump")
 
                 # TODO: much of this can be done even id osd is down for filestore
                 if osd.id in running_osds:
@@ -919,7 +913,7 @@ class LoadCollector(Collector):
             cfg.setdefault("ceph", {}).setdefault("sources", []).append('historic')
 
         if self.opts.ceph_perf:
-            cfg.setdefault("ceph", {}).setdefault("sources", []).append('perf_dump_delta')
+            cfg.setdefault("ceph", {}).setdefault("sources", []).append('perf_dump')
 
         if self.opts.ceph_historic or self.opts.ceph_perf:
             cfg['ceph']['osds'] = 'all'
@@ -1132,16 +1126,6 @@ class CollectorCoordinator:
                                               pretty_json=not self.opts.no_pretty_json)
                     yield functools.partial(collector.collect, ['node'])
 
-    def second_pg_dump(self) -> Iterator[Callable[[], None]]:
-        if CephDataCollector.name in self.allowed_collectors:
-            logger.info("Collecting second pg dump")
-            collector = CephDataCollector(self.allowed_path_checker,
-                                          self.storage,
-                                          self.opts,
-                                          self.ceph_master_node,
-                                          pretty_json=not self.opts.no_pretty_json)
-            yield collector.second_pg_dump
-
     def collect(self):
         # This variable is updated from main function
         self.nodes = self.connect_to_nodes()
@@ -1160,8 +1144,7 @@ class CollectorCoordinator:
             funcs = [self.start_load_collectors,
                      self.collect_ceph_data,
                      self.run_other_collectors,
-                     self.finish_load_collectors,
-                     self.second_pg_dump]
+                     self.finish_load_collectors]
 
             for func in funcs:
                 for future in [self.executor.submit(run_func) for run_func in func()]:
@@ -1209,7 +1192,7 @@ def parse_args(argv: List[str]) -> Any:
     p.add_argument("-l", "--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
                    default=None, help="Console log level")
     p.add_argument("-L", "--log-config", help="json file with logging config")
-    p.add_argument("-m", "--max-pg-dump-count", default=2 ** 15, type=int,
+    p.add_argument("-m", "--max-pg-dump-count", default=2 ** 16, type=int,
                    help="maximum PG count to by dumped with 'pg dump' cmd")
     p.add_argument("-M", "--ceph-log-max-lines", default=10000, type=int, help="Max lines from osd/mon log")
     p.add_argument("-n", "--dont-remove-unpacked", action="store_true", help="Keep unpacked data")
