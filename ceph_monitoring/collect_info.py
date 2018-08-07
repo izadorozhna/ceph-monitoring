@@ -371,6 +371,9 @@ class Collector:
         finally:
             self.storage = saved
 
+    def save_raw(self, path: str, data: bytes):
+        self.storage.put_raw(path, data)
+
     def save(self, path: str, frmt: str, code: int, data: Union[str, bytes, array.array],
              check: bool = True, extra: List[str] = None) -> Optional[str]:
         """Save results into storage"""
@@ -382,15 +385,14 @@ class Collector:
             assert isinstance(data, (str, bytes))
             data = json.dumps(json.loads(data), indent=4, sort_keys=True)
 
-        rpath = path + "." + ("err" if code != 0 else frmt)
+        rpath = "{}.{}".format(path, frmt if code == 0 else "err")
 
-        # TODO: fix storage
         if isinstance(data, str):
             assert extra is None
-            self.storage.put_raw(data.encode('utf8'), rpath)
+            self.save_raw(rpath, data.encode('utf8'))
         elif isinstance(data, bytes):
             assert extra is None
-            self.storage.put_raw(data, rpath)
+            self.save_raw(rpath, data)
         elif isinstance(data, array.array):
             self.storage.put_array(rpath, data, extra if extra else [])
         else:
@@ -905,17 +907,19 @@ class LoadCollector(Collector):
         #     "system-ram": {"allowed": ".*"},
         #     "ceph": {"osds": []},
 
-        cfg = {
-            "block-io": {},
-            "net-io": {},
-            "vm-io": {},
-        }
+        # cfg = {
+        #     "block-io": {},
+        #     "net-io": {},
+        #     "vm-io": {},
+        # }
+
+        cfg = {}
 
         if self.opts.ceph_historic:
             cfg.setdefault("ceph", {}).setdefault("sources", []).append('historic')
 
         if self.opts.ceph_perf:
-            cfg.setdefault("ceph", {}).setdefault("sources", []).append('perf_dump')
+            cfg.setdefault("ceph", {}).setdefault("sources", []).append('perf_dump_delta')
 
         if self.opts.ceph_historic or self.opts.ceph_perf:
             cfg['ceph']['osds'] = 'all'
@@ -936,10 +940,11 @@ class LoadCollector(Collector):
                 self.save("perf_monitoring/{}/{}".format(self.node.name, sensor_path), ext, 0, data,
                           extra=extra)
             else:
+                assert isinstance(data, bytes)
                 if metric == 'historic':
-                    self.storage.put_raw(data, "perf_monitoring/{}/{}.bin".format(self.node.name, sensor_path))
+                    self.save_raw("perf_monitoring/{}/{}.bin".format(self.node.name, sensor_path), data)
                 elif metric == 'perf_dump':
-                    self.storage.put_raw(data, "perf_monitoring/{}/{}.json".format(self.node.name, sensor_path))
+                    self.save_raw("perf_monitoring/{}/{}.json".format(self.node.name, sensor_path), data)
 
 
 # ------------------------  Collect coordinator functions --------------------------------------------------------------

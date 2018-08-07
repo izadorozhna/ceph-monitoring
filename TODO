@@ -5,5 +5,61 @@
 нарисовать краш
 вытаскивать ошибки и ворнинги из сеф логов
 CPU/RAM потребление
+removed snaps - прочитать что это, как его настраивать и чекать, что их не слишком много
 
 чекеры;
+
+* Сделать статистику сетевых карт - переданные пакеты, ошибки, etc
+* статистика по подсетям аггрегированная по всем нодам
+* для ноды статистика превышений лимитов обработки по всем интерфейсам
+* tcp соединения монитора!
+* таблица соединений между серверами
+* uname, uptime сервера
+* systemctl -a
+* таблица настроек ядра
+* Нарисовать HDD для ноды с разбиением и использованием
+* Вытащить больше инфы из PG/OSD dump - там есть тайминги реквестов на OSD
+    и гистограмма текущей очереди
+* нарисовать краш
+* вытаскивать ошибки и ворнинги из сеф логов
+* CPU/RAM потребление
+* PG dump - всегда, листить папку не надо
+
+Загрузка данных:
+    performance
+    devices
+    hosts
+    cluster
+    ceph
+
+
+Структура классов
+
+ReportInfo
+
+
+Cluster:
+    Dict[str, Host]
+        Optional[LoadInfo]
+        Dict[str, DiskDevice]
+            Dict[str, array]
+            parts Mountable
+            Dict[
+        Dict[str, Mountable]
+            wref Parents
+        Dict[str, NetAdapter]
+    Optional[LoadInfo]
+
+
+Ceph
+    Dict[int, OSD]
+        Host
+        Optional[OSDProcess]
+        PGS
+        Union[BlueStoreInfo, FileStoreInfo]
+
+    Dict[str, Mon]
+        Host
+        Optional[MonProcess]
+    Dict[str, Pool]
+    Dict[str, PG]
