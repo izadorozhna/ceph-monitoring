@@ -372,7 +372,7 @@ class Collector:
             self.storage = saved
 
     def save_raw(self, path: str, data: bytes):
-        self.storage.put_raw(path, data)
+        self.storage.put_raw(data, path)
 
     def save(self, path: str, frmt: str, code: int, data: Union[str, bytes, array.array],
              check: bool = True, extra: List[str] = None) -> Optional[str]:
@@ -606,7 +606,8 @@ class CephDataCollector(Collector):
                 cmd = "tail -n {} /var/log/ceph/ceph-osd.{}.log".format(self.opts.ceph_log_max_lines, osd.id)
                 self.save_output("log", cmd)
 
-                self.save_output("perf_dump", f"ceph --admin-daemon /var/run/ceph/ceph-osd.{osd.id}.asok perf dump")
+                self.save_output("perf_dump",
+                                 "ceph --admin-daemon /var/run/ceph/ceph-osd.{}.asok perf dump".format(osd.id))
 
                 # TODO: much of this can be done even id osd is down for filestore
                 if osd.id in running_osds:
@@ -1167,6 +1168,21 @@ class CollectorCoordinator:
                         node.rpc.server.stop()
                     except ConnectionClosed:
                         node.rpc = None
+
+        logger.info("Totally collected data from %s nodes", len(self.nodes))
+
+        for node in sorted(self.nodes, key=lambda x: x.name):
+            if node.osds and node.mon:
+                logger.info("Node %s has mon and %s osds", node.name, len(node.osds))
+            elif node.osds:
+                logger.info("Node %s has %s osds", node.name, len(node.osds))
+            elif node.mon:
+                logger.info("Node %s has mon", node.name)
+
+        logger.info("Totally found %s monitors, %s OSD nodes with %s OSD daemons",
+                    sum(1 for node in self.nodes if node.mon),
+                    sum(1 for node in self.nodes if node.osds),
+                    sum(len(node.osds) for node in self.nodes if node.osds))
 
 
 def parse_args(argv: List[str]) -> Any:
