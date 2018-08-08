@@ -39,6 +39,7 @@ logger = logging.getLogger('collect')
 
 
 ExecResult = NamedTuple('ExecResult', [('code', int), ('output_b', bytes), ('output', str)])
+AUTOPG = -1
 
 
 #  -------------------   Node classes and interfaces -------------------------------------------------------------------
@@ -508,11 +509,16 @@ class CephDataCollector(Collector):
             self.save("ceph_health_dict", "js", 0, ceph_health_js, check=False)
 
             self.__class__.num_pgs = status['pgmap']['num_pgs']  # type: ignore
-            if self.__class__.num_pgs > self.opts.max_pg_dump_count:    # type: ignore
+
+            max_pg = (2 ** 17 if is_luminous else 2 ** 15) \
+                     if AUTOPG == self.opts.max_pg_dump_count \
+                     else self.opts.max_pg_dump_count
+
+            if self.__class__.num_pgs > max_pg:    # type: ignore
                 logger.warning(
                     ("pg dump skipped, as num_pg ({}) > max_pg_dump_count ({})." +
                      " Use --max-pg-dump-count NUM option to change the limit").format(
-                         self.__class__.num_pgs, self.opts.max_pg_dump_count))    # type: ignore
+                         self.__class__.num_pgs, max_pg))    # type: ignore
                 cmds = []  # type: List[str]
             else:
                 cmds = ['pg dump']
@@ -1190,7 +1196,7 @@ def parse_args(argv: List[str]) -> Any:
     p.add_argument("-c", "--collectors", default="ceph,node,load",
                    help="Comma separated list of collectors. Select from : " +
                    ",".join(coll.name for coll in ALL_COLLECTORS))
-    p.add_argument("--ceph-master", default=None, metavar="NODE", help="Run all ceph cluster commands from NODE")
+    p.add_argument("--ceph-master",metavar="NODE", help="Run all ceph cluster commands from NODE")
     p.add_argument("--ceph-master-only", action="store_true", help="Run only ceph master data collection, " +
                    "no osd data collections")
     p.add_argument("-C", "--ceph-extra", default="", help="Extra opts to pass to 'ceph' command")
@@ -1206,21 +1212,21 @@ def parse_args(argv: List[str]) -> Any:
                    help="File which map node name/ip to roles. In format 1.1.1.1: osd, mon")
     p.add_argument("-j", "--no-pretty-json", action="store_true", help="Don't prettify json data")
     p.add_argument("-l", "--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-                   default=None, help="Console log level")
+                   help="Console log level")
     p.add_argument("-L", "--log-config", help="json file with logging config")
-    p.add_argument("-m", "--max-pg-dump-count", default=2 ** 16, type=int,
+    p.add_argument("-m", "--max-pg-dump-count", default=AUTOPG, type=int,
                    help="maximum PG count to by dumped with 'pg dump' cmd")
     p.add_argument("-M", "--ceph-log-max-lines", default=10000, type=int, help="Max lines from osd/mon log")
     p.add_argument("-n", "--dont-remove-unpacked", action="store_true", help="Keep unpacked data")
     p.add_argument("-N", "--dont-pack-result", action="store_true", help="Don't create archive")
-    p.add_argument("-o", "--result", default=None, help="Result file")
-    p.add_argument("-O", "--output-folder", default=None, help="Result folder")
+    p.add_argument("-o", "--output", help="Result archive (only if -N don't set)")
+    p.add_argument("-O", "--output-folder", help="Result folder")
     p.add_argument("-p", "--pool-size", default=32, type=int, help="RPC/local worker pool size")
     p.add_argument("-s", "--load-collect-seconds", default=60, type=int, metavar="SEC",
                    help="Collect performance stats for SEC seconds")
-    p.add_argument("-S", "--ssh-opts", default=None, help="SSH cli options")
+    p.add_argument("-S", "--ssh-opts", help="SSH cli options")
     p.add_argument("-t", "--ssh-conn-timeout", default=60, type=int, help="SSH connection timeout")
-    p.add_argument("-u", "--ssh-user", default=None, help="SSH user. Current user by default")
+    p.add_argument("-u", "--ssh-user", help="SSH user. Current user by default")
     p.add_argument("--sudo", action="store_true", help="Run agent with sudo on remote node")
     p.add_argument("-w", "--wipe", action='store_true', help="Wipe results directory before store data")
     p.add_argument("-A", '--all-ceph', action="store_true", help="Must successfully connect to all ceph nodes")
@@ -1291,10 +1297,10 @@ def pack_output_folder(out_folder: str, out_file: Optional[str], log_level: str)
         logger.info("Result saved into %r", out_file)
 
         if log_level in ('WARNING', 'ERROR', "CRITICAL"):
-            print("Result saved into %r" % (out_file,))
+            print("Result saved into {}".format(out_file))
 
 
-def commit_into_git(git_dir: str, log_file: str, target_log_file: str, git_push: bool, message: str):
+def commit_into_git(git_dir: str, log_file: str, target_log_file: str, git_push: bool, ceph_status: Dict[str, Any]):
     logger.info("Comiting into git")
 
     [h_weak_ref().flush() for h_weak_ref in logging._handlerList]
@@ -1303,7 +1309,7 @@ def commit_into_git(git_dir: str, log_file: str, target_log_file: str, git_push:
 
     status_templ = "{0:%H:%M %d %b %y}, {1[status]}, {1[free_pc]}% free, {1[blocked]} req blocked, " + \
                    "{1[ac_perc]}% PG active+clean"
-    message = status_templ.format(datetime.datetime.now(), message)
+    message = status_templ.format(datetime.datetime.now(), ceph_status)
     git_commit(git_dir, message, git_push)
 
 
@@ -1378,7 +1384,7 @@ def main(argv: List[str]) -> int:
                 target_log_file = None  # type: ignore
 
             if not opts.dont_pack_result:
-                pack_output_folder(out_folder, opts.result, opts.log_level)
+                pack_output_folder(out_folder, opts.output, opts.log_level)
 
             if git_dir:
                 assert isinstance(target_log_file, str)
@@ -1386,8 +1392,8 @@ def main(argv: List[str]) -> int:
                 commit_into_git(git_dir,
                                 log_file=log_file,
                                 target_log_file=target_log_file,
-                                message=ceph_health,
-                                git_push=opts.git_push is not None)
+                                git_push=opts.git_push is not None,
+                                ceph_status=ceph_health)
             elif not opts.dont_remove_unpacked:
                 if opts.dont_pack_result:
                     logger.warning("Unpacked tree is kept as --dont-pack-result option is set, so no archive created")

@@ -122,23 +122,6 @@ class NetAdapterAddr:
 
 
 @dataclass
-class NetworkAdapter:
-    dev: str
-    is_phy: bool
-    duplex: Optional[bool] = None
-    mtu: Optional[int] = None
-    speed: Optional[str] = None
-    ips: List[NetAdapterAddr] = field(default_factory=list)
-    speed_s: Optional[str] = None
-
-
-@dataclass
-class NetworkBond:
-    name: str
-    sources: List[str]
-
-
-@dataclass
 class NetStats:
     recv_bytes: int
     recv_packets: int
@@ -156,6 +139,25 @@ class NetStats:
     scolls: int
     scarrier: int
     scompressed: int
+
+
+@dataclass
+class NetworkAdapter:
+    dev: str
+    is_phy: bool
+    usage: NetStats
+    duplex: Optional[bool] = None
+    mtu: Optional[int] = None
+    speed: Optional[str] = None
+    ips: List[NetAdapterAddr] = field(default_factory=list)
+    speed_s: Optional[str] = None
+    d_usage: Optional[NetStats] = None
+
+
+@dataclass
+class NetworkBond:
+    name: str
+    sources: List[str]
 
 
 @dataclass
@@ -213,6 +215,7 @@ class LogicBlockDev:
     parent: Optional[Callable[[], Optional['Disk']]] = None
     children: Dict[str, 'LogicBlockDev'] = field(default_factory=dict)
     label: Optional[str] = None
+    d_usage: Optional[BlockUsage] = None
 
     def __post_init__(self):
         assert '/dev/' + self.name == self.dev_path
@@ -521,7 +524,6 @@ class CephDevInfo:
     partition_path: DevPath
     dev_info: LogicBlockDev
     partition_info: LogicBlockDev
-    d_usage: Optional[BlockUsage]
 
 
 @dataclass
@@ -671,3 +673,7 @@ class CephInfo:
             return OSDStorageTypes.bs
         else:
             return OSDStorageTypes.fs
+
+    @property
+    def sorted_osds(self) -> List[CephOSD]:
+        return [osd for _, osd in sorted(self.osds.items())]

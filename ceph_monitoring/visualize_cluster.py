@@ -26,7 +26,7 @@ from cephlib.units import b2ssize, b2ssize_10
 from cephlib.common import flatten
 
 from . import html
-from .cluster_classes import (CephInfo, Cluster, Host, FileStoreInfo, BlueStoreInfo, OSDStatus,
+from .cluster_classes import (CephInfo, Cluster, Host, FileStoreInfo, BlueStoreInfo, OSDStatus, LogicBlockDev,
                               CephOSD, CephMonitor, CephVersion, DiskType, CephDevInfo, DevPath)
 from .cluster import NO_VALUE, load_all, get_nodes_pg_info
 from .checks import run_all_checks
@@ -656,7 +656,7 @@ def get_osd_load_table(ceph: CephInfo) -> str:
                              if ceph.pgs_second else []),
                            align=html.TableAlign.left_right)
 
-    for _, osd in sorted(ceph.osds.items()):
+    for osd in ceph.sorted_osds:
         table.add_cell(str(osd.id))
         table.add_cell(osd.host.name)
 
@@ -731,7 +731,7 @@ def show_osd_info(ceph: CephInfo) -> Tuple[str, Any]:
         DiskType.unknown: 50
     }
 
-    for _, osd in sorted(ceph.osds.items()):
+    for osd in ceph.sorted_osds:
         if osd.daemon_runs is None:
             daemon_msg = HTML_UNKNOWN
         else:
@@ -809,7 +809,7 @@ def show_osd_info(ceph: CephInfo) -> Tuple[str, Any]:
         # JOURNAL/WAL/DB info
         if isinstance(osd.storage_info, FileStoreInfo):
             if osd.run_info:
-                osd_sync = float(osd.run_info.config['filestore_max_sync_interval'])
+                osd_sync = float(osd.config['filestore_max_sync_interval'])
                 min_size = osd_sync * expected_wr_speed[osd.storage_info.data.dev_info.tp] * (1024 ** 2)
             else:
                 min_size = 0
@@ -839,68 +839,52 @@ def show_osd_info(ceph: CephInfo) -> Tuple[str, Any]:
 
 @perf_info_required
 def show_osd_perf_info(ceph: CephInfo) -> Tuple[str, Any]:
-    table = html.HTMLTable(headers=["OSD",
-                                    "node",
-                                    "journal<br>lat, ms",
-                                    "apply<br>lat, ms<br>avg/osd perf",
-                                    "commit<br>lat, ms<br>avg/osd perf",
-                                    "D dev",
-                                    "D read<br>Bps/OPS",
-                                    "D write<br>Bps/OPS",
-                                    "D lat<br>ms",
-                                    "D IO<br>time %",
-                                    "J dev",
-                                    "J write<br>Bps/OPS",
-                                    "J lat<br>ms",
-                                    "J IO<br>time %"])
+    headers = ["OSD", "node", "apply<br>lat, ms<br>avg/osd perf", "commit<br>lat"]
 
-    for osd in ceph.osds:
-        perf_info: List[Tuple[Union[int, str], Union[float, None, int]]] = []
+    if ceph.has_fs:
+        headers.append("journal<br>lat, ms")
 
+    headers.extend(["ms<br>avg/osd perf", "D dev", "D read<br>Bps/OPS", "D write<br>Bps/OPS",
+                    "D lat<br>ms", "D IO<br>time %"])
+
+    headers.extend(["J/WAL dev", "J/WAL write<br>Bps/OPS", "J/WAL lat<br>ms", "J/WAL IO<br>time %"])
+
+    if ceph.has_bs:
+        headers.extend(["DB dev", "DB write<br>Bps/OPS", "DB lat<br>ms", "DB IO<br>time %"])
+
+    table = html.HTMLTable(headers=headers)
+
+    def lat2s(val):
+        if val is None or val < 1e-6:
+            return HTML_UNKNOWN
+        elif val < 1e-3:
+            return f"{val * 1000:.3f}"
+        else:
+            return f"{int(val * 1000)}"
+
+    def add_dev_info(dev: LogicBlockDev):
+        table.add_cell(dev.name)
+        table.add_cell(f"{b2ssize(dev.usage.read_bytes)} / {b2ssize(dev.usage.read_iops)}",
+                       sorttable_customkey=str(dev.usage.read_bytes))
+        table.add_cell(f"{b2ssize(dev.usage.write_bytes)} / {b2ssize(dev.usage.write_iops)}",
+                       sorttable_customkey=str(dev.usage.write_bytes))
+
+        if dev.usage.lat is None:
+            table.add_cell('-', sorttable_customkey="0")
+        else:
+            table.add_cell(lat2s(dev.usage.lat), sorttable_customkey=str(dev.usage.lat))
+
+        table.add_cell(str(int(dev.usage.io_time * 100)), sorttable_customkey=str(dev.usage.io_time))
+
+    for osd in ceph.sorted_osds:
         assert osd.storage_info is not None
-
-        if osd.storage_info.data_stor_stats is None:
-            perf_info.extend([('-', 0)] * 5)
-        else:
-            load = osd.storage_info.data_stor_stats
-            perf_info.extend([  # type: ignore
-                (str(Path(osd.storage_info.data_dev).parent), None),
-                (f"{b2ssize(load.read_bytes)} / {b2ssize(load.read_iops)}", load.read_bytes),
-                (f"{b2ssize(load.write_bytes)} / {b2ssize(load.write_iops)}", load.write_bytes),
-                (int(load.lat * 1000), load.lat) if load.lat is not None else ('-', 0),
-                (int(load.io_time * 100), load.io_time)
-            ])
-
-        sinfo = osd.storage_info
-        if isinstance(sinfo, FileStoreInfo):
-            assert sinfo.j_stor_stats is not None
-            assert sinfo.data_stor_stats is not None
-            if sinfo.journal_dev != sinfo.data_dev:
-                load = sinfo.j_stor_stats
-                perf_info.extend([  # type: ignore
-                    (str(Path(sinfo.journal_dev).parent), None),
-                    (f"{b2ssize(load.write_bytes)}  / {b2ssize(load.write_iops)}", load.write_bytes),
-                    (int(load.lat * 1000), load.lat) if load.lat is not None else ('-', 0),
-                    (int(load.io_time * 100), load.io_time)
-                ])
-            else:
-                perf_info.extend([("<--", None), ('-', 0), ('-', 0), ('-', 0)])
-        else:
-            perf_info.extend([('-', 0)] * 3)
 
         table.add_cell(str(osd.id))
         table.add_cell(osd.host.name)
 
-        def lat2s(val):
-            if val is None or val < 1e-6:
-                return HTML_UNKNOWN
-            elif val < 1e-3:
-                return f"{val * 1000:.3f}"
-            else:
-                return f"{int(val * 1000)}"
-
-        lats = (("journal_latency", None), ("apply_latency", "apply_latency_s"),
-                ("commitcycle_latency", "commitcycle_latency_s"))
+        lats = [("apply_latency", "apply_latency_s"), ("commitcycle_latency", "commitcycle_latency_s")]
+        if ceph.has_fs:
+            lats.append(("journal_latency", None))
 
         if osd.osd_perf is not None:
             for name, name_s in lats:
@@ -930,11 +914,13 @@ def show_osd_perf_info(ceph: CephInfo) -> Tuple[str, Any]:
                 else:
                     table.add_cell(HTML_UNKNOWN)
 
-        for val, sorted_val in perf_info:
-            if sorted_val is None:
-                table.add_cell(str(val))
-            else:
-                table.add_cell(str(val), sorttable_customkey=str(sorted_val))
+        add_dev_info(osd.storage_info.data.dev_info)
+        if isinstance(osd.storage_info, FileStoreInfo):
+            add_dev_info(osd.storage_info.journal.dev_info)
+        else:
+            add_dev_info(osd.storage_info.wal.dev_info)
+            add_dev_info(osd.storage_info.db.dev_info)
+
         table.next_row()
 
     return "OSD's current load:", table
@@ -1443,9 +1429,10 @@ def parse_args(argv):
     p.add_argument("-o", '--out', help="report output folder", required=True)
     p.add_argument("-w", '--overwrite', action='store_true',  help="Overwrite result folder data")
     p.add_argument("-p", "--pretty-html", help="Prettify index.html", action="store_true")
-    p.add_argument("data_folder", help="Folder with data, or .tar.gz archive")
     p.add_argument("--profile", help="Profile report creation", action="store_true")
     p.add_argument("-e", "--embed", action='store_true', help="Embed js/css files into report to make it stand-alone")
+    p.add_argument("path", help="Folder with data, or .tar.gz archive")
+    p.add_argument("old_path", nargs='?', help="Older folder with data, or .tar.gz archive to calculate load")
     return p.parse_args(argv[1:])
 
 

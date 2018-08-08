@@ -280,7 +280,7 @@ def load_interfaces(dtime: Optional[float],
                     jstor_node: AttredStorage,
                     stor_node: AttredStorage) -> Dict[str, NetworkAdapter]:
 
-    # net_stats = parse_netdev(stor_node.netdev)
+    usage = parse_netdev(stor_node.netdev)
     ifs_info = parse_ipa(stor_node.ipa)
     net_adapters = {}
 
@@ -297,7 +297,9 @@ def load_interfaces(dtime: Optional[float],
                                  mtu=None,
                                  speed=speed,
                                  speed_s=speed_s,
-                                 duplex=duplex)
+                                 duplex=duplex,
+                                 usage=usage[adapter_dct['dev']],
+                                 d_usage=None)
 
         try:
             adapter.mtu = ifs_info[adapter.dev].mtu
