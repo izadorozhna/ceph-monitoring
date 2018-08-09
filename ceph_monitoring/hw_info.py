@@ -3,7 +3,7 @@ import xml.etree.ElementTree as ET
 from typing import Dict, Optional
 
 
-from .cluster_classes import CPUInfo, HWInfo, LSHWNetInfo, DiskInfo
+from .cluster_classes import LSHWCPUInfo, LSHWInfo, LSHWNetInfo, LSHWDiskInfo
 
 
 def get_data(rr: str, data: str) -> str:
@@ -11,7 +11,7 @@ def get_data(rr: str, data: str) -> str:
 
 
 
-def parse_hw_info(lshw_out: str) -> Optional[HWInfo]:
+def parse_hw_info(lshw_out: str) -> Optional[LSHWInfo]:
     lshw_et = ET.fromstring(lshw_out)
 
     try:
@@ -44,7 +44,7 @@ def parse_hw_info(lshw_out: str) -> Optional[HWInfo]:
             pass
         else:
             assert isinstance(model, str)
-            cpu_info.append(CPUInfo(model, cores))
+            cpu_info.append(LSHWCPUInfo(model, cores))
 
     ram_size = 0
     for mem_node in core.findall(".//node[@class='memory']"):
@@ -107,7 +107,7 @@ def parse_hw_info(lshw_out: str) -> Optional[HWInfo]:
                 sz_node = disk.find('size')
                 assert sz_node.attrib['units'] == 'bytes'  # type: ignore
                 sz = int(sz_node.text)  # type: ignore
-                disks_info[dev] = DiskInfo(size=sz, mount_point=None, device=None)
+                disks_info[dev] = LSHWDiskInfo(size=sz, mount_point=None, device=None)
             else:
                 description = disk.find('description').text  # type: ignore
                 product = disk.find('product').text  # type: ignore
@@ -120,16 +120,16 @@ def parse_hw_info(lshw_out: str) -> Optional[HWInfo]:
         except (AttributeError, KeyError):
             pass
 
-    return HWInfo(raw=lshw_out,
-                  disks_raw_info=disks_raw_info,
-                  disks_info=disks_info,
-                  sys_name=sys_name,
-                  hostname=hostname,
-                  mb=mb,
-                  cpu_info=cpu_info,
-                  storage_controllers=storage_controllers,
-                  net_info=net_info,
-                  ram_size=ram_size)
+    return LSHWInfo(raw=lshw_out,
+                    disks_raw_info=disks_raw_info,
+                    disks_info=disks_info,
+                    sys_name=sys_name,
+                    hostname=hostname,
+                    mb=mb,
+                    cpu_info=cpu_info,
+                    storage_controllers=storage_controllers,
+                    net_info=net_info,
+                    ram_size=ram_size)
 
 
 def get_dev_file_name(path_or_name: str) -> str:

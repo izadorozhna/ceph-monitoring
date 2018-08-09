@@ -19,11 +19,10 @@ function gh_dep() {
 }
 
 for name in cephlib agent xmlbuilder3 ; do
-    #gh_dep "koder-ua/$name"
-    cp -r "${cdir}/../$name/$name" .
+    gh_dep "koder-ua/$name"
+    # cp -r "${cdir}/../$name/$name" .
 done
 
-#URL=https://pypi.python.org/packages/44/88/d09c6a7fe1af4a02f16d2f1766212bec752aadb04e5699a9706a10a1a37d/typing-3.6.2-py3-none-any.whl
 URL="https://files.pythonhosted.org/packages/ec/cc/28444132a25c113149cec54618abc909596f0b272a74c55bab9593f8876c/typing-3.6.4.tar.gz"
 wget $URL
 

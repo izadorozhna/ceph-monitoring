@@ -23,7 +23,7 @@ How to collect data:
   `bash ceph_report.sh -c node,ceph.load -l DEBUG -O OUTPUT_FOLDER ADDITIONAL_OPTIONS`
 
 Additional options (in most cases you will need them all):
-- For passing inventory `--inventory INV_FILE`
+- For passing inventory `--inventory INV_FILE`. Path to inventory MUST be absolute.
 - For non-root user `-u SSH_USER --sudo`
 - If running from node, where no `ceph` cmd available `--ceph-master MASTER_NODE_NAME`
 - To overwrite previous report data `-w`

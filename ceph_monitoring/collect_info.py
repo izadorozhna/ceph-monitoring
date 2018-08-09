@@ -440,6 +440,10 @@ class Collector:
         pass
 
 
+DEFAULT_MAX_PG = 2 ** 15
+LUMINOUS_MAX_PG = 2 ** 17
+
+
 class CephDataCollector(Collector):
     name = 'ceph'
     collect_roles = ['osd', 'mon', 'ceph-master']
@@ -510,7 +514,7 @@ class CephDataCollector(Collector):
 
             self.__class__.num_pgs = status['pgmap']['num_pgs']  # type: ignore
 
-            max_pg = (2 ** 17 if is_luminous else 2 ** 15) \
+            max_pg = (LUMINOUS_MAX_PG if is_luminous else DEFAULT_MAX_PG) \
                      if AUTOPG == self.opts.max_pg_dump_count \
                      else self.opts.max_pg_dump_count
 
@@ -1192,35 +1196,37 @@ class CollectorCoordinator:
 
 
 def parse_args(argv: List[str]) -> Any:
-    p = argparse.ArgumentParser()
+    p = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     p.add_argument("-c", "--collectors", default="ceph,node,load",
                    help="Comma separated list of collectors. Select from : " +
                    ",".join(coll.name for coll in ALL_COLLECTORS))
     p.add_argument("--ceph-master",metavar="NODE", help="Run all ceph cluster commands from NODE")
     p.add_argument("--ceph-master-only", action="store_true", help="Run only ceph master data collection, " +
-                   "no osd data collections")
+                   "no info from osd/monitors would be collected")
     p.add_argument("-C", "--ceph-extra", default="", help="Extra opts to pass to 'ceph' command")
     p.add_argument("-d", "--disable", metavar="PATTERN", default=[], nargs='*', help="Disable collect pattern")
     p.add_argument("-D", "--detect-only", action="store_true", help="Don't collect any data, only detect cluster nodes")
-    p.add_argument("-g", "--save-to-git", metavar="DIR", help="Commit into git repo, cloned to folder")
-    p.add_argument("-G", "--git-push", metavar="DIR", help="Commit into git repo, cloned to folder and run 'git push'")
+    p.add_argument("-g", "--save-to-git", metavar="DIR", help="Absolute path to git repo, where to commit output")
+    p.add_argument("--git-push", action='store_true',
+                   help="Run git push after commit. -g/--save-to-git must be provided")
     p.add_argument("-I", "--node", nargs='+', default=[],
-                   help="Pass additional nodes from cli. ip_or_name[,ip_or_name...]")
+                   help="List of ceph nodes sshachable addresses/names")
     p.add_argument("--ceph-historic", action="store_true", help="Collect ceph historic ops")
     p.add_argument("--ceph-perf", action="store_true", help="Collect ceph perf dump data (a LOT of data!)")
     p.add_argument("--inventory", metavar='FILE',
-                   help="File which map node name/ip to roles. In format 1.1.1.1: osd, mon")
+                   help="Absolute path to file with list of sshachable ip/names of ceph nodes")
     p.add_argument("-j", "--no-pretty-json", action="store_true", help="Don't prettify json data")
     p.add_argument("-l", "--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-                   help="Console log level")
-    p.add_argument("-L", "--log-config", help="json file with logging config")
+                   help="Console log level, see logging.json for defaults")
+    p.add_argument("-L", "--log-config", help="Absolute path to json file with logging config")
     p.add_argument("-m", "--max-pg-dump-count", default=AUTOPG, type=int,
-                   help="maximum PG count to by dumped with 'pg dump' cmd")
+                   help="maximum PG count to by dumped with 'pg dump' cmd, by default {} ".format(LUMINOUS_MAX_PG) +
+                   "for luminous, {} for other ceph versions".format(DEFAULT_MAX_PG))
     p.add_argument("-M", "--ceph-log-max-lines", default=10000, type=int, help="Max lines from osd/mon log")
     p.add_argument("-n", "--dont-remove-unpacked", action="store_true", help="Keep unpacked data")
     p.add_argument("-N", "--dont-pack-result", action="store_true", help="Don't create archive")
-    p.add_argument("-o", "--output", help="Result archive (only if -N don't set)")
-    p.add_argument("-O", "--output-folder", help="Result folder")
+    p.add_argument("-o", "--output", help="Absolute path to result archive (only if -N don't set)")
+    p.add_argument("-O", "--output-folder", help="Absolute path to result folder")
     p.add_argument("-p", "--pool-size", default=32, type=int, help="RPC/local worker pool size")
     p.add_argument("-s", "--load-collect-seconds", default=60, type=int, metavar="SEC",
                    help="Collect performance stats for SEC seconds")
@@ -1321,22 +1327,40 @@ def main(argv: List[str]) -> int:
         opts = parse_args(argv)
 
         # verify options
-        if opts.git_push and opts.save_to_git:
-            sys.stderr.write("At most one of -g/--save-to-git and -G/--git-push option can be provided\n")
+        if opts.inventory and not os.path.isabs(opts.inventory):
+            sys.stderr.write("--inventory path mush be absolute\n")
             return 1
 
-        git_dir = opts.git_push if opts.git_push else opts.save_to_git
+        if opts.output_folder and not os.path.isabs(opts.output_folder):
+            sys.stderr.write("--output-folder parameter must be absolute\n")
+            return 1
 
-        if git_dir and opts.output_folder:
+        if opts.output and not os.path.isabs(opts.output):
+            sys.stderr.write("--output parameter must be absolute\n")
+            return 1
+
+        if opts.save_to_git and not os.path.isabs(opts.save_to_git):
+            sys.stderr.write("-g/--save-to-git parameter must be absolute\n")
+            return 1
+
+        if opts.log_config and not os.path.isabs(opts.log_config):
+            sys.stderr.write("-L/--log-config parameter must be absolute\n")
+            return 1
+
+        if opts.git_push and not opts.save_to_git:
+            sys.stderr.write("-g/--save-to-git must be provided along with --git-push\n")
+            return 1
+
+        if opts.save_to_git and opts.output_folder:
             sys.stderr.write("--output-folder can't be used with -g/-G option\n")
             return 1
 
         # prepare output folder
         if not opts.detect_only:
-            if git_dir:
-                if not git_prepare(git_dir):
+            if opts.save_to_git:
+                if not git_prepare(opts.save_to_git):
                     return 1
-                out_folder = git_dir
+                out_folder = opts.save_to_git
             elif opts.output_folder:
                 out_folder = opts.output_folder
                 if os.path.exists(out_folder):
@@ -1349,7 +1373,7 @@ def main(argv: List[str]) -> int:
                 out_folder = tempfile.mkdtemp()
 
         # setup logging
-        log_file = setup_logging2(opts, out_folder, git_dir is not None)  # type: ignore
+        log_file = setup_logging2(opts, out_folder, opts.save_to_git is not None)  # type: ignore
 
         if logging_tree and opts.show_log_tree:
             logging_tree.printout()
@@ -1376,9 +1400,9 @@ def main(argv: List[str]) -> int:
 
         # compress/commit output folder
         if out_folder:
-            if git_dir:
+            if opts.save_to_git:
                 [h_weak_ref().flush() for h_weak_ref in logging._handlerList]  # type: ignore
-                target_log_file = os.path.join(git_dir, "log.txt")
+                target_log_file = os.path.join(opts.save_to_git, "log.txt")
                 shutil.copy(log_file, target_log_file)  # type: ignore
             else:
                 target_log_file = None  # type: ignore
@@ -1386,13 +1410,13 @@ def main(argv: List[str]) -> int:
             if not opts.dont_pack_result:
                 pack_output_folder(out_folder, opts.output, opts.log_level)
 
-            if git_dir:
+            if opts.save_to_git:
                 assert isinstance(target_log_file, str)
                 ceph_health = json.loads(storage.get_raw("ceph_health_dict").decode("utf8"))
-                commit_into_git(git_dir,
+                commit_into_git(opts.save_to_git,
                                 log_file=log_file,
                                 target_log_file=target_log_file,
-                                git_push=opts.git_push is not None,
+                                git_push=opts.git_push,
                                 ceph_status=ceph_health)
             elif not opts.dont_remove_unpacked:
                 if opts.dont_pack_result:

@@ -1,7 +1,7 @@
 from enum import Enum
 import datetime
 from ipaddr import IPv4Address, IPv4Network
-from typing import Optional, List, Set, Dict, Any, Callable, Union, Tuple, NewType
+from typing import Optional, List, Set, Dict, Any, Callable, Union, Tuple, NewType, Iterable
 
 import numpy
 from dataclasses import dataclass, field
@@ -190,6 +190,7 @@ class DiskType(Enum):
 class BlockUsage:
     read_bytes: float
     write_bytes: float
+    total_bytes: float
     read_iops: float
     write_iops: float
     io_time: float
@@ -206,6 +207,7 @@ DevPath = NewType('DevPath', str)
 class LogicBlockDev:
     tp: BlockDevType
     name: str
+    hostname: str
     dev_path: DevPath
     size: int
     usage: BlockUsage
@@ -219,12 +221,15 @@ class LogicBlockDev:
 
     def __post_init__(self):
         assert '/dev/' + self.name == self.dev_path
+        assert '/' not in self.name
+        for key in self.children:
+            assert '/' not in key
 
 
 @dataclass
 class Disk:
-    logic_dev: LogicBlockDev
     tp: DiskType
+    logic_dev: LogicBlockDev
     extra: Dict[str, Any]
     scheduler: Optional[str]
     hw_model: HWModel
@@ -233,9 +238,6 @@ class Disk:
     phy_sec: int
     min_io: int
     parent: Optional[Callable[[], Optional['Disk']]] = None
-
-    def __post_init__(self):
-        assert '/dev/' + self.name == self.dev_path
 
     # have to simulate LogicBlockDev inheritance, as mypy/pycharm works poorly with dataclass inheritance
     @property
@@ -250,7 +252,16 @@ class Disk:
     def children(self) -> Dict[str, 'LogicBlockDev']:
         return self.logic_dev.children
 
+    @property
+    def size(self) -> int:
+        return self.logic_dev.size
 
+    @property
+    def mountpoint(self) -> Optional[str]:
+        return self.logic_dev.mountpoint
+
+    def __getattr__(self, name):
+        return getattr(self.logic_dev, name)
 # ----------------   CLUSTER  ------------------------------------------------------------------------------------------
 
 
@@ -295,6 +306,10 @@ class Cluster:
     def has_performance_data(self) -> bool:
         return self.perf_data is not None
 
+    @property
+    def sorted_hosts(self) -> Iterable[Host]:
+        return [host for _, host in sorted(self.hosts.items())]
+
 
 # ----------------  CEPH -----------------------------------------------------------------------------------------------
 
@@ -304,6 +319,15 @@ class CephVersions(Enum):
     kraken = 11
     luminous = 12
     mimic = 13
+
+    def __lt__(self, other: 'CephVersions') -> bool:
+        return self.value < other.value
+
+    def __gt__(self, other: 'CephVersions') -> bool:
+        return self.value > other.value
+
+    def __ge__(self, other: 'CephVersions') -> bool:
+        return self.value >= other.value
 
 
 @dataclass(order=True, unsafe_hash=True)
@@ -518,12 +542,24 @@ class PGDump:
 @dataclass
 class CephDevInfo:
     hostname: str
-    name: str
-    path: DevPath
-    partition_name: str
-    partition_path: DevPath
-    dev_info: LogicBlockDev
+    dev_info: Disk
     partition_info: LogicBlockDev
+
+    @property
+    def name(self) -> str:
+        return self.dev_info.name
+
+    @property
+    def path(self) -> DevPath:
+        return self.dev_info.dev_path
+
+    @property
+    def partition_name(self) -> str:
+        return self.partition_info.name
+
+    @property
+    def partition_path(self) -> DevPath:
+        return self.partition_info.dev_path
 
 
 @dataclass
@@ -569,8 +605,8 @@ class OSDPGStats:
 class NodePGStats:
     name: str
     pgs: List[PG]
-    pg_stat: OSDPGStats
-    d_pg_stat: Optional[OSDPGStats]
+    pg_stats: OSDPGStats
+    d_pg_stats: Optional[OSDPGStats]
 
 
 @dataclass
@@ -657,8 +693,8 @@ class CephInfo:
     has_bs: bool = field(init=False)
 
     def __post_init__(self):
-        self.has_fs = any(isinstance(osd, FileStoreInfo) for osd in self.osds.values())
-        self.has_bs = any(isinstance(osd, BlueStoreInfo) for osd in self.osds.values())
+        self.has_fs = any(isinstance(osd.storage_info, FileStoreInfo) for osd in self.osds.values())
+        self.has_bs = any(isinstance(osd.storage_info, BlueStoreInfo) for osd in self.osds.values())
         assert self.has_fs or self.has_bs
 
     @property

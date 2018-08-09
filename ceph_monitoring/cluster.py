@@ -22,7 +22,7 @@ from .cluster_classes import (IPANetDevInfo, NetStats, Disk, DiskType, HWModel, 
                               PGDump, PG, PGStatSum, PGId, PGState, NetworkBond, NetworkAdapter, NetAdapterAddr,
                               Pool, PoolDF, CephVersion, CephMonitor, MonRole, CephStatus, CephStatusCode,
                               Host, Cluster, CephInfo, CephOSD, OSDStatus, CephVersions, FileStoreInfo, BlueStoreInfo,
-                              OSDProcessInfo, CephDevInfo, OSDPGStats, NodePGStats)
+                              OSDProcessInfo, CephDevInfo, OSDPGStats, NodePGStats, BlockUsage)
 from .collect_info import parse_proc_file
 
 
@@ -57,7 +57,7 @@ def parse_netdev(netdev: str) -> Dict[str, NetStats]:
         adapter, data = line.split(":")
         adapter = adapter.strip()
         assert adapter not in info
-        info[adapter] = NetStats(**dict(zip(netstat_fields, map(int, data.split()))))
+        info[adapter] = NetStats(**dict(zip(netstat_fields.split(), map(int, data.split()))))
     return info
 
 
@@ -91,7 +91,63 @@ def is_routable(ip: IPv4Address, net: IPv4Network) -> bool:
     return not (ip.is_loopback or net.prefixlen == 32)
 
 
-def parse_lsblkjs(data: List[Dict[str, Any]], hostname: str) -> Iterable[Disk]:
+def parse_diskstats(data: str) -> Dict[str, BlockUsage]:
+    #  1 - major number
+    #  2 - minor mumber
+    #  3 - device name
+    #  4 - reads completed successfully
+    #  5 - reads merged
+    #  6 - sectors read
+    #  7 - time spent reading (ms)
+    #  8 - writes completed
+    #  9 - writes merged
+    # 10 - sectors written
+    # 11 - time spent writing (ms)
+    # 12 - I/Os currently in progress
+    # 13 - time spent doing I/Os (ms)
+    # 14 - weighted time spent doing I/Os (ms)
+
+    SECTOR_SIZE = 512
+    reads_completed = 3
+    sectors_read = 5
+    rtime = 6
+    writes_completed = 7
+    sectors_written = 9
+    wtime = 10
+    io_queue = 11
+    io_time = 12
+    weighted_io_time = 13
+
+    res = {}
+
+    for line in data.split("\n"):
+        line = line.strip()
+        if line:
+            vals = line.split()
+            name = vals[2]
+
+            read_bytes = int(vals[sectors_read]) * SECTOR_SIZE
+            write_bytes = int(vals[sectors_written]) * SECTOR_SIZE
+            read_iops = int(vals[reads_completed])
+            write_iops = int(vals[writes_completed])
+
+            res[name] = BlockUsage(read_bytes=read_bytes,
+                                   write_bytes=write_bytes,
+                                   total_bytes=read_bytes + write_bytes,
+                                   read_iops=read_iops,
+                                   write_iops=write_iops,
+                                   iops=read_iops + write_iops,
+                                   io_time=int(vals[io_time]),
+                                   w_io_time=int(vals[weighted_io_time]),
+                                   queue_depth=int(vals[weighted_io_time]),
+                                   lat=None)
+
+    return res
+
+
+def parse_lsblkjs(data: List[Dict[str, Any]],
+                  hostname: str,
+                  diskstats: Dict[str, BlockUsage]) -> Iterable[Disk]:
     for disk_js in data:
         name = disk_js['name']
 
@@ -134,17 +190,19 @@ def parse_lsblkjs(data: List[Dict[str, Any]], hostname: str) -> Iterable[Disk]:
                             size=int(disk_js['size']),
                             mountpoint=disk_js['mountpoint'],
                             fs=disk_js["fstype"],
-                            tp=BlockDevType.hwdisk)
+                            tp=BlockDevType.hwdisk,
+                            hostname=hostname,
+                            usage=diskstats[name])
 
         dsk = Disk(logic_dev=lbd,
                    rota=disk_js['rota'] == '1',
                    scheduler=disk_js['sched'],
-                   tp=stor_tp,
                    extra=disk_js,
                    hw_model=HWModel(vendor=disk_js['vendor'], model=disk_js['model'], serial=disk_js['serial']),
                    rq_size=int(disk_js["rq-size"]),
                    phy_sec=int(disk_js["phy-sec"]),
-                   min_io=int(disk_js["min-io"]))
+                   min_io=int(disk_js["min-io"]),
+                   tp=stor_tp)
 
         def fill_mountable(root: Dict[str, Any], parent: Union[Disk, LogicBlockDev]):
             if 'children' in root:
@@ -157,8 +215,10 @@ def parse_lsblkjs(data: List[Dict[str, Any]], hostname: str) -> Iterable[Disk]:
                                          mountpoint=ch_js['mountpoint'],
                                          fs=ch_js["fstype"],
                                          parent=weakref.ref(dsk),
-                                         label=ch_js.get("partlabel"))
-                    parent.children[part.dev_path] = part
+                                         label=ch_js.get("partlabel"),
+                                         hostname=hostname,
+                                         usage=diskstats[name])
+                    parent.children[part.name] = part
                     fill_mountable(ch_js, part)
 
         fill_mountable(disk_js, dsk)
@@ -339,7 +399,9 @@ def load_hdds(hostname: str,
         for ch in dsk.children.values():
             walk_all(ch)
 
-    for dsk in parse_lsblkjs(jstor_node.lsblkjs['blockdevices'], hostname):
+    diskstats = parse_diskstats(stor_node.diskstats)
+
+    for dsk in parse_lsblkjs(jstor_node.lsblkjs['blockdevices'], hostname, diskstats):
         disks[dsk.name] = dsk
         walk_all(dsk)
         storage_devs[dsk.name] = dsk.logic_dev
@@ -349,7 +411,7 @@ def load_hdds(hostname: str,
 
 
 def fill_io_devices_usage_stats(dtime: float, perf_monitoring: Any, disks: Dict[str, Disk]):
-    logger.erro("io usage stats!")
+    logger.error("io usage stats!")
 #     if 'block-io' not in perf_monitoring or dtime < 1.0:
 #         return
 #
@@ -479,7 +541,7 @@ def load_PG_distribution(pools: Dict[str, Pool], pg_dump: Dict[str, Any]) -> Tup
     sum_per_pool: Dict[str, int] = collections.Counter()
     sum_per_osd: Dict[int, int] = collections.Counter()
 
-    if pg_dump is None:
+    if pg_dump:
         for pg in pg_dump['pg_stats']:
             pool_id = int(pg['pgid'].split('.', 1)[0])
             for osd_id in pg['acting']:
@@ -521,8 +583,11 @@ def load_monitors(storage: TypedStorage, ver: CephVersions, hosts: Dict[str, Hos
     vers = parse_ceph_versions(storage.txt.master.mon_versions)
     result: Dict[str, CephMonitor] = {}
     for srv in mons:
-        health = None if ver >= CephVersions.luminous else srv["health"]
-        mon = CephMonitor(srv["name"], health, srv["name"], role=MonRole.unknown, version=vers["mon." + srv["name"]])
+        mon = CephMonitor(name=srv["name"],
+                          status=None if ver >= CephVersions.luminous else srv["health"],
+                          host=hosts[srv["name"]],
+                          role=MonRole.unknown,
+                          version=vers["mon." + srv["name"]])
 
         if ver < CephVersions.luminous:
             mon.kb_avail = srv["kb_avail"]
@@ -530,10 +595,11 @@ def load_monitors(storage: TypedStorage, ver: CephVersions, hosts: Dict[str, Hos
         else:
             mon_db_root = "/var/lib/ceph/mon"
             root = ""
-            for info in hosts[mon.host].logic_block_devs.values():
+            for info in mon.host.logic_block_devs.values():
                 if info.mountpoint is not None:
                     if mon_db_root.startswith(info.mountpoint) and len(root) < len(info.mountpoint):
-                        mon.kb_avail = info.free
+                        assert info.free_space is not None
+                        mon.kb_avail = info.free_space
                         root = info.mountpoint
 
         result[mon.name] = mon
@@ -646,7 +712,7 @@ class Loader:
         pgs = parse_pg_dump(pg_dump) if pg_dump else None
 
         return CephInfo(osds=self.load_osds(sum_per_osd, self.osd_perf_dump, self.osd_historic_ops_paths, crush, pgs),
-                        mons=load_monitors(self.storage, ceph_master_version),
+                        mons=load_monitors(self.storage, ceph_master_version, self.hosts),
                         status=load_ceph_status(self.storage, ceph_master_version),
                         version=max(mon_vers.values()),
                         pools=name2pool,
@@ -756,13 +822,8 @@ class Loader:
             dev_name = devpath.split("/")[-1]
             partition_name = partpath.split("/")[-1]
             return CephDevInfo(hostname=host.name,
-                               path=DevPath(devpath),
-                               name=dev_name,
-                               partition_path=DevPath(partpath),
-                               partition_name=partition_name,
-                               dev_info=host.logic_block_devs[dev_name],
-                               partition_info=host.logic_block_devs[partition_name],
-                               d_usage=None)
+                               dev_info=host.disks[dev_name],
+                               partition_info=host.logic_block_devs[partition_name])
 
         data_dev = get_ceph_dev_info(osd_disks_info['r_data'], osd_disks_info['data'])
 
@@ -901,35 +962,35 @@ def mem2bytes(vl: str) -> int:
 
 def get_nodes_pg_info(ceph: CephInfo) -> Dict[str, NodePGStats]:
     nodes_pg_info: Dict[str, NodePGStats] = {}
-    assert ceph.osds_info is not None
-    osds = ceph.osds_info
-    for osd_id, osd_info in osds.osds.items():
-        hostname = ceph.osds[osd_id].host.name
-        if hostname in nodes_pg_info:
-            info = nodes_pg_info[hostname]
+    for osd in ceph.osds.values():
+        assert osd.pg_stats
+        assert osd.pgs is not None
+        if osd.host.name in nodes_pg_info:
+            info = nodes_pg_info[osd.host.name]
 
-            info.io_stat.shallow_scrub_errors += osd_info.pg_stats.shallow_scrub_errors
-            info.io_stat.scrub_errors += osd_info.pg_stats.scrub_errors
-            info.io_stat.deep_scrub_errors += osd_info.pg_stats.deep_scrub_errors
-            info.io_stat.write_b += osd_info.pg_stats.write_b
-            info.io_stat.writes += osd_info.pg_stats.writes
-            info.io_stat.read_b += osd_info.pg_stats.read_b
-            info.io_stat.reads += osd_info.pg_stats.reads
-            info.io_stat.bytes += osd_info.pg_stats.bytes
+            info.pg_stats.shallow_scrub_errors += osd.pg_stats.shallow_scrub_errors
+            info.pg_stats.scrub_errors += osd.pg_stats.scrub_errors
+            info.pg_stats.deep_scrub_errors += osd.pg_stats.deep_scrub_errors
+            info.pg_stats.write_b += osd.pg_stats.write_b
+            info.pg_stats.writes += osd.pg_stats.writes
+            info.pg_stats.read_b += osd.pg_stats.read_b
+            info.pg_stats.reads += osd.pg_stats.reads
+            info.pg_stats.bytes += osd.pg_stats.bytes
 
-            info.dio_stat.d_write_b += osd_info.d_stats.d_write_b
-            info.dio_stat.d_writes += osd_info.d_stats.d_writes
-            info.dio_stat.d_read_b += osd_info.d_stats.d_read_b
-            info.dio_stat.d_reads += osd_info.d_stats.d_reads
-            info.dio_stat.d_used_space += osd_info.d_stats.d_used_space
+            if osd.d_pg_stats:
+                info.d_pg_stats.write_b += osd.d_pg_stats.d_write_b
+                info.d_pg_stats.writes += osd.d_pg_stats.d_writes
+                info.d_pg_stats.read_b += osd.d_pg_stats.d_read_b
+                info.d_pg_stats.reads += osd.d_pg_stats.d_reads
+                info.d_pg_stats.bytes += osd.d_pg_stats.bytes
 
-            info.pgs.extend(osd_info.pgs)
+            info.pgs.extend(osd.pgs)
         else:
-            nodes_pg_info[hostname] = NodePGStats(
-                name=hostname,
-                io_stat=copy.copy(osd_info.pg_stats),
-                dio_stat=None if osd_info.d_stats is None else copy.copy(osd_info.d_stats),
-                pgs=osd_info.pgs[:])
+            nodes_pg_info[osd.host.name] = NodePGStats(name=osd.host.name,
+                                                       pg_stats=copy.copy(osd.pg_stats),
+                                                       d_pg_stats=None if osd.d_pg_stats is None
+                                                                  else copy.copy(osd.d_pg_stats),
+                                                       pgs=osd.pgs[:])
     return nodes_pg_info
 
 
