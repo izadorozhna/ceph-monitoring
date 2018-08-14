@@ -286,14 +286,14 @@ def parse_pg_dump(data: Dict[str, Any]) -> PGDump:
 # --- load functions ---------------------------------------------------------------------------------------------------
 
 def parse_adapter_info(interface: Dict[str, Any]) -> Tuple[Optional[int], Optional[str], Optional[bool]]:
-    speed = None
     duplex = None
     speed_s = None
+    speed = None
 
     if 'ethtool' in interface:
         for line in interface['ethtool'].split("\n"):
             if 'Speed:' in line:
-                speed = line.split(":")[1].strip()
+                speed_s = line.split(":")[1].strip()
             if 'Duplex:' in line:
                 duplex = line.split(":")[1].strip() == 'Full'
 
@@ -301,23 +301,13 @@ def parse_adapter_info(interface: Dict[str, Any]) -> Tuple[Optional[int], Option
         if 'Bit Rate=' in interface['iwconfig']:
             br1 = interface['iwconfig'].split('Bit Rate=')[1]
             if 'Tx-Power=' in br1:
-                speed = br1.split('Tx-Power=')[0]
+                speed_s = br1.split('Tx-Power=')[0]
 
-    if speed is not None:
-        mults = {
-            'Kb/s': 125,
-            'Mb/s': 125000,
-            'Gb/s': 125000000,
-        }
-        for name, mult in mults.items():
-            if name in speed:  # type: ignore
-                speed = int(float(speed.replace(name, '')) * mult)    # type: ignore
+    if speed_s is not None:
+        for name, mult in {'Kb/s': 125, 'Mb/s': 125000, 'Gb/s': 125000000}.items():
+            if name in speed_s:
+                speed = int(float(speed_s.replace(name, '')) * mult)
                 break
-
-        if isinstance(speed, int):
-            speed = speed
-        else:
-            speed_s = speed
 
     return speed, speed_s, duplex
 
@@ -468,7 +458,8 @@ def load_pools(storage: TypedStorage, ver: CephVersions) -> Dict[int, Pool]:
                               crush_rule=int(info['crush_rule'] if ver >= CephVersions.luminous
                                              else info['crush_ruleset']),
                               extra=info,
-                              df=df_info[pool_id])
+                              df=df_info[pool_id],
+                              apps=list(info.get('application_metadata', {}).keys()))
     return pools
 
 
@@ -610,9 +601,9 @@ def load_ceph_status(storage: TypedStorage, ver: CephVersions) -> CephStatus:
     mstorage = storage.json.master
     pgmap = mstorage.status['pgmap']
     health = mstorage.status['health']
-    overall_status = health.get('overall_status', health['status'])
-    return CephStatus(overall_status=CephStatusCode.from_str(overall_status),
-                      status=CephStatusCode.from_str(health['status']),
+    status = health['status'] if 'status' in health else health['overall_status']
+
+    return CephStatus(status=CephStatusCode.from_str(status),
                       health_summary=health['checks' if ver >= CephVersions.luminous else 'summary'],
                       num_pgs=pgmap['num_pgs'],
                       bytes_used=pgmap["bytes_used"],
@@ -693,7 +684,8 @@ class Loader:
                        ip2host=self.ip2host,
                        report_collected_at_local=report_collected_at_local,
                        report_collected_at_gmt=report_collected_at_gmt,
-                       perf_data=self.perf_data)
+                       perf_data=self.perf_data,
+                       has_second_report=False)
 
     def load_ceph(self) -> CephInfo:
         settings = AttredDict(**parse_txt_ceph_config(self.storage.txt.master.default_config))
@@ -719,14 +711,15 @@ class Loader:
                         osd_pool_pg_2d=osd_pool_pg_2d,
                         sum_per_pool=sum_per_pool,
                         sum_per_osd=sum_per_osd,
-                        cluster_net=IPv4Network(settings['cluster_network']),
-                        public_net=IPv4Network(settings['public_network']),
+                        cluster_net=IPv4Network(settings['cluster_network'], strict=False),
+                        public_net=IPv4Network(settings['public_network'], strict=False),
                         settings=settings,
                         pgs=pgs,
                         pgs_second=None,
                         mgrs=None,
                         radosgw=None,
-                        crush=crush)
+                        crush=crush,
+                        has_second_report=False)
 
     def load_hosts(self) -> Tuple[Dict[str, Host], Dict[str, Host]]:
         tcp_sock_re = re.compile('(?im)^tcp6?\\b')
@@ -743,8 +736,8 @@ class Loader:
             if lshw_xml is not None:
                 try:
                     hw_info = parse_hw_info(lshw_xml)
-                except:
-                    pass
+                except Exception as exc:
+                    logger.warning(f"Failed to parse lshw info: {exc}")
 
             loadavg = stor_node.get('loadavg')
             disks, logic_block_devs = load_hdds(hostname, jstor_node, stor_node)
@@ -797,8 +790,6 @@ class Loader:
                  for i in self.storage.raw.get_raw('osd/{0}/cmdline.bin'.format(osd_id)).split(b'\x00')]
 
         pinfo = self.storage.json.osd[str(osd_id)].procinfo
-        opened_socks = sum(int(tp.get('inuse', 0)) for tp in pinfo.get('ipv4', {}).values())
-        opened_socks += sum(int(tp.get('inuse', 0)) for tp in pinfo.get('ipv6', {}).values())
 
         sched = pinfo['sched']
         if not sched:
@@ -808,7 +799,7 @@ class Loader:
         return OSDProcessInfo(cmdline=cmdln,
                               procinfo=pinfo,
                               fd_count=pinfo["fd_count"],
-                              opened_socks=opened_socks,
+                              opened_socks=pinfo.get('sock_count', 'Unknown'),
                               th_count=pinfo["th_count"],
                               cpu_usage=float(sched["se.sum_exec_runtime"]),
                               vm_rss=mem2bytes(pinfo["mem"]["VmRSS"]),
@@ -874,6 +865,11 @@ class Loader:
                 for osd_id in pg.acting:
                     osd2pg[osd_id].append(pg)
 
+        osd2rules = {}
+        for rule in crush.rules.values():
+            for osd_node in crush.iter_osds_for_rule(rule.id):
+                osd2rules.setdefault(osd_node.id, []).append((rule.name, osd_node.weight))
+
         for osd_data in self.storage.json.master.osd_dump['osds']:
             osd_id = osd_data['osd']
             osd_df_data = osd_df_map[osd_id]
@@ -894,14 +890,8 @@ class Loader:
 
             #  CRUSH RULES/WEIGHTS
             crush_info: Dict[str, Tuple[bool, float, float]] = {}
-            for root in crush.roots:
-                nodes = crush.find_nodes([('root', root.name), ('osd', f"osd.{osd_id}")])
-                if nodes:
-                    if len(nodes) == 1:
-                        expected_weight = storage_info.data.dev_info.size / (1024 ** 4)
-                        crush_info[root.name] = (True, nodes[0].weight, expected_weight)
-                    else:
-                        crush_info[root.name] = (False, -1.0, -1.0)
+            for rule, weight in osd2rules.get(osd_id, []):
+                crush_info[rule] = (True, weight, storage_info.data.dev_info.size / (1024 ** 4))
 
             pg_stats: Optional[OSDPGStats] = None
             osd_pgs: Optional[List[PG]] = None
@@ -933,14 +923,15 @@ class Loader:
                                    host=host,
                                    storage_info=storage_info,
                                    run_info=self.load_osd_procinfo(osd_id) if status != OSDStatus.down else None,
-                                   crush_trees_weights=crush_info,
+                                   crush_rules_weights=crush_info,
                                    status=status,
                                    total_space=storage_info.data.dev_info.size,
                                    pgs=osd_pgs,
                                    pg_stats=pg_stats,
                                    d_pg_stats=None,
                                    historic_ops_storage_path=historic_ops_storage_path,
-                                   osd_perf=osd_perf_dump[osd_id] if osd_perf_dump is not None else None)
+                                   osd_perf=osd_perf_dump[osd_id] if osd_perf_dump is not None else None,
+                                   class_name=crush.nodes_map[f'osd.{osd_id}'].class_name)
 
         return osds
 

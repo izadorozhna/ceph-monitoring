@@ -83,6 +83,7 @@ class Node(INode):
         self.osds = []   # type: List[OSDInfo]
         self.all_ips = {ssh_enpoint}  # type: Set[str]
         self.mon = None  # type: Optional[str]
+        self.load_config = {}  # type: Dict[str, Any]
 
     def __cmp__(self, other: 'Node') -> int:
         x = (self.hostname, self.ssh_enpoint)
@@ -497,7 +498,9 @@ class CephDataCollector(Collector):
             assert out, "{!r} failed".format(self.ceph_cmd + "status")
             status = json.loads(out)
 
-            ceph_health = {'status': status['health'].get('overall_status')}  # type: Dict[str, Union[str, int]]
+            health = status['health']
+            status_str = health['status'] if 'status' in health else health['overall_status']
+            ceph_health = {'status': status_str}  # type: Dict[str, Union[str, int]]
             avail = status['pgmap']['bytes_avail']
             total = status['pgmap']['bytes_total']
             ceph_health['free_pc'] = int(avail * 100 / total + 0.5)
@@ -702,6 +705,7 @@ class CephDataCollector(Collector):
                 logger.warning("Broken file {!r} on node {}".format(fpath, self.node))
             else:
                 osd_proc_info['ipv6'] = ssv6
+            osd_proc_info['sock_count'] = self.node.rpc.sensors.count_sockets_for_process(pid)
 
             proc_stat = self.node.get_file(pid_dir + "status").decode('utf8')
             self.save("proc_status", "txt", 0, proc_stat)
@@ -783,46 +787,69 @@ class NodeCollector(Collector):
                           ("ceph_conf", "/etc/ceph/ceph.conf")]
 
     def collect(self, collect_roles_restriction: List[str]) -> None:
-        if 'node' not in collect_roles_restriction:
+        if 'node' in collect_roles_restriction:
+            with self.chdir('hosts/' + self.node.name):
+                self.collect_kernel_modules_info()
+                self.collect_common_features()
+                self.collect_files()
+                self.collect_bonds_info()
+                self.collect_interfaces_info()
+                self.collect_block_devs()
+                self.collect_packages()
+
+    def collect_kernel_modules_info(self):
+        try:
+            self.save_output("lsmod", "lsmod", frmt="txt")
+        except Exception as exc:
+            logger.warning("Failed to list kernel modules: %r on node %s: %s", "lsmod", self.node, exc)
             return
 
-        with self.chdir('hosts/' + self.node.name):
-            for path_offset, frmt, cmd in self.node_commands:
-                try:
-                    self.save_output(path_offset, cmd, frmt=frmt)
-                except Exception as exc:
-                    logger.warning("Failed to run %r on node %s: %s", cmd, self.node, exc)
+        try:
+            self.save_output(
+                "for name in $(lsmod | awk '{print $1}') ; do ; modinfo $name ; echo '-----' ; done",
+                "modinfo_all",
+                "txt")
+        except Exception as exc:
+            logger.warning("Failed to list kernel modules info: %r on node %s: %s", "modinfo **", self.node, exc)
+        return
 
-            # collect_bonds_info
-            bondmap = {}
-            if self.node.exists("/proc/net/bonding"):
-                for fname in self.node.listdir("/proc/net/bonding"):
-                    self.save_file("bond_" + fname, "/proc/net/bonding/" + fname)
-                    bondmap[fname] = "bond_" + fname
-            self.save("bonds", 'json', 0, json.dumps(bondmap))
-
-            for fpath in self.node_files:
-                try:
-                    self.save_file(os.path.basename(fpath), fpath)
-                except Exception as exc:
-                    logger.warning("Failed to download file %r from node %s: %s", fpath, self.node, exc)
-
-            for name, fpath in self.node_renamed_files:
-                try:
-                    self.save_file(name, fpath)
-                except Exception as exc:
-                    logger.warning("Failed to download file %r from node %s: %s", fpath, self.node, exc)
-
-            self.collect_interfaces_info()
-            self.collect_block_devs()
-
+    def collect_common_features(self):
+        for path_offset, frmt, cmd in self.node_commands:
             try:
-                if self.node.exists("/etc/debian_version"):
-                    self.save_output("packages_deb", "dpkg -l", frmt="txt")
-                else:
-                    self.save_output("packages_rpm", "yum list installed", frmt="txt")
+                self.save_output(path_offset, cmd, frmt=frmt)
             except Exception as exc:
-                logger.warning("Failed to download packages information from node %s: %s", self.node, exc)
+                logger.warning("Failed to run %r on node %s: %s", cmd, self.node, exc)
+
+    def collect_files(self):
+        for fpath in self.node_files:
+            try:
+                self.save_file(os.path.basename(fpath), fpath)
+            except Exception as exc:
+                logger.warning("Failed to download file %r from node %s: %s", fpath, self.node, exc)
+
+        for name, fpath in self.node_renamed_files:
+            try:
+                self.save_file(name, fpath)
+            except Exception as exc:
+                logger.warning("Failed to download file %r from node %s: %s", fpath, self.node, exc)
+
+    def collect_bonds_info(self):
+        # collect_bonds_info
+        bondmap = {}
+        if self.node.exists("/proc/net/bonding"):
+            for fname in self.node.listdir("/proc/net/bonding"):
+                self.save_file("bond_" + fname, "/proc/net/bonding/" + fname)
+                bondmap[fname] = "bond_" + fname
+        self.save("bonds", 'json', 0, json.dumps(bondmap))
+
+    def collect_packages(self):
+        try:
+            if self.node.exists("/etc/debian_version"):
+                self.save_output("packages_deb", "dpkg -l", frmt="txt")
+            else:
+                self.save_output("packages_rpm", "yum list installed", frmt="txt")
+        except Exception as exc:
+            logger.warning("Failed to download packages information from node %s: %s", self.node, exc)
 
     def collect_block_devs(self) -> None:
         assert isinstance(self.node, Node)
@@ -905,34 +932,25 @@ class LoadCollector(Collector):
     def start_performance_monitoring(self) -> None:
         assert isinstance(self.node, Node)
 
-        # self.results = {}
-        #     "perprocess-cpu": {"allowed": ".*"},
-        #     "perprocess-ram": {"allowed": ".*"},
-        #     "system-cpu": {"allowed": ".*"},
-        #     "system-ram": {"allowed": ".*"},
-        #     "ceph": {"osds": []},
-
-        # cfg = {
-        #     "block-io": {},
-        #     "net-io": {},
-        #     "vm-io": {},
-        # }
-
-        cfg = {}
+        assert self.node.load_config == {}
 
         if self.opts.ceph_historic:
-            cfg.setdefault("ceph", {}).setdefault("sources", []).append('historic')
+            self.node.load_config.setdefault("ceph", {}).setdefault("sources", []).append('historic')
 
         if self.opts.ceph_perf:
-            cfg.setdefault("ceph", {}).setdefault("sources", []).append('perf_dump')
+            self.node.load_config.setdefault("ceph", {}).setdefault("sources", []).append('perf_dump')
 
         if self.opts.ceph_historic or self.opts.ceph_perf:
-            cfg['ceph']['osds'] = 'all'
+            self.node.load_config['ceph']['osds'] = 'all'
 
-        self.node.rpc.sensors.start(cfg)
+        if self.node.load_config:
+            self.node.rpc.sensors.start(self.node.load_config)
 
     def collect_performance_data(self) -> None:
         assert isinstance(self.node, Node)
+        if self.node.load_config == {}:
+            return
+
         for sensor_path, data, is_unpacked, units in unpack_rpc_updates(self.node.rpc.sensors.get_updates()):
             if '.' in sensor_path:
                 sensor, dev, metric = sensor_path.split(".")
@@ -1385,6 +1403,7 @@ def main(argv: List[str]) -> int:
         raise
 
     try:
+        logger.info(repr(argv))
         if out_folder:
             if opts.output_folder:
                 logger.info("Store data into %r", out_folder)

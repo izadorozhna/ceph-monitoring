@@ -1,5 +1,6 @@
-from enum import Enum
+import re
 import datetime
+from enum import Enum
 from ipaddr import IPv4Address, IPv4Network
 from typing import Optional, List, Set, Dict, Any, Callable, Union, Tuple, NewType, Iterable
 
@@ -51,7 +52,7 @@ class LSHWInfo:
     summary: Dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self):
-        self.summary = {'cores': sum(count for _, count in self.cpu_info),
+        self.summary = {'cores': sum(info.cores for info in self.cpu_info),
                         'ram': self.ram_size,
                         'storage': sum(info.size for info in self.disks_info.values()),
                         'disk_count': len(self.disks_info)}
@@ -70,8 +71,8 @@ class LSHWInfo:
             res.append("CPU cores: Failed to get CPU info")
         else:
             res.append("CPU cores:")
-            for name, count in self.cpu_info:
-                res.append(f"    {count} * {name}" if count > 1 else f"    {name}")
+            for info in self.cpu_info:
+                res.append(f"    {info.count} * {info.name}" if info.cores > 1 else f"    {info.name}")
 
         if self.storage_controllers:
             res.append("Disk controllers:")
@@ -218,12 +219,18 @@ class LogicBlockDev:
     children: Dict[str, 'LogicBlockDev'] = field(default_factory=dict)
     label: Optional[str] = None
     d_usage: Optional[BlockUsage] = None
+    partition_num: int = 0
 
     def __post_init__(self):
         assert '/dev/' + self.name == self.dev_path
         assert '/' not in self.name
         for key in self.children:
             assert '/' not in key
+
+        for pattern in ["sd[a-z]+(\d+)", "hd[a-z]+(\d+)", "vd[a-z]+(\d+)", "nvme\d+n\d+p(\d+)"]:
+            rr = re.match(pattern, self.name)
+            if rr:
+                self.partition_num = int(rr.group(1))
 
 
 @dataclass
@@ -259,6 +266,10 @@ class Disk:
     @property
     def mountpoint(self) -> Optional[str]:
         return self.logic_dev.mountpoint
+
+    @property
+    def partition_num(self) -> int:
+        return self.logic_dev.partition_num
 
     def __getattr__(self, name):
         return getattr(self.logic_dev, name)
@@ -300,6 +311,7 @@ class Cluster:
     ip2host: Dict[str, Host]
     report_collected_at_local: str
     report_collected_at_gmt: str
+    has_second_report: bool
     perf_data: Any = None
 
     @property
@@ -378,6 +390,7 @@ class Pool:
     crush_rule: int
     extra: Dict[str, Any]
     df: PoolDF
+    apps: List[str]
 
 
 @dataclass
@@ -417,7 +430,6 @@ class CephStatusCode(Enum):
 @dataclass
 class CephStatus:
     status: CephStatusCode
-    overall_status: CephStatusCode
     health_summary: Any
     num_pgs: int
 
@@ -621,6 +633,7 @@ class CephOSD:
     public_ip: str
     pg_count: Optional[int]
     reweight: float
+    class_name: Optional[str]
 
     free_perc: int
     used_space: int
@@ -628,7 +641,7 @@ class CephOSD:
     total_space: int
 
     pgs: Optional[List[PG]]
-    crush_trees_weights: Dict[str, Tuple[bool, float, float]]
+    crush_rules_weights: Dict[str, Tuple[bool, float, float]]
 
     run_info: Optional[OSDProcessInfo]
 
@@ -687,6 +700,7 @@ class CephInfo:
     settings: AttredDict
 
     pgs: Optional[PGDump]
+    has_second_report: bool
     pgs_second: Optional[PGDump]
 
     has_fs: bool = field(init=False)

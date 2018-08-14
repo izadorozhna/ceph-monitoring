@@ -87,9 +87,10 @@ td { padding: 6px; }
 #table-io-summary {width: 40%;}
 #table-mon-info {width: 60%;}
 #table-hosts-info {width: 60%;}
-#table-hosts-pg-info {width: 60%;}
-#table-osds-state {width: 50%;}
-#table-pools {width: 80%;}
+#table-hosts-pg-info-long {width: 60%;}
+#table-hosts-pg-info {width: 45%;}
+#table-osds-state {width: 80%;}
+#table-pools {width: 100%;}
 #table-pgs {width: 30%;}
 #table-pg-per-osd {width: 100%;}
 #table-osd-info {width: 100%;}
@@ -97,17 +98,18 @@ td { padding: 6px; }
 #table-issues {width: 80%;}
 #table-rules {width: 100%;}
 #table-settings {width: 60%;}
+#table-pools-io {width: 60%;}
 
 a.link {
     color: #0000EE;
     border-bottom: 1px solid black;
-    padding-bottom: 2px;
+    padding-bottom: 0;
 }
 
 a.link:visited {color: #551A8B;}
 a.link:hover {cursor: pointer; color: #a1a1ff;}
 
-.hostinfo-net {width: 40%;}
+.hostinfo-net {width: 80%;}
 .hostinfo-disks {width: 80%;}
 .io_load_in_color {width: 100%;}
 .hostinfo-mountable {width: 80%;}
