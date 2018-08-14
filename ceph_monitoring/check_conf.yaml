@@ -34,8 +34,8 @@ max_osd_per_class:
 allowed_schedulers:
     virtio: [cfg, deadline, noop, null]
     unknown: [cfg, deadline, noop, null]
-    sata_hdd: [cfg]
-    sas_hdd: [cfg]
+    sata_hdd: [cfg, deadline]
+    sas_hdd: [cfg, deadline]
     sata_ssd: [cfg, deadline, noop]
     sas_ssd: [cfg, deadline, noop]
     nvme: [null]

@@ -21,6 +21,7 @@ from cephlib.plot import plot_histo, hmap_from_2d, plot_hmap_with_histo
 from .cluster import NO_VALUE, CephInfo, Cluster
 from .osd_ops import calc_stages_time, iter_ceph_ops, ALL_STAGES
 from .perf_parser import STAGES_PRINTABLE_NAMES
+from .visualize_utils import perf_info_required, plot
 # from .resource_usage import get_hdd_resource_usage
 
 
@@ -30,15 +31,6 @@ logger = logging.getLogger('cephlib.report')
 
 # ----------------------------------------------------------------------------------------------------------------------
 
-
-def perf_info_required(func):
-    func.perf_info_required = True
-    return func
-
-
-def plot(func):
-    func.plot = True
-    return func
 
 
 class ReportProto(Protocol):

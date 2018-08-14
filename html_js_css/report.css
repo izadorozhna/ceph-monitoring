@@ -41,7 +41,7 @@ td { padding: 6px; }
 
 
 .menu-ceph {
-    width: 15%;
+    width: 10%;
     margin-left: 0;
     float: left;
     text-align: left;
@@ -70,9 +70,9 @@ td { padding: 6px; }
 .main-ceph {
     position: absolute;
     top: 3%;
-    margin-left: 20%;
-    margin-right: 5%;
-    width: 75%;
+    margin-left: 12%;
+    margin-right: 2%;
+    width: 86%;
     text-align: center;
 }
 
@@ -120,3 +120,9 @@ a.link:hover {cursor: pointer; color: #a1a1ff;}
 .disk-children-2 {padding-left: 20%;}
 .disk-children-3 {padding-left: 30%;}
 
+
+.rule0 {color: #0000EE;}
+.rule1 {color: #c77405;}
+.rule2 {color: #20c997;}
+.rule3 {color: #e4606d;}
+.rule4 {color: #f1f100;}
