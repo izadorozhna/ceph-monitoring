@@ -784,6 +784,7 @@ class NodeCollector(Collector):
 
     node_renamed_files = [("netdev", "/proc/net/dev"),
                           ("dev_netstat", "/proc/net/netstat"),
+                          ("softnet_stat", "/proc/net/softnet_stat"),
                           ("ceph_conf", "/etc/ceph/ceph.conf")]
 
     def collect(self, collect_roles_restriction: List[str]) -> None:

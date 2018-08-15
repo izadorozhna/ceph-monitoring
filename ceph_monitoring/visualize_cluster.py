@@ -1,7 +1,7 @@
 import time
 import collections
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Dict, List
 
 import yaml
 
@@ -9,9 +9,9 @@ from cephlib.units import b2ssize_10, b2ssize
 
 from . import table
 from . import html
-from .cluster_classes import CephInfo, Cluster
-from .visualize_utils import tab, seconds_to_str, get_all_versions
-from .checks import run_all_checks
+from .cluster_classes import CephInfo, Cluster, FileStoreInfo, BlueStoreInfo
+from .visualize_utils import tab, seconds_to_str, get_all_versions, partition_by_len
+from .checks import run_all_checks, CheckMessage
 from .report import Report
 from .obj_links import err_link, mon_link, pool_link
 from .table import Table, count, bytes_sz, ident, idents_list, exact_count, to_str
@@ -118,18 +118,29 @@ def show_issues_table(cluster: Cluster, ceph: CephInfo, report: Report):
     failed = html.fail("Failed")
     passed = html.ok("Passed")
 
-    err_per_test = collections.defaultdict(list)
+    err_per_test: Dict[str, List[CheckMessage]] = collections.defaultdict(list)
 
     for result in check_results:
         t.add_cells(result.check_description, passed if result.passed else failed,
                     err_link(result.reporter_id, result.message).link)
         for err in result.fails:
-            err_per_test[err.reporter_id].append(err.message)
+            err_per_test[err.reporter_id].append(err)
 
     report.add_block('issues', "Issues:", str(t))
 
     for reporter_id, errs in err_per_test.items():
-        report.add_block(err_link(reporter_id).id, None, "<br>".join(errs))
+        table = html.HTMLTable(headers=["Services", "Error"])
+
+        # group errors by services
+        err_map: Dict[str, List[str]] = {}
+        for err in errs:
+            err_map.setdefault(err.message, []).append(str(err.affected_service))
+
+        result_messages = []
+        for message, services in err_map.items():
+            table.add_cells("<br>".join(", ".join(items) for items in partition_by_len(services, 80, 1)), message)
+
+        report.add_block(err_link(reporter_id).id, None, str(table))
 
 
 @tab("Current IO Activity")
@@ -293,16 +304,17 @@ def show_ruleset_info(ceph: CephInfo) -> html.HTMLTable:
         id = exact_count()
         pools = idents_list()
         osd_class = ident()
+        replication_level = ident("Replication<br>level")
+        pg = exact_count("PG")
+        pg_per_osd = exact_count("PG/OSD")
         num_osd = exact_count("# OSD")
         size = bytes_sz()
         free_size = to_str()
         data = bytes_sz()
         objs = count()
-        pg = exact_count("PG")
-        pg_per_osd = exact_count("PG/OSD")
-        disk_sizes = ident()
-        disk_types = idents_list(delim=', ')
-        disk_models = idents_list()
+        data_disk_sizes = ident()
+        disk_types = idents_list(delim='<br>')
+        data_disk_models = idents_list()
 
     pools = {}
     for pool in ceph.pools.values():
@@ -319,6 +331,7 @@ def show_ruleset_info(ceph: CephInfo) -> html.HTMLTable:
         if ceph.is_luminous:
             row.osd_class = '*' if rule.class_name is None else rule.class_name
 
+        row.replication_level = rule.replicated_on
         osds = [ceph.osds[osd_node.id] for osd_node in ceph.crush.iter_osds_for_rule(rule.id)]
         row.num_osd = len(osds)
         total_sz = sum(osd.free_space + osd.used_space for osd in osds)
@@ -331,18 +344,31 @@ def show_ruleset_info(ceph: CephInfo) -> html.HTMLTable:
         row.pg = total_pg
         row.pg_per_osd = total_pg // len(osds)
 
-        disks_types = set()
+        storage_disks_types = set()
+        journal_disks_types = set()
         disks_sizes = set()
         disks_info = set()
 
         for osd in osds:
             dsk = osd.storage_info.data.dev_info
-            disks_types.add(dsk.tp.name)
+            storage_disks_types.add(dsk.tp.name)
+            if isinstance(osd.storage_info, FileStoreInfo):
+                journal_disks_types.add(osd.storage_info.journal.dev_info.tp.name)
+            else:
+                assert isinstance(osd.storage_info, BlueStoreInfo)
+                journal_disks_types.add(osd.storage_info.wal.dev_info.tp.name)
+                journal_disks_types.add(osd.storage_info.db.dev_info.tp.name)
+
             disks_sizes.add(dsk.logic_dev.size)
             disks_info.add(f"{dsk.hw_model.vendor}::{dsk.hw_model.model}")
 
-        row.disk_sizes = ", ".join(map(b2ssize, sorted(disks_sizes)))
-        row.disk_types = sorted(disks_types)
-        row.disk_models = sorted(disks_info)
+        row.data_disk_sizes = ", ".join(map(b2ssize, sorted(disks_sizes)))
+        row.disk_types = ["data: " + ", ".join(storage_disks_types), "wal/db/j: " + ", ".join(journal_disks_types)]
+        row.data_disk_models = sorted(disks_info)
 
     return table.html(id="table-rules")
+
+
+@tab("Cluster err/warn")
+def show_cluster_err_warn(ceph: CephInfo) -> str:
+    return "<br>".join(ceph.log_err_warn)

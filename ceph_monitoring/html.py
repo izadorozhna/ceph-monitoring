@@ -1,8 +1,6 @@
 import sys
-import weakref
 from enum import Enum
-from typing import Callable, List, Dict, Union, Iterable, Optional, Any, Tuple, TypeVar
-from dataclasses import dataclass
+from typing import Callable, List, Dict, Union, Iterable
 
 from cephlib.units import b2ssize, b2ssize_10
 
@@ -105,7 +103,6 @@ class Doc:
     def __call__(self, text: str = "", **attrs: str):
         assert self.__stack != []
         return self.__stack[-1](text, **attrs)
-
 
 
 def ok(text: str) -> TagProxy:

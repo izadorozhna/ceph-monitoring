@@ -1,5 +1,6 @@
+import logging
 import collections
-from typing import Dict, List, Optional, Sequence, Union, Tuple, Any
+from typing import Dict, List, Optional, Union, Tuple, Any
 
 import numpy
 from dataclasses import dataclass
@@ -8,86 +9,17 @@ from cephlib.units import b2ssize
 
 from . import html
 from .cluster_classes import CephInfo, OSDStatus, DiskType, CephVersion, BlueStoreInfo, FileStoreInfo, LogicBlockDev, \
-                             Disk
+                             Disk, CephOSD
 from .visualize_utils import tab, partition_by_len, to_html_histo, plot, perf_info_required
 from .obj_links import osd_link, host_link
 from .checks import expected_wr_speed
 from .plot_data import get_histo_img
 from .table import Table, count, bytes_sz, ident, seconds, exact_count, ok_or_fail, idents_list, \
-                   yes_or_no, extra_columns
+                   yes_or_no, extra_columns, to_str
 from .groupby import group_by
 
-@tab("OSD's state")
-def show_osd_state(ceph: CephInfo) -> html.HTMLTable:
-    statuses: Dict[OSDStatus, List[str]] = collections.defaultdict(list)
 
-    for osd in ceph.osds.values():
-        statuses[osd.status].append(str(osd.id))
-
-    table = html.HTMLTable("table-osds-state", ["Status", "Count", "ID's"])
-
-    for status, osds in sorted(statuses.items()):
-        table.add_row([html.ok(status.name) if status == OSDStatus.up else html.fail(status.name),
-                       len(osds),
-                      "<br>".join(", ".join(grp) for grp in partition_by_len(osds, 120, 1))])
-
-    return table
-
-
-@tab("OSD load")
-def show_osd_load_table(ceph: CephInfo) -> html.HTMLTable:
-    class OSDLoadTable(Table):
-        id = ident()
-        node = ident()
-        pgs = exact_count("PG's")
-        open_files = exact_count("open<br>files")
-        ip_conn = exact_count("ip<br>conn")
-        threads = exact_count("thr")
-        rss = exact_count("RSS")
-        vmm = exact_count("VMM")
-        cpu_used = seconds("CPU<br>Used, s")
-        data = bytes_sz("Total<br>data")
-        read_ops = count("Read<br>ops")
-        read = bytes_sz("Read")
-        write_ops = count("Write<br>ops")
-        write = bytes_sz("Write")
-        bytes_delta = bytes_sz("+Bps")
-        read_iops = count("Read<br>IOPS")
-        read_bps = bytes_sz("Read<br>Bps")
-        write_iops = count("Write<br>IOPS")
-        write_bps = bytes_sz("Write<br>Bps")
-
-    table = OSDLoadTable()
-
-    for osd in ceph.sorted_osds:
-        row = table.next_row()
-        row.id = osd_link(osd.id).link, osd.id
-        row.node = host_link(osd.host.name).link, osd.host.name
-        row.pgs = osd.pg_count
-
-        #  RUN INFO - FD COUNT, TCP CONN, THREADS
-        if osd.run_info:
-            row.open_files = osd.run_info.fd_count
-            row.ip_conn = osd.run_info.opened_socks
-            row.threads = osd.run_info.th_count
-            row.rss = osd.run_info.vm_rss
-            row.vms = osd.run_info.vm_size
-            row.cpu_used = osd.run_info.cpu_usage
-
-        row.data = osd.pg_stats.bytes
-        row.read_ops = osd.pg_stats.reads
-        row.read = osd.pg_stats.read_b
-        row.write_ops = osd.pg_stats.writes
-        row.write = osd.pg_stats.write_b
-
-        if osd.d_pg_stats:
-            row.bytes_delta = osd.d_pg_stats.bytes
-            row.read_iops = osd.d_pg_stats.reads
-            row.read_bps = osd.d_pg_stats.read_b
-            row.write_iops = osd.d_pg_stats.writes
-            row.write_bps = osd.d_pg_stats.write_b
-
-    return table.html(id="table-osd-load", align=html.TableAlign.left_right)
+logger = logging.getLogger('report')
 
 
 @dataclass
@@ -148,6 +80,81 @@ def group_osds(ceph: CephInfo) -> List[List[OSDInfo]]:
         objs.append(osd_info)
 
     return [[objs[idx] for idx in group] for group in group_by((obj.__dict__ for obj in objs), mutable_keys='id')]
+
+
+@tab("OSD's state")
+def show_osd_state(ceph: CephInfo) -> html.HTMLTable:
+    statuses: Dict[OSDStatus, List[str]] = collections.defaultdict(list)
+
+    for osd in ceph.osds.values():
+        statuses[osd.status].append(str(osd.id))
+
+    table = html.HTMLTable("table-osds-state", ["Status", "Count", "ID's"])
+
+    for status, osds in sorted(statuses.items()):
+        table.add_row([html.ok(status.name) if status == OSDStatus.up else html.fail(status.name),
+                       len(osds),
+                      "<br>".join(", ".join(grp) for grp in partition_by_len(osds, 120, 1))])
+
+    return table
+
+
+class OSDLoadTable(Table):
+    id = ident()
+    node = ident()
+    pgs = exact_count("PG's")
+    open_files = exact_count("open<br>files")
+    ip_conn = exact_count("ip<br>conn")
+    threads = exact_count("thr")
+    rss = exact_count("RSS")
+    vmm = exact_count("VMM")
+    cpu_used = seconds("CPU<br>Used, s")
+    data = bytes_sz("Total<br>data")
+    read_ops = count("Read<br>ops")
+    read = bytes_sz("Read")
+    write_ops = count("Write<br>ops")
+    write = bytes_sz("Write")
+    bytes_delta = bytes_sz("+Bps")
+    read_iops = count("Read<br>IOPS")
+    read_bps = bytes_sz("Read<br>Bps")
+    write_iops = count("Write<br>IOPS")
+    write_bps = bytes_sz("Write<br>Bps")
+
+
+@tab("OSD load")
+def show_osd_load_table(ceph: CephInfo) -> html.HTMLTable:
+
+    table = OSDLoadTable()
+
+    for osd in ceph.sorted_osds:
+        row = table.next_row()
+        row.id = osd_link(osd.id).link, osd.id
+        row.node = host_link(osd.host.name).link, osd.host.name
+        row.pgs = osd.pg_count
+
+        #  RUN INFO - FD COUNT, TCP CONN, THREADS
+        if osd.run_info:
+            row.open_files = osd.run_info.fd_count
+            row.ip_conn = osd.run_info.opened_socks
+            row.threads = osd.run_info.th_count
+            row.rss = osd.run_info.vm_rss
+            row.vms = osd.run_info.vm_size
+            row.cpu_used = osd.run_info.cpu_usage
+
+        row.data = osd.pg_stats.bytes
+        row.read_ops = osd.pg_stats.reads
+        row.read = osd.pg_stats.read_b
+        row.write_ops = osd.pg_stats.writes
+        row.write = osd.pg_stats.write_b
+
+        if osd.d_pg_stats:
+            row.bytes_delta = osd.d_pg_stats.bytes
+            row.read_iops = osd.d_pg_stats.reads
+            row.read_bps = osd.d_pg_stats.read_b
+            row.write_iops = osd.d_pg_stats.writes
+            row.write_bps = osd.d_pg_stats.write_b
+
+    return table.html(id="table-osd-load", align=html.TableAlign.left_right)
 
 
 @tab("OSD info")
@@ -223,14 +230,6 @@ def show_osd_info(ceph: CephInfo) -> html.HTMLTable:
 
         row.daemon_runs = osd.daemon_runs
         row.dev_class = osd.class_name
-
-        # for rule, weight in zip(ceph.crush.rules.values(), osd_info.weights):
-        #     ok, _, expected_weight = osd.crush_rules_weights.get(rule.name, (False, None, None))
-        #     if ok:
-        #         weight_s = f"{weight:.2f}"
-        #         row.weights[f"w_{rule.name}"] = \
-        #             (html_fail(weight_s) if abs(1 - weight / expected_weight) > .2 else weight_s), weight
-
         rew = f"{osd.reweight:.2f}"
         row.reweight = html.fail(rew) if abs(osd.reweight - 1.0) > .01 else rew
         row.storage_type = osd_info.storage_type
@@ -281,181 +280,100 @@ def show_osd_info(ceph: CephInfo) -> html.HTMLTable:
 
     return table.html(id="table-osd-info", align=html.TableAlign.left_right)
 
-    # for osd in ceph.sorted_osds:
-    #     row = table.next_row()
-    #     row.id = osd_link(osd.id).link, osd.id
-    #     row.node = host_link(osd.host.name).link, osd.host.name
-    #     row.status = osd.status == OSDStatus.up
-    #
-    #     if osd.version is None:
-    #         row.version = html_fail("Unknown"), ""
-    #     else:
-    #         if len(all_versions_set) != 1:
-    #             color = html_ok if osd.version == largest_ver else html_fail
-    #         else:
-    #             color = lambda x: x
-    #         row.version = color(str(osd.version)), osd.version
-    #
-    #     row.daemon_runs = osd.daemon_runs
-    #
-    #     for root in ceph.crush.roots:
-    #         if root.name in osd.crush_trees_weights:
-    #             wok, weight, expected_weight = osd.crush_trees_weights[root.name]
-    #
-    #             if wok:
-    #                 weight_s = f"{weight:.2f}"
-    #                 row.weights[f"w_{root.name}"] = \
-    #                     (html_fail(weight_s) if abs(1 - weight / expected_weight) > .2 else weight_s), weight
-    #
-    #     rew = f"{osd.reweight:.2f}"
-    #     row.reweight = html_fail(rew) if abs(osd.reweight - 1.0) > .01 else rew
-    #     row.pg = osd.pg_count
-    #
-    #     if osd.pg_stats:
-    #         row.scrub_err = osd.pg_stats.scrub_errors + osd.pg_stats.deep_scrub_errors + \
-    #             osd.pg_stats.shallow_scrub_errors
-    #
-    #     row.storage_type = "bluestore" if isinstance(osd.storage_info, BlueStoreInfo) else "filestore"
-    #     data_drive_color_fn = html_ok if osd.storage_info.data.dev_info.tp in fast_drives else lambda x: x
-    #     row.storage_dev = data_drive_color_fn(osd.storage_info.data.dev_info.tp.name)
-    #     color = "red" if osd.free_perc < 20 else ( "yellow" if osd.free_perc < 40 else "green")
-    #     avail_perc_str = H.font(osd.free_perc, color=color)
-    #     row.storage_total = osd.total_space
-    #     row.storage_free = avail_perc_str, osd.free_perc
-    #
-    #     data_dev_path = osd.storage_info.data.path
-    #
-    #     # JOURNAL/WAL/DB info
-    #     if isinstance(osd.storage_info, FileStoreInfo):
-    #         jinfo = osd.storage_info.journal
-    #         if osd.run_info:
-    #             osd_sync = float(osd.config['filestore_max_sync_interval'])
-    #             min_size = osd_sync * expected_wr_speed[osd.storage_info.data.dev_info.tp] * (1024 ** 2)
-    #         else:
-    #             min_size = 0
-    #     else:
-    #         jinfo = osd.storage_info.wal
-    #         min_size = 512 * 1024 * 1024
-    #
-    #     row.journal_or_wal_collocated = jinfo.dev_info.dev_path != data_dev_path
-    #     color = html_ok if jinfo.dev_info.tp in fast_drives else html_fail
-    #     row.journal_or_wal_type = color(jinfo.dev_info.tp.name), jinfo.dev_info.tp.name
-    #     size_s = b2ssize(jinfo.dev_info.size)
-    #     row.journal_or_wal_size = (size_s if jinfo.dev_info.size >= min_size else html_fail(size_s)), \
-    #         jinfo.dev_info.size
-    #
-    #     if isinstance(osd.storage_info, FileStoreInfo):
-    #         row.journal_on_file = osd.storage_info.journal.partition_name == osd.storage_info.data.partition_name
-    #
-    #     if isinstance(osd.storage_info, BlueStoreInfo):
-    #         if osd.storage_info.db.dev_info.size is not None:
-    #             min_db_size = osd.storage_info.data.dev_info.size * 0.0095
-    #         else:
-    #             min_db_size = 0
-    #
-    #         info = osd.storage_info.db.dev_info
-    #         row.db_collocated = info.dev_path != data_dev_path
-    #         color = html_ok if info.tp in fast_drives else html_fail
-    #         row.db_type = color(info.tp.name), info.tp.name
-    #         size_s = b2ssize(info.size)
-    #         row.db_size = size_s if info.size >= min_db_size else html_fail(size_s), info.size
-
-    # load_table = get_osd_load_table(ceph)
-    # return "OSD's info:", f"<center>{table}<br><br><br><H4>Run info:</H4><br>{load_table}</center>"
-
 
 @perf_info_required
-def show_osd_perf_info(ceph: CephInfo) -> Tuple[str, Any]:
-    headers = ["OSD", "node", "apply<br>lat, ms<br>avg/osd perf", "commit<br>lat"]
+@tab("OSD's current load")
+def show_osd_perf_info(ceph: CephInfo) -> html.HTMLTable:
+    class Tbl(Table):
+        osd = ident()
+        node = ident()
+        apply_lat = ident("apply<br>lat")
+        commit_lat = ident("commit<br>lat")
+        journal_lat = ident("journal<br>lat")
+        xx = ident("ms<br>avg/osd perf")
+        data_dev = ident("Data<br>dev")
+        data_read = ident("Data read<br>Bps/ops")
+        data_write = ident("Data write<br>Bps/OPS")
+        data_lat = ident("Data lat<br>ms")
+        data_io_time = to_str("D IO<br>time")
+        j_dev = ident("J dev")
+        j_write = ident("J write<br>Bps/OPS")
+        j_lat = ident("J lat<br>ms")
+        j_io_time = to_str("J IO<br>time")
+        wal_dev = ident("WAL dev")
+        wal_write = ident("WAL write<br>Bps/OPS")
+        wal_lat = ident("WAL lat<br>ms")
+        wal_io_time = to_str("WAL IO<br>time")
+        db_dev = ident("DB dev")
+        db_read = ident("DB read<br>Bps/OPS")
+        db_write = ident("DB write<br>Bps/OPS")
+        db_lat = ident("DB lat<br>ms")
+        db_io_time = to_str("DB IO<br>time")
 
-    if ceph.has_fs:
-        headers.append("journal<br>lat, ms")
+    def add_dev_info(row: Any, dev: Union[Disk, LogicBlockDev], attr: str, with_read: bool = True):
 
-    headers.extend(["ms<br>avg/osd perf", "D dev", "D read<br>Bps/OPS", "D write<br>Bps/OPS",
-                    "D lat<br>ms", "D IO<br>time %"])
+        setattr(row, attr + '_dev', dev.name)
 
-    headers.extend(["J/WAL dev", "J/WAL write<br>Bps/OPS", "J/WAL lat<br>ms", "J/WAL IO<br>time %"])
+        if with_read:
+            setattr(row, attr + '_read', (f"{b2ssize(dev.usage.read_bytes)} / {b2ssize(dev.usage.read_iops)}",
+                                          str(dev.usage.read_bytes)))
 
-    if ceph.has_bs:
-        headers.extend(["DB dev", "DB write<br>Bps/OPS", "DB lat<br>ms", "DB IO<br>time %"])
-
-    table = html.HTMLTable(headers=headers)
-
-    def lat2s(val):
-        if val is None or val < 1e-6:
-            return HTML_UNKNOWN
-        elif val < 1e-3:
-            return f"{val * 1000:.3f}"
-        else:
-            return f"{int(val * 1000)}"
-
-    def add_dev_info(dev: Union[Disk, LogicBlockDev]):
-        table.add_cell(dev.name)
-        table.add_cell(f"{b2ssize(dev.usage.read_bytes)} / {b2ssize(dev.usage.read_iops)}",
-                       sorttable_customkey=str(dev.usage.read_bytes))
-        table.add_cell(f"{b2ssize(dev.usage.write_bytes)} / {b2ssize(dev.usage.write_iops)}",
-                       sorttable_customkey=str(dev.usage.write_bytes))
+        setattr(row, attr + '_write', (f"{b2ssize(dev.usage.write_bytes)} / {b2ssize(dev.usage.write_iops)}",
+                                       str(dev.usage.write_bytes)))
 
         if dev.usage.lat is None:
-            table.add_cell('-', sorttable_customkey="0")
+            setattr(row, attr + '_lat', ('-', 0))
         else:
-            table.add_cell(lat2s(dev.usage.lat), sorttable_customkey=str(dev.usage.lat))
+            setattr(row, attr + '_lat',
+                ((f"{dev.usage.lat:.1f}s" if dev.usage.lat > 1 else f"{int(dev.usage.lat * 1000)}ms"), dev.usage.lat))
 
-        table.add_cell(str(int(dev.usage.io_time * 100)), sorttable_customkey=str(dev.usage.io_time))
+        setattr(row, attr + '_io_time', (int(dev.usage.io_time * 100), dev.usage.io_time))
 
+    def get_lat_val(osd: CephOSD, lat_name: str) -> Optional[str]:
+        if lat_name in osd.osd_perf_dump:
+            ms = osd.osd_perf_dump[lat_name] * 1000
+        elif lat_name + '_s' in osd.osd_perf_dump:
+            ms = osd.osd_perf_dump[lat_name + "_s"] * 1000
+        elif lat_name + '_ms' in osd.osd_perf_dump:
+            ms = osd.osd_perf_dump[lat_name + "_ms"]
+        else:
+            return None
+        return f"{ms / 1000:.1f}s" if ms > 1000 else f"{int(ms)}ms"
+
+    table = Tbl()
     for osd in ceph.sorted_osds:
         assert osd.storage_info is not None
+        row = table.next_row()
 
-        table.add_cell(osd_link(osd.id).link)
-        table.add_cell(host_link(osd.host.name).link)
+        row.osd = osd_link(osd.id).link, osd.id
+        row.node = host_link(osd.host.name).link, osd.host.name
+        row.apply_lat = get_lat_val(osd, "apply_latency")
 
-        lats = [("apply_latency", "apply_latency_s"), ("commitcycle_latency", "commitcycle_latency_s")]
-        if ceph.has_fs:
-            lats.append(("journal_latency", None))
+        clat = get_lat_val(osd, "commitcycle_latency")
+        if clat is None:
+            clat = get_lat_val(osd, "commit_latency")
 
-        if osd.osd_perf is not None:
-            for name, name_s in lats:
-                s_val = None if name_s is None else str(osd.osd_perf[name_s])
+        row.commit_lat = clat
 
-                if name not in osd.osd_perf:
-                    v_val = HTML_UNKNOWN
-                elif isinstance(osd.osd_perf[name], int):
-                    v_val = str(osd.osd_perf[name])
-                else:
-                    # scan for latest available value
-                    for val in osd.osd_perf[name][::-1]:  # type: ignore
-                        if val != NO_VALUE:
-                            v_val = lat2s(val)
-                            break
-                    else:
-                        v_val = HTML_UNKNOWN
+        jlat = get_lat_val(osd, "journal_latency")
+        if jlat is not None:
+            row.journal_lat = jlat
 
-                if s_val:
-                    table.add_cell(f"{v_val} / {s_val}")
-                else:
-                    table.add_cell(v_val)
-        else:
-            for name, name_s in lats:
-                if name_s:
-                    table.add_cell(f"{HTML_UNKNOWN} / {HTML_UNKNOWN}")
-                else:
-                    table.add_cell(HTML_UNKNOWN)
-
-        add_dev_info(osd.storage_info.data.dev_info)
+        add_dev_info(row, osd.storage_info.data.dev_info, "data")
         if isinstance(osd.storage_info, FileStoreInfo):
-            add_dev_info(osd.storage_info.journal.dev_info)
+            add_dev_info(row, osd.storage_info.journal.dev_info, "j", with_read=False)
         else:
-            add_dev_info(osd.storage_info.wal.dev_info)
-            add_dev_info(osd.storage_info.db.dev_info)
+            add_dev_info(row, osd.storage_info.wal.dev_info, "wal", with_read=False)
+            add_dev_info(row, osd.storage_info.db.dev_info, "db")
 
-        table.next_row()
-
-    return "OSD's current load:", table
+    return table.html("table-osd-curr-load")
 
 
-def show_osd_pool_pg_distribution(ceph: CephInfo) -> Tuple[str, Any]:
+@tab("PG copy per OSD")
+def show_osd_pool_pg_distribution(ceph: CephInfo) -> Optional[html.HTMLTable]:
     if ceph.sum_per_osd is None:
-        return "PG copy per OSD: No pg dump data. Probably too many PG", ""
+        logger.warning("PG copy per OSD: No pg dump data. Probably too many PG")
+        return None
 
     pools_order_t = sorted((-count, name) for name, count in ceph.sum_per_pool.items())
     # pools = sorted(cluster.sum_per_pool)
@@ -487,13 +405,50 @@ def show_osd_pool_pg_distribution(ceph: CephInfo) -> Tuple[str, Any]:
 
     list(map(table.add_cell, (ceph.sum_per_pool[pool_name] for pool_name in pools)))
     table.add_cell(str(sum(ceph.sum_per_pool.values())))
+    return table
 
-    return "PG copy per OSD:", table
+
+@tab("PG copy per OSD")
+def show_osd_pool_agg_pg_distribution(ceph: CephInfo) -> Optional[html.HTMLTable]:
+    if ceph.sum_per_osd is None:
+        logger.warning("PG copy per OSD: No pg dump data. Probably too many PG")
+        return None
+
+    pool2osd_count: Dict[str, List[Tuple[int, int]]] = {}
+
+    for osd_id, row in ceph.osd_pool_pg_2d.items():
+        for pool_name, count in row.items():
+            pool2osd_count.setdefault(pool_name, []).append((count, osd_id))
+
+    class PGAggTable(Table):
+        name = ident()
+        pg = exact_count("PG copies")
+        min = ident(dont_sort=True)
+        p10 = exact_count("10%")
+        p30 = exact_count("30%")
+        p50 = exact_count("50%")
+        p70 = exact_count("70%")
+        p90 = exact_count("90%")
+        max = ident(dont_sort=True)
+
+    table = PGAggTable()
+    for pool, counts in pool2osd_count.items():
+        counts.sort()
+        row = table.next_row()
+        row.name = pool
+        row.pg = ceph.pools[pool].pg * ceph.pools[pool].size
+        row.min = "<br>".join(osd_link(osd_id).link + f": {cnt}" for cnt, osd_id in counts[:5])
+        row.max = "<br>".join(osd_link(osd_id).link + f": {cnt}" for cnt, osd_id in counts[-5:])
+        row.p10 = counts[int(len(counts) * 0.1)]
+        row.p30 = counts[int(len(counts) * 0.3)]
+        row.p50 = counts[int(len(counts) * 0.5)]
+        row.p70 = counts[int(len(counts) * 0.7)]
+        row.p90 = counts[int(len(counts) * 0.9)]
+    return table.html(id="table-pg-per-osd-agg")
 
 
 @plot
-def show_osd_pg_histo(ceph: CephInfo) -> Optional[Tuple[str, Any]]:
+@tab("PG per OSD")
+def show_osd_pg_histo(ceph: CephInfo) -> Optional[str]:
     vals = [osd.pg_count for osd in ceph.osds.values() if osd.pg_count is not None]
-    if vals:
-        return "PG per OSD", get_histo_img(numpy.array(vals))
-    return None
+    return get_histo_img(numpy.array(vals)) if vals else None

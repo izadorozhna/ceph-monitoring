@@ -4,7 +4,6 @@ from typing import Union, Iterable, Dict, Callable, Sequence, Tuple, List, TypeV
 
 import numpy
 
-from . import html
 from .cluster_classes import  CephOSD, CephMonitor, CephVersion
 
 
@@ -146,3 +145,4 @@ def partition_by_len(items: Iterable[Union[T, Tuple[T, int]]],
             curr_len = el_len
     if curr:
         yield curr
+

@@ -18,7 +18,8 @@ import networkx
 
 from cephlib.plot import plot_histo, hmap_from_2d, plot_hmap_with_histo
 
-from .cluster import NO_VALUE, CephInfo, Cluster
+from .cluster import Cluster
+from .ceph_loader import NO_VALUE, CephInfo
 from .osd_ops import calc_stages_time, iter_ceph_ops, ALL_STAGES
 from .perf_parser import STAGES_PRINTABLE_NAMES
 from .visualize_utils import perf_info_required, plot
@@ -126,10 +127,6 @@ def show_osd_load(report: ReportProto, cluster: Cluster, ceph: CephInfo):
 @plot
 @perf_info_required
 def show_osd_lat_heatmaps(report: ReportProto, ceph: CephInfo):
-    for osd in ceph.osds:
-        if osd.osd_perf is None:
-            return
-
     max_xbins: int = 25
     logger.info("Plot osd latency heatmaps")
 

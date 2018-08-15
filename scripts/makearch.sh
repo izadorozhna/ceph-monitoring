@@ -3,7 +3,7 @@ set -ex
 set -o pipefail
 
 binpath=$(realpath "$0")
-libs=cephlib agent xmlbuilder3
+libs="cephlib agent xmlbuilder3"
 
 if [[ $1 == "--local" ]] ; then
     shift 1

@@ -47,7 +47,7 @@ td { padding: 6px; }
     text-align: left;
     top: 0;
     position:fixed;
-    font-size: 20px;
+    font-size: 16px;
     color: #c2c7c8;
     height: 100%;
     background-color: #222;
@@ -87,18 +87,22 @@ td { padding: 6px; }
 #table-io-summary {width: 40%;}
 #table-mon-info {width: 60%;}
 #table-hosts-info {width: 60%;}
+#table-hosts-run-info {width: 60%;}
+#table-osd-curr-load {width: 80%;}
 #table-hosts-pg-info-long {width: 60%;}
 #table-hosts-pg-info {width: 45%;}
 #table-osds-state {width: 80%;}
 #table-pools {width: 100%;}
 #table-pgs {width: 30%;}
 #table-pg-per-osd {width: 100%;}
+#table-pg-per-osd-agg {width: 60%;}
 #table-osd-info {width: 100%;}
 #table-osd-load {width: 100%;}
 #table-issues {width: 80%;}
 #table-rules {width: 100%;}
 #table-settings {width: 60%;}
 #table-pools-io {width: 60%;}
+.table-net-load {width: 80%;}
 
 a.link {
     color: #0000EE;

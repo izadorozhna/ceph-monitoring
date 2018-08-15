@@ -1,3 +1,4 @@
+import copy
 import collections
 from typing import Dict, List, Union, Iterable, Callable, Optional, Tuple, Any
 
@@ -7,27 +8,53 @@ from cephlib.common import flatten
 from . import html
 from .cluster_classes import Cluster, CephInfo, CephOSD, Host, FileStoreInfo, BlueStoreInfo, Disk, LogicBlockDev,\
                              OSDPGStats, NodePGStats
-from .visualize_utils import tab, partition, perf_info_required, val_to_color
+from .visualize_utils import tab, perf_info_required, val_to_color, partition_by_len
 from .obj_links import host_link, osd_link, mon_link
 from .groupby import group_by
-from .cluster import get_nodes_pg_info
 from .table import Table, bytes_sz, ident, idents_list, exact_count, extra_columns, float_vl
 
 
-class HostRunInfo(Table):
-    name = ident()
-    services = idents_list()
-    ram_free = bytes_sz("RAM<br>free")
-    swap = bytes_sz("Swap<br>used")
-    load = float_vl("Load avg<br>5m")
-    ip_conn = ident("Conn<br>tcp/udp")
-    ips = idents_list("IP's")
-    scrub_err = exact_count("Scrub<br>errors")
+def get_nodes_pg_info(ceph: CephInfo) -> Dict[str, NodePGStats]:
+    if not ceph.nodes_pg_info:
+        ceph.nodes_pg_info = {}
+        for osd in ceph.osds.values():
+            assert osd.pg_stats
+            assert osd.pgs is not None
+            if osd.host.name in ceph.nodes_pg_info:
+                info = ceph.nodes_pg_info[osd.host.name]
+
+                info.pg_stats.shallow_scrub_errors += osd.pg_stats.shallow_scrub_errors
+                info.pg_stats.scrub_errors += osd.pg_stats.scrub_errors
+                info.pg_stats.deep_scrub_errors += osd.pg_stats.deep_scrub_errors
+                info.pg_stats.write_b += osd.pg_stats.write_b
+                info.pg_stats.writes += osd.pg_stats.writes
+                info.pg_stats.read_b += osd.pg_stats.read_b
+                info.pg_stats.reads += osd.pg_stats.reads
+                info.pg_stats.bytes += osd.pg_stats.bytes
+
+                if osd.d_pg_stats:
+                    info.d_pg_stats.shallow_scrub_errors += osd.d_pg_stats.shallow_scrub_errors
+                    info.d_pg_stats.scrub_errors += osd.d_pg_stats.scrub_errors
+                    info.d_pg_stats.deep_scrub_errors += osd.d_pg_stats.deep_scrub_errors
+                    info.d_pg_stats.write_b += osd.d_pg_stats.write_b
+                    info.d_pg_stats.writes += osd.d_pg_stats.writes
+                    info.d_pg_stats.read_b += osd.d_pg_stats.read_b
+                    info.d_pg_stats.reads += osd.d_pg_stats.reads
+                    info.d_pg_stats.bytes += osd.d_pg_stats.bytes
+
+                info.pgs.extend(osd.pgs)
+            else:
+                ceph.nodes_pg_info[osd.host.name] = NodePGStats(name=osd.host.name,
+                                                                pg_stats=copy.copy(osd.pg_stats),
+                                                                d_pg_stats=None if osd.d_pg_stats is None
+                                                                           else copy.copy(osd.d_pg_stats),
+                                                                pgs=osd.pgs[:])
+    return ceph.nodes_pg_info
 
 
-@tab("Hosts config")
-def show_hosts_info(cluster: Cluster, ceph: CephInfo) -> str:
-    hosts_pgs_info = get_nodes_pg_info(ceph)
+
+@tab("Hosts configs")
+def show_hosts_config(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
     mon_hosts = {mon.host.name for mon in ceph.mons.values()}
 
     host2osds = {}
@@ -53,13 +80,40 @@ def show_hosts_info(cluster: Cluster, ceph: CephInfo) -> str:
         nets = "<br>".join(f"{b2ssize_10(speed * 8) if speed else '???'} * {count}"
                            for speed, count in sorted(by_speed.items()))
 
+        cl = host.find_interface(ceph.cluster_net)
+        pb = host.find_interface(ceph.public_net)
+        cluster_bw = None
+        client_bw = None
+
+        for adapter in [cl, pb]:
+            if not adapter:
+                continue
+
+            adapter_name = adapter.dev.split(".")[0] if '.' in adapter.dev else adapter.dev
+            sources = host.bonds[adapter_name].sources if adapter_name in host.bonds else [adapter_name]
+
+            bw = 0
+            has_unknown = False
+            for src in sources:
+                if host.net_adapters[src].speed:
+                    bw += host.net_adapters[src].speed
+                else:
+                    has_unknown = True
+
+            if adapter is cl:
+                cluster_bw = b2ssize(bw) + (" + unknown" if has_unknown else "")
+            else:
+                client_bw = b2ssize(bw) + (" + unknown" if has_unknown else "")
+
         hosts_configs.append({
             "name": host.name,
             "osds_count": tuple(len(rule2host2osds[root_name].get(host.name, [])) for root_name in root_names),
             'has_mon': host.name in mon_hosts,
             'cores': sum(inf.cores for inf in host.hw_info.cpu_info),
             'ram': int(host.mem_total / 2 ** 30 + 0.5),
-            'net': nets
+            'net': nets,
+            'cluster_bw': cluster_bw,
+            'client_bw': client_bw
         })
 
 
@@ -73,6 +127,8 @@ def show_hosts_info(cluster: Cluster, ceph: CephInfo) -> str:
         ram = bytes_sz("RAM<br>total")
         storage_devices = ident("Storage<br>devices")
         network = ident("Network<br>devices")
+        ceph_cluster_bw = ident("Ceph<br>cluster net")
+        ceph_client_bw = ident("Ceph<br>client net")
 
     configs = HostsConfigTable()
 
@@ -90,46 +146,88 @@ def show_hosts_info(cluster: Cluster, ceph: CephInfo) -> str:
         row.cores = first_item["cores"]
         row.ram = first_item["ram"]
         row.network = first_item["net"]
+        row.ceph_cluster_bw = first_item["cluster_bw"]
+        row.ceph_client_bw = first_item["client_bw"]
 
+    return configs.html(id="table-hosts-info", align=html.TableAlign.center_right)
+
+
+class HostRunInfo(Table):
+    name = ident()
+    services = ident(dont_sort=True)
+    ram_free = bytes_sz("RAM<br>free")
+    swap = bytes_sz("Swap<br>used")
+    load = float_vl("Load avg<br>5m")
+    ip_conn = ident("Conn<br>tcp/udp")
+    ips = idents_list("IP's")
+    scrub_err = exact_count("Total<br>scrub<br>errors")
+    new_scrub_err = exact_count("New<br>scrub<br>errors")
+    net_err = exact_count("New<br>network<br>drop+serr")
+    net_err_no_buff = exact_count("New<br>Dropped<br>no space")
+    net_budget_over = exact_count("New<br>Net budget<br>running out")
+
+
+@tab("Hosts status")
+def show_hosts_status(cluster: Cluster, ceph: CephInfo):
+    hosts_pgs_info = get_nodes_pg_info(ceph)
     run_info = HostRunInfo()
+    mon_hosts = {mon.host.name for mon in ceph.mons.values()}
+
+    host2osds: Dict[str, List[int]] = {}
+    for osd in ceph.osds.values():
+        host2osds.setdefault(osd.host.name, []).append(str(osd.id))
+
     for host in cluster.sorted_hosts:
 
         # TODO: add storage devices
         # TODO: add net info
 
-        row2 = run_info.next_row()
-        row2.name = host_link(host.name).link, host.name
+        row = run_info.next_row()
+        row.name = host_link(host.name).link, host.name
 
-        srv_strs = []
         if host.name in mon_hosts:
-            srv_strs.append(f'<font color="#8080FF">Mon</font>: ' + mon_link(host.name).link)
+            mon_str = f'<font color="#8080FF">Mon</font>: ' + mon_link(host.name).link
+        else:
+            mon_str = None
 
+        srv_strs: List[Tuple[str, int]] = []
         if host.name in host2osds:
-            osds = host2osds[host.name]
-            srv_strs.append('''<font color="#c77405">OSD's</font>: ''' +
-                            ", ".join(osd_link(osd_id).link for osd_id in osds[:3]))
-            for ids in partition(osds[3:], 4):
-                srv_strs.append(", ".join(osd_link(osd_id).link for osd_id in ids))
+            for osd_id in host2osds[host.name]:
+                srv_strs.append((osd_link(osd_id).link, len(str(osd_id))))
 
-        row2.services = srv_strs
+        row.services = (mon_str + "<br>" if mon_str else "") + '''<font color="#c77405">OSD's</font>: ''' + \
+                        "<br>".join(", ".join(chunk) for chunk in partition_by_len(srv_strs, 70, 1))
 
-        row2.ram_free = host.mem_free
-        row2.swap = host.swap_total - host.swap_free
-        row2.load = host.load_5m
-        row2.ip_conn = f"{host.open_tcp_sock}/{host.open_udp_sock}", host.open_tcp_sock + host.open_udp_sock
+        row.ram_free = host.mem_free
+        row.swap = host.swap_total - host.swap_free
+        row.load = host.load_5m
+        row.ip_conn = f"{host.open_tcp_sock}/{host.open_udp_sock}", host.open_tcp_sock + host.open_udp_sock
 
         all_ip = flatten(adapter.ips for adapter in host.net_adapters.values())
-        row2.ips = [str(addr.ip) for addr in all_ip if not addr.ip.is_loopback]
+        row.ips = [str(addr.ip) for addr in all_ip if not addr.ip.is_loopback]
 
         if hosts_pgs_info and host.name in hosts_pgs_info:
             pgs_info = hosts_pgs_info[host.name]
-            row2.scrub_err  = pgs_info.pg_stats.scrub_errors + pgs_info.pg_stats.deep_scrub_errors + \
+            row.scrub_err = pgs_info.pg_stats.scrub_errors + pgs_info.pg_stats.deep_scrub_errors + \
                 pgs_info.pg_stats.shallow_scrub_errors
 
-    return str(configs.html(id="table-hosts-info", align=html.TableAlign.center_right)) + "<br>" * 5 + \
-           str(run_info.html(id="table-hosts-run-info", align=html.TableAlign.center_right))
+            if pgs_info.d_pg_stats is not None:
+                row.new_scrub_err = pgs_info.d_pg_stats.scrub_errors + pgs_info.d_pg_stats.deep_scrub_errors + \
+                    pgs_info.d_pg_stats.shallow_scrub_errors
 
-    # TODO: +hosts_pg_info(cluster, hosts_pgs_info)
+        total_net_err = None
+        for adapter in host.net_adapters.values():
+            if adapter.d_usage is not None:
+                total_net_err = (0 if not total_net_err else total_net_err) + adapter.d_usage.total_err
+
+        if total_net_err is not None:
+            row.net_err = total_net_err
+
+        if host.d_netstat:
+            row.net_err_no_buff = host.d_netstat.dropped_no_space_in_q
+            row.net_budget_over = host.d_netstat.no_budget
+
+    return run_info.html(id="table-hosts-run-info", align=html.TableAlign.center_right)
 
 
 def host_info(host: Host, ceph: CephInfo) -> str:
@@ -293,7 +391,8 @@ def host_info(host: Host, ceph: CephInfo) -> str:
 
 
 @tab("Hosts PG's info")
-def hosts_pg_info(cluster: Cluster, hosts_pgs_info: Dict[str, NodePGStats]) -> html.HTMLTable:
+def show_hosts_pg_info(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
+    hosts_pgs_info = get_nodes_pg_info(ceph)
     header_row = ["Name",
                   "PGs",
                   "User data",
@@ -303,7 +402,7 @@ def hosts_pg_info(cluster: Cluster, hosts_pgs_info: Dict[str, NodePGStats]) -> h
                   "Write B"]
 
     if cluster.has_second_report:
-        header_row.extend(["User data<br>store rate", "Reads<br>ps", "Read Bps", "Writes<br>ps", "Write Bps"])
+        header_row.extend(["User data<br>store rate", "Read<br>iops", "Read Bps", "Write<br>iops", "Write Bps"])
 
     table = html.HTMLTable("table-hosts-pg-info-long" if cluster.has_second_report else "table-hosts-pg-info",
                            header_row, align=html.TableAlign.center_right)
@@ -330,8 +429,59 @@ def hosts_pg_info(cluster: Cluster, hosts_pgs_info: Dict[str, NodePGStats]) -> h
     return table
 
 
+def make_storage_devs_load_table(hosts: Iterable[Host],
+                                 attr: str,
+                                 conversion: Callable[[Union[float, int]], str],
+                                 uptime: bool,
+                                 max_val: Optional[float],
+                                 min_max_val: float) -> html.HTMLTable:
+        non_delta_attrs = {'lat', 'queue_depth'}
+
+        vals: List[List[float]] = []
+
+        for host in hosts:
+            hvals = []
+            if attr in non_delta_attrs:
+                for _, dev in sorted(host.disks.items()):
+                    hvals.append(getattr(dev.logic_dev.usage, attr))
+            else:
+                for _, dev in sorted(host.disks.items()):
+                    if uptime:
+                        hvals.append(getattr(dev.logic_dev.usage, attr) / host.uptime)
+                    else:
+                        hvals.append(getattr(dev.logic_dev.d_usage, attr))
+            vals.append(hvals)
+
+        max_len = max(map(len, vals))
+
+        if max_val is None:
+            max_val = max(min_max_val, max(max(host_vals) for host_vals in vals))
+
+        table = html.HTMLTable(headers=['host'] + ['load'] * max_len, zebra=False, extra_cls=["io_load_in_color"])
+        for host, host_vals in zip(hosts, vals):
+            table.add_cell(host_link(host.name).link)
+            for dev_info, val in zip((dev for _, dev in sorted(host.disks.items())), host_vals):
+                color = "#FFFFFF" if val is None or max_val == 0 else val_to_color(float(val) / max_val)
+
+                if val is None:
+                    s_val = '?'
+                else:
+                    s_val = 0 if val < 1 else conversion(val)
+
+                cell_data = html.rtag.div(dev_info.name + " ", _class="left") + html.rtag.div(s_val, _class="right")
+                if val is not None:
+                    table.add_cell(cell_data, bgcolor=color, sorttable_customkey=str(val))
+                else:
+                    table.add_cell(cell_data, bgcolor=color)
+
+            for i in range(max_len - len(host_vals)):
+                table.add_cell("-", sorttable_customkey='0')
+            table.next_row()
+        return table
+
+
 @perf_info_required
-@tab("Storage devs load2")
+@tab("Storage devs load")
 def show_host_io_load_in_color(cluster: Cluster, uptime: bool) -> str:
     hosts = [host for _, host in sorted(cluster.hosts.items())]
 
@@ -391,11 +541,12 @@ def show_host_network_load_in_color(cluster: Cluster, ceph: CephInfo) -> str:
     ceph_net_count = len(std_nets)
     tables = []
 
-    for io, name in [(send_net_io, "Send (KiBps/Pps)"), (recv_net_io, "Receive (KiBps/Pps)")]:
+    for io, name in [(send_net_io, "Send (Bps/Pps)"), (recv_net_io, "Receive (Bps/Pps)")]:
 
         table = html.HTMLTable(headers=["host", "cluster", "public"] +
                                        ["hw adapter"] * (max_net_count - ceph_net_count),
-                               zebra=False)
+                               zebra=False,
+                               extra_cls=["table-net-load"])
 
         for host_name, net_loads in sorted(io.items()):
             table.add_cell(host_link(host_name).link)
@@ -403,15 +554,15 @@ def show_host_network_load_in_color(cluster: Cluster, ceph: CephInfo) -> str:
                 if load_bps is None:
                     table.add_cell('-', sorttable_customkey="")
                 else:
-                    load_bps = int(load_bps) // 1024
+                    load_bps = int(load_bps)
                     load_pps = int(load_pps)
                     color = "#FFFFFF" if speed is None else val_to_color(float(load_bps) / speed)
-                    load_text = f"{b2ssize(load_bps)}/{b2ssize_10(load_pps)}"
+                    load_text = f"{b2ssize(load_bps)} / {b2ssize_10(load_pps)}"
 
                     if net_name in std_nets:
                         text = load_text
                     else:
-                        text = html.rtag.div(net_name, _class="left") + H.div(load_text, _class="right")
+                        text = html.rtag.div(net_name, _class="left") + html.rtag.div(load_text, _class="right")
 
                     table.add_cell(text, bgcolor=color, sorttable_customkey=str(load_bps))
 
@@ -420,52 +571,7 @@ def show_host_network_load_in_color(cluster: Cluster, ceph: CephInfo) -> str:
 
             table.next_row()
 
-        tables.append(table)
+        tables.append(f"<h4>{name}</h4><br>{table}")
 
-    return "<br>".join(map(str, tables))
-
-
-@tab("Storage devs load")
-def make_storage_devs_load_table(hosts: Iterable[Host],
-                                 attr: str,
-                                 conversion: Callable[[Union[float, int]], str],
-                                 uptime: bool,
-                                 max_val: Optional[float],
-                                 min_max_val: float) -> html.HTMLTable:
-
-        vals = []
-        uptimes = []
-        for host in hosts:
-            vals.append(sorted(host.disks.values(), key=lambda x: x.name))
-            if uptime:
-                uptimes.append(host.uptime)
-
-        max_len = max(map(len, vals))
-
-        if max_val is None:
-            max_val = min_max_val
-            for host_devs in vals:
-                max_val = max(max_val, max(getattr(dev, attr) for dev in host_devs))
-
-        table = html.HTMLTable(headers=['host'] + ['load'] * max_len, zebra=False, extra_cls=["io_load_in_color"])
-        for idx, host_devs in enumerate(vals):
-            table.add_cell(host_link(host_devs[0].logic_dev.hostname).link)
-            for dev_info in host_devs:
-
-                if uptime:
-                    val = getattr(dev_info.logic_dev.usage, attr) / uptimes[idx]
-                else:
-                    val = getattr(dev_info.logic_dev.d_usage, attr)
-
-                color = "#FFFFFF" if val is None or max_val == 0 else val_to_color(float(val) / max_val)
-
-                s_val = 0 if val < 1 else conversion(val)
-
-                cell_data = html.rtag.div(dev_info.name + " ", _class="left") + html.rtag.div(s_val, _class="right")
-                table.add_cell(cell_data, bgcolor=color, sorttable_customkey=str(val))
-
-            for i in range(max_len - len(host_devs)):
-                table.add_cell("-", sorttable_customkey='0')
-            table.next_row()
-        return table
+    return "<br><br><br>".join(tables)
 

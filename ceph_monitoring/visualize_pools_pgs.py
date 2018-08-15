@@ -13,9 +13,9 @@ from .plot_data import get_histo_img
 from .table import Table, count, bytes_sz, ident, idents_list, exact_count
 
 
-@tab("Average pools load")
-def show_pools_average_load(ceph: CephInfo) -> html.HTMLTable:
-    class PoolLoadAvg(Table):
+@tab("Pool's lifetime load")
+def show_pools_lifetime_load(ceph: CephInfo) -> html.HTMLTable:
+    class PoolLoadAvgTable(Table):
         pool = ident()
         read_b = bytes_sz("Read B")
         write_b = bytes_sz("Write B")
@@ -24,7 +24,7 @@ def show_pools_average_load(ceph: CephInfo) -> html.HTMLTable:
         read_per_pg = count("Rd/PG")
         write_per_pg = count("Wr/PG")
 
-    table = PoolLoadAvg()
+    table = PoolLoadAvgTable()
 
     for pool in ceph.pools.values():
         row = table.next_row()
@@ -32,9 +32,37 @@ def show_pools_average_load(ceph: CephInfo) -> html.HTMLTable:
         row.read_b = pool.df.read_bytes
         row.write_b = pool.df.write_bytes
         row.read_ops = pool.df.read_ops
-        row.write = pool.df.write_ops
+        row.write_ops = pool.df.write_ops
         row.read_per_pg = pool.df.read_ops // pool.pg
         row.write_per_pg = pool.df.write_ops // pool.pg
+
+    return table.html(id="table-pools-io", align=html.TableAlign.left_right)
+
+
+@tab("Pool's curr load")
+def show_pools_curr_load(ceph: CephInfo) -> html.HTMLTable:
+    class PoolLoadCurrTable(Table):
+        pool = ident()
+        new_data = bytes_sz("New data")
+        read_b = bytes_sz("Read Bps")
+        write_b = bytes_sz("Write Bps")
+        read_ops = count("Read IOPS")
+        write_ops = count("Write IOPS")
+        read_per_pg = count("Rd/PG")
+        write_per_pg = count("Wr/PG")
+
+    table = PoolLoadCurrTable()
+
+    for pool in ceph.pools.values():
+        row = table.next_row()
+        row.pool = pool.name
+        row.new_data = pool.d_df.size_bytes
+        row.read_b = pool.d_df.read_bytes
+        row.write_b = pool.d_df.write_bytes
+        row.read_ops = pool.d_df.read_ops
+        row.write_ops = pool.d_df.write_ops
+        row.read_per_pg = pool.d_df.read_ops // pool.pg
+        row.write_per_pg = pool.d_df.write_ops // pool.pg
 
     return table.html(id="table-pools-io", align=html.TableAlign.left_right)
 
@@ -52,6 +80,7 @@ def show_pools_info(ceph: CephInfo) -> html.HTMLTable:
         pg = ident()
         osds = exact_count("OSD's")
         space = bytes_sz("Total<br>OSD Space")
+        avg_obj_size = bytes_sz("Obj size")
         pg_recommended = exact_count("PG<br>recc.")
         byte_per_pg = bytes_sz("Bytes/PG")
         obj_per_pg = count("Objs/PG")
@@ -110,6 +139,7 @@ def show_pools_info(ceph: CephInfo) -> html.HTMLTable:
         row.osds = osds_for_rule[pool.crush_rule]
         row.space = total_size_for_rule[pool.crush_rule]
         row.byte_per_pg = pool.df.size_bytes // pool.pg
+        row.avg_obj_size = 0 if pool.df.num_objects == 0 else pool.df.size_bytes // pool.df.num_objects
         row.obj_per_pg = pool.df.num_objects // pool.pg
 
         if ceph.sum_per_osd is not None:

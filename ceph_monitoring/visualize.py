@@ -11,20 +11,22 @@ import argparse
 import subprocess
 import logging.config
 from pathlib import Path
-from typing import List
+from typing import List, Tuple
 
 from cephlib.storage import make_storage, TypedStorage
 
-from .cluster import load_all
-from .plot_data import show_osd_lat_heatmaps
+from .cluster import load_all, fill_usage
 from .obj_links import host_link
 from .report import Report
 
 from .visualize_cluster import show_cluster_summary, show_issues_table, show_primary_settings, show_ruleset_info, \
-                               show_io_status, show_mons_info
-from .visualize_pools_pgs import show_pools_info, show_pg_state, show_pg_size_kde
-from .visualize_hosts import show_hosts_info, show_host_io_load_in_color, show_host_network_load_in_color, host_info
-from .visualize_osds import show_osd_state, show_osd_info, show_osd_perf_info, show_osd_pool_pg_distribution
+                               show_io_status, show_mons_info, show_cluster_err_warn
+from .visualize_pools_pgs import show_pools_info, show_pg_state, show_pg_size_kde, show_pools_lifetime_load, \
+                                 show_pools_curr_load
+from .visualize_hosts import show_hosts_config, show_host_io_load_in_color, show_host_network_load_in_color, \
+                             host_info, show_hosts_status, show_hosts_pg_info
+from .visualize_osds import show_osd_state, show_osd_info, show_osd_perf_info, show_osd_pool_pg_distribution, \
+                            show_osd_pool_agg_pg_distribution
 
 
 logger = logging.getLogger('report')
@@ -60,10 +62,22 @@ def parse_args(argv):
     return p.parse_args(argv[1:])
 
 
+def prepare_path(path: str) -> Tuple[bool, str]:
+    if Path(path).is_file():
+        folder = tempfile.mkdtemp()
+        logger.info("Unpacking %r to temporary folder %r", path, folder)
+        subprocess.call(f"tar -zxvf {path} -C {folder} >/dev/null 2>&1", shell=True)
+        return True, folder
+    elif not Path(path).is_dir():
+        logger.error("Path argument (%r) should be a folder with data or path to archive", path)
+        raise ValueError()
+    else:
+        return False, path
+
+
 def main(argv: List[str]):
     opts = parse_args(argv)
     setup_logging(opts)
-    remove_folder = False
 
     logger.info("Generating report from %r to %r", opts.path, opts.out)
 
@@ -71,17 +85,13 @@ def main(argv: List[str]):
         prof = cProfile.Profile()
         prof.enable()
 
-    if Path(opts.path).is_file():
-        arch_name = opts.path
-        folder = tempfile.mkdtemp()
-        logger.info("Unpacking %r to temporary folder %r", opts.path, folder)
-        remove_folder = True
-        subprocess.call(f"tar -zxvf {arch_name} -C {folder} >/dev/null 2>&1", shell=True)
-    elif not Path(opts.path).is_dir():
-        logger.error("Path argument (%r) should be a folder with data or path to archive", opts.path)
-        return 1
+    remove_d1, d1_path = prepare_path(opts.path)
+
+    if opts.old_path:
+        remove_d2, d2_path = prepare_path(opts.old_path)
     else:
-        folder = opts.path
+        remove_d2 = False
+        d2_path = None
 
     out_p = Path(opts.out)
     index_path = out_p / 'index.html'
@@ -93,8 +103,14 @@ def main(argv: List[str]):
         out_p.mkdir(parents=True, exist_ok=True)
 
     try:
-        logger.info("Loading cluster info into RAM")
-        cluster, ceph = load_all(TypedStorage(make_storage(folder, existing=True)))
+        logger.info("Loading collected data info into RAM")
+        if d2_path:
+            cluster, ceph = load_all(TypedStorage(make_storage(d1_path, existing=True)))
+            cluster2, ceph2 = load_all(TypedStorage(make_storage(d2_path, existing=True)))
+            fill_usage(cluster, cluster2, ceph, ceph2)
+            cluster.has_second_report = True
+        else:
+            cluster, ceph = load_all(TypedStorage(make_storage(d1_path, existing=True)))
         logger.info("Done")
 
         report = Report(opts.name, "index.html")
@@ -104,29 +120,34 @@ def main(argv: List[str]):
             show_issues_table,
             show_primary_settings,
             show_pools_info,
+            show_pools_lifetime_load,
+            show_pools_curr_load,
             show_ruleset_info,
             show_io_status,
-            show_hosts_info,
+            show_hosts_config,
+            show_hosts_status,
+            show_hosts_pg_info,
             show_mons_info,
             show_osd_state,
             show_osd_info,
             show_osd_perf_info,
             show_pg_state,
-            show_osd_pool_pg_distribution,
+            show_cluster_err_warn,
+            (show_osd_pool_agg_pg_distribution if len(ceph.osds) > 20 else show_osd_pool_pg_distribution),
             show_host_io_load_in_color,
             show_host_network_load_in_color,
             # show_osd_used_space_histo,
             # show_osd_pg_histo,
             # show_osd_load,
-            show_osd_lat_heatmaps,
+            # show_osd_lat_heatmaps,
             # show_osd_ops_boxplot,
             show_pg_size_kde
         ]
 
-        params = {"ceph": ceph, "cluster": cluster, "report": report}
+        params = {"ceph": ceph, "cluster": cluster, "report": report, "uptime": not cluster.has_second_report}
 
         for reporter in cluster_reporters:
-            if getattr(reporter, "perf_info_required", False) and not cluster.has_performance_data:
+            if getattr(reporter, "perf_info_required", False) and not cluster.has_second_report:
                 continue
             if getattr(reporter, 'plot', False) and opts.no_plots:
                 continue
@@ -135,12 +156,9 @@ def main(argv: List[str]):
             curr_params = {name: params[name] for name in sig.parameters}
             new_block = reporter(**curr_params)
 
-            if hasattr(reporter, 'report_name'):
+            if new_block:
                 assert 'report' not in sig.parameters
                 report.add_block(reporter.__name__.replace("show_", ""), reporter.report_name, new_block)
-            elif new_block is not None:
-                assert 'report' not in sig.parameters
-                report.add_block(reporter.__name__.replace("show_", ""), *new_block)
 
         for _, host in sorted(cluster.hosts.items()):
             report.add_block(host_link(host.name).id, None, host_info(host, ceph))
@@ -148,8 +166,11 @@ def main(argv: List[str]):
         report.save_to(Path(opts.out), opts.pretty_html, embed=opts.embed)
         logger.info("Report successfully stored to %r", index_path)
     finally:
-        if remove_folder:
-            shutil.rmtree(folder)
+        if remove_d1:
+            shutil.rmtree(d1_path)
+        if remove_d2:
+            assert d2_path
+            shutil.rmtree(d2_path)
 
     if opts.profile:
         prof.disable()  # type: ignore

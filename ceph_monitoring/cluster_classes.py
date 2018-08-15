@@ -141,6 +141,10 @@ class NetStats:
     scarrier: int
     scompressed: int
 
+    @property
+    def total_err(self) -> int:
+        return self.rerrs + self.rdrop + self.serrs + self.sdrop
+
 
 @dataclass
 class NetworkAdapter:
@@ -149,7 +153,7 @@ class NetworkAdapter:
     usage: NetStats
     duplex: Optional[bool] = None
     mtu: Optional[int] = None
-    speed: Optional[str] = None
+    speed: Optional[int] = None
     ips: List[NetAdapterAddr] = field(default_factory=list)
     speed_s: Optional[str] = None
     d_usage: Optional[NetStats] = None
@@ -197,7 +201,7 @@ class BlockUsage:
     io_time: float
     w_io_time: float
     iops: float
-    queue_depth: float
+    queue_depth: Optional[float]
     lat: Optional[float]
 
 
@@ -273,6 +277,16 @@ class Disk:
 
     def __getattr__(self, name):
         return getattr(self.logic_dev, name)
+
+
+@dataclass
+class AggNetStat:
+    """For /proc/net/stat & /proc/net/softnet_stat & Co"""
+    processed: int
+    dropped_no_space_in_q: int
+    no_budget: int
+
+
 # ----------------   CLUSTER  ------------------------------------------------------------------------------------------
 
 
@@ -285,6 +299,8 @@ class Host:
     logic_block_devs: Dict[str, LogicBlockDev]
     hw_info: Optional[LSHWInfo]
     bonds: Dict[str, NetworkBond]
+    netstat: Optional[AggNetStat]
+    d_netstat: Optional[AggNetStat]
 
     uptime: float
     open_tcp_sock: int
@@ -294,8 +310,6 @@ class Host:
     swap_total: int
     swap_free: int
     load_5m: Optional[float]
-
-    perf_monitoring: Any
 
     def find_interface(self, net: IPv4Network) -> Optional[NetworkAdapter]:
         for adapter in self.net_adapters.values():
@@ -311,12 +325,8 @@ class Cluster:
     ip2host: Dict[str, Host]
     report_collected_at_local: str
     report_collected_at_gmt: str
-    has_second_report: bool
-    perf_data: Any = None
-
-    @property
-    def has_performance_data(self) -> bool:
-        return self.perf_data is not None
+    report_collected_at_gmt_s: float
+    has_second_report: bool = False
 
     @property
     def sorted_hosts(self) -> Iterable[Host]:
@@ -390,6 +400,7 @@ class Pool:
     crush_rule: int
     extra: Dict[str, Any]
     df: PoolDF
+    d_df: Optional[PoolDF]
     apps: List[str]
 
 
@@ -653,7 +664,8 @@ class CephOSD:
 
     storage_info: Union[BlueStoreInfo, FileStoreInfo, None]
 
-    osd_perf: Optional[Dict[str, Union[numpy.ndarray, float]]]
+    osd_perf_counters: Optional[Dict[str, Union[numpy.ndarray, float]]]
+    osd_perf_dump: Dict[str, int]
     historic_ops_storage_path: Optional[str]
 
     @property
@@ -700,11 +712,14 @@ class CephInfo:
     settings: AttredDict
 
     pgs: Optional[PGDump]
-    has_second_report: bool
     pgs_second: Optional[PGDump]
 
     has_fs: bool = field(init=False)
     has_bs: bool = field(init=False)
+
+    log_err_warn: List[str]
+
+    nodes_pg_info: Optional[Dict[str, NodePGStats]]
 
     def __post_init__(self):
         self.has_fs = any(isinstance(osd.storage_info, FileStoreInfo) for osd in self.osds.values())
