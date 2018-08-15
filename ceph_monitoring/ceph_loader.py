@@ -316,8 +316,7 @@ class CephLoader:
                         mgrs=None,
                         radosgw=None,
                         crush=crush,
-                        log_err_warn=err_wrn,
-                        nodes_pg_info=None)
+                        log_err_warn=err_wrn)
 
     def load_osd_procinfo(self, osd_id: int) -> OSDProcessInfo:
         cmdln = [i.decode("utf8")

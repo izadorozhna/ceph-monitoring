@@ -1,4 +1,3 @@
-import copy
 import collections
 from typing import Dict, List, Union, Iterable, Callable, Optional, Tuple, Any
 
@@ -7,50 +6,11 @@ from cephlib.common import flatten
 
 from . import html
 from .cluster_classes import Cluster, CephInfo, CephOSD, Host, FileStoreInfo, BlueStoreInfo, Disk, LogicBlockDev,\
-                             OSDPGStats, NodePGStats
+                             OSDPGStats
 from .visualize_utils import tab, perf_info_required, val_to_color, partition_by_len
 from .obj_links import host_link, osd_link, mon_link
 from .groupby import group_by
 from .table import Table, bytes_sz, ident, idents_list, exact_count, extra_columns, float_vl
-
-
-def get_nodes_pg_info(ceph: CephInfo) -> Dict[str, NodePGStats]:
-    if not ceph.nodes_pg_info:
-        ceph.nodes_pg_info = {}
-        for osd in ceph.osds.values():
-            assert osd.pg_stats
-            assert osd.pgs is not None
-            if osd.host.name in ceph.nodes_pg_info:
-                info = ceph.nodes_pg_info[osd.host.name]
-
-                info.pg_stats.shallow_scrub_errors += osd.pg_stats.shallow_scrub_errors
-                info.pg_stats.scrub_errors += osd.pg_stats.scrub_errors
-                info.pg_stats.deep_scrub_errors += osd.pg_stats.deep_scrub_errors
-                info.pg_stats.write_b += osd.pg_stats.write_b
-                info.pg_stats.writes += osd.pg_stats.writes
-                info.pg_stats.read_b += osd.pg_stats.read_b
-                info.pg_stats.reads += osd.pg_stats.reads
-                info.pg_stats.bytes += osd.pg_stats.bytes
-
-                if osd.d_pg_stats:
-                    info.d_pg_stats.shallow_scrub_errors += osd.d_pg_stats.shallow_scrub_errors
-                    info.d_pg_stats.scrub_errors += osd.d_pg_stats.scrub_errors
-                    info.d_pg_stats.deep_scrub_errors += osd.d_pg_stats.deep_scrub_errors
-                    info.d_pg_stats.write_b += osd.d_pg_stats.write_b
-                    info.d_pg_stats.writes += osd.d_pg_stats.writes
-                    info.d_pg_stats.read_b += osd.d_pg_stats.read_b
-                    info.d_pg_stats.reads += osd.d_pg_stats.reads
-                    info.d_pg_stats.bytes += osd.d_pg_stats.bytes
-
-                info.pgs.extend(osd.pgs)
-            else:
-                ceph.nodes_pg_info[osd.host.name] = NodePGStats(name=osd.host.name,
-                                                                pg_stats=copy.copy(osd.pg_stats),
-                                                                d_pg_stats=None if osd.d_pg_stats is None
-                                                                           else copy.copy(osd.d_pg_stats),
-                                                                pgs=osd.pgs[:])
-    return ceph.nodes_pg_info
-
 
 
 @tab("Hosts configs")
@@ -168,8 +128,7 @@ class HostRunInfo(Table):
 
 
 @tab("Hosts status")
-def show_hosts_status(cluster: Cluster, ceph: CephInfo):
-    hosts_pgs_info = get_nodes_pg_info(ceph)
+def show_hosts_status(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
     run_info = HostRunInfo()
     mon_hosts = {mon.host.name for mon in ceph.mons.values()}
 
@@ -206,8 +165,8 @@ def show_hosts_status(cluster: Cluster, ceph: CephInfo):
         all_ip = flatten(adapter.ips for adapter in host.net_adapters.values())
         row.ips = [str(addr.ip) for addr in all_ip if not addr.ip.is_loopback]
 
-        if hosts_pgs_info and host.name in hosts_pgs_info:
-            pgs_info = hosts_pgs_info[host.name]
+        if ceph.nodes_pg_info and host.name in ceph.nodes_pg_info:
+            pgs_info = ceph.nodes_pg_info[host.name]
             row.scrub_err = pgs_info.pg_stats.scrub_errors + pgs_info.pg_stats.deep_scrub_errors + \
                 pgs_info.pg_stats.shallow_scrub_errors
 
@@ -392,7 +351,6 @@ def host_info(host: Host, ceph: CephInfo) -> str:
 
 @tab("Hosts PG's info")
 def show_hosts_pg_info(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
-    hosts_pgs_info = get_nodes_pg_info(ceph)
     header_row = ["Name",
                   "PGs",
                   "User data",
@@ -415,9 +373,9 @@ def show_hosts_pg_info(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
         table.add_cell_b2ssize(stats.write_b)
 
     for host in sorted(cluster.hosts.values(), key=lambda x: x.name):
-        if host.name in hosts_pgs_info:
+        if host.name in ceph.nodes_pg_info:
             table.add_cell(host_link(host.name).link)
-            pgs_info = hosts_pgs_info[host.name]
+            pgs_info = ceph.nodes_pg_info[host.name]
             table.add_cell(str(len(pgs_info.pgs)))
 
             add_pg_stats(pgs_info.pg_stats)
@@ -480,8 +438,8 @@ def make_storage_devs_load_table(hosts: Iterable[Host],
         return table
 
 
-@perf_info_required
 @tab("Storage devs load")
+@perf_info_required
 def show_host_io_load_in_color(cluster: Cluster, uptime: bool) -> str:
     hosts = [host for _, host in sorted(cluster.hosts.items())]
 

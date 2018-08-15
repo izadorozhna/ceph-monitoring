@@ -104,25 +104,20 @@ class OSDLoadTable(Table):
     node = ident()
     pgs = exact_count("PG's")
     open_files = exact_count("open<br>files")
-    ip_conn = exact_count("ip<br>conn")
+    ip_conn = ident("ip<br>conn")
     threads = exact_count("thr")
-    rss = exact_count("RSS")
-    vmm = exact_count("VMM")
+    rss = bytes_sz("RSS")
+    vmm = bytes_sz("VMM")
     cpu_used = seconds("CPU<br>Used, s")
     data = bytes_sz("Total<br>data")
-    read_ops = count("Read<br>ops")
-    read = bytes_sz("Read")
-    write_ops = count("Write<br>ops")
-    write = bytes_sz("Write")
-    bytes_delta = bytes_sz("+Bps")
-    read_iops = count("Read<br>IOPS")
-    read_bps = bytes_sz("Read<br>Bps")
-    write_iops = count("Write<br>IOPS")
-    write_bps = bytes_sz("Write<br>Bps")
+    read_ops = count("Read<br>ops<br>uptime")
+    read = bytes_sz("Read<br>uptime")
+    write_ops = count("Write<br>ops<br>uptime")
+    write = bytes_sz("Write<br>uptime")
 
 
-@tab("OSD load")
-def show_osd_load_table(ceph: CephInfo) -> html.HTMLTable:
+@tab("OSD process info & uptime load")
+def show_osd_proc_info(ceph: CephInfo) -> html.HTMLTable:
 
     table = OSDLoadTable()
 
@@ -138,8 +133,8 @@ def show_osd_load_table(ceph: CephInfo) -> html.HTMLTable:
             row.ip_conn = osd.run_info.opened_socks
             row.threads = osd.run_info.th_count
             row.rss = osd.run_info.vm_rss
-            row.vms = osd.run_info.vm_size
-            row.cpu_used = osd.run_info.cpu_usage
+            row.vmm = osd.run_info.vm_size
+            row.cpu_used = int(osd.run_info.cpu_usage)
 
         row.data = osd.pg_stats.bytes
         row.read_ops = osd.pg_stats.reads
@@ -147,14 +142,7 @@ def show_osd_load_table(ceph: CephInfo) -> html.HTMLTable:
         row.write_ops = osd.pg_stats.writes
         row.write = osd.pg_stats.write_b
 
-        if osd.d_pg_stats:
-            row.bytes_delta = osd.d_pg_stats.bytes
-            row.read_iops = osd.d_pg_stats.reads
-            row.read_bps = osd.d_pg_stats.read_b
-            row.write_iops = osd.d_pg_stats.writes
-            row.write_bps = osd.d_pg_stats.write_b
-
-    return table.html(id="table-osd-load", align=html.TableAlign.left_right)
+    return table.html(id="table-osd-process-info", align=html.TableAlign.left_right)
 
 
 @tab("OSD info")

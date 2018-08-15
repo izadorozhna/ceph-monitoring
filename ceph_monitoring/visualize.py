@@ -26,7 +26,7 @@ from .visualize_pools_pgs import show_pools_info, show_pg_state, show_pg_size_kd
 from .visualize_hosts import show_hosts_config, show_host_io_load_in_color, show_host_network_load_in_color, \
                              host_info, show_hosts_status, show_hosts_pg_info
 from .visualize_osds import show_osd_state, show_osd_info, show_osd_perf_info, show_osd_pool_pg_distribution, \
-                            show_osd_pool_agg_pg_distribution
+                            show_osd_pool_agg_pg_distribution, show_osd_proc_info
 
 
 logger = logging.getLogger('report')
@@ -130,6 +130,7 @@ def main(argv: List[str]):
             show_mons_info,
             show_osd_state,
             show_osd_info,
+            show_osd_proc_info,
             show_osd_perf_info,
             show_pg_state,
             show_cluster_err_warn,

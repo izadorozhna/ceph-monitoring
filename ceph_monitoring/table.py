@@ -121,7 +121,9 @@ def prepare_field(table: 'Table', name: str, val: Any, must_fld: bool = True) ->
         rval = val
 
     if fld.tp:
-        assert isinstance(val, fld.tp) or (fld.allow_none and val is None)
+        assert isinstance(val, fld.tp) or (fld.allow_none and val is None), \
+            f"Field {name} requires type {fld.tp}{' or None' if fld.allow_none else ''} " + \
+            f"but get {val!r} of type {type(val)}"
 
     return rval
 

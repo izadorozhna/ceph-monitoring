@@ -40,7 +40,10 @@ def show_pools_lifetime_load(ceph: CephInfo) -> html.HTMLTable:
 
 
 @tab("Pool's curr load")
-def show_pools_curr_load(ceph: CephInfo) -> html.HTMLTable:
+def show_pools_curr_load(ceph: CephInfo) -> Optional[html.HTMLTable]:
+    if all(pool.d_df is None for pool in ceph.pools.values()):
+        return None
+
     class PoolLoadCurrTable(Table):
         pool = ident()
         new_data = bytes_sz("New data")
@@ -54,15 +57,16 @@ def show_pools_curr_load(ceph: CephInfo) -> html.HTMLTable:
     table = PoolLoadCurrTable()
 
     for pool in ceph.pools.values():
-        row = table.next_row()
-        row.pool = pool.name
-        row.new_data = pool.d_df.size_bytes
-        row.read_b = pool.d_df.read_bytes
-        row.write_b = pool.d_df.write_bytes
-        row.read_ops = pool.d_df.read_ops
-        row.write_ops = pool.d_df.write_ops
-        row.read_per_pg = pool.d_df.read_ops // pool.pg
-        row.write_per_pg = pool.d_df.write_ops // pool.pg
+        if pool.d_df:
+            row = table.next_row()
+            row.pool = pool.name
+            row.new_data = pool.d_df.size_bytes
+            row.read_b = pool.d_df.read_bytes
+            row.write_b = pool.d_df.write_bytes
+            row.read_ops = pool.d_df.read_ops
+            row.write_ops = pool.d_df.write_ops
+            row.read_per_pg = pool.d_df.read_ops // pool.pg
+            row.write_per_pg = pool.d_df.write_ops // pool.pg
 
     return table.html(id="table-pools-io", align=html.TableAlign.left_right)
 

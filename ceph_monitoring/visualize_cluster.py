@@ -59,54 +59,7 @@ def show_cluster_summary(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
     mon_tm = time.mktime(time.strptime(ceph.status.monmap_stat['modified'], "%Y-%m-%d %H:%M:%S.%f"))
     collect_tm = time.mktime(time.strptime(cluster.report_collected_at_local, "%Y-%m-%d %H:%M:%S"))
     t.add_row("Monmap modified in", seconds_to_str(int(collect_tm - mon_tm)))
-
-    # pgmap:
-        # "degraded_objects": 16
-        # "degraded_total": 38761686
-        # "degraded_ratio": 0.000000
-        # "misplaced_objects": 4507
-        # "misplaced_total": 38761686
-        # "misplaced_ratio": 0.000116
-        # "recovering_objects_per_sec": 14
-        # "recovering_bytes_per_sec": 47604609
-        # "recovering_keys_per_sec": 0
-        # "num_objects_recovered": 156
-        # "num_bytes_recovered": 500393209
-        # "num_keys_recovered": 0,
-
-
-    # colors = {
-    #     #     "HEALTH_WARN": "orange",
-    #     #     "HEALTH_ERR": "red"
-    #     # }
-    #     #
-    #     # if len(ceph.status.health_summary) != 0:
-    #     #     mess = html.Doc()
-    #     #
-    #     #     mess.br
-    #     #     mess.br
-    #     #     mess.br
-    #     #     mess.br
-    #     #     mess.br
-    #     #
-    #     #     mess.center.h4("Status messages:")
-    #     #     if ceph.is_luminous:
-    #     #         for check in ceph.status.health_summary.values():
-    #     #             color = colors.get(check["severity"], "black")
-    #     #             mess.font(check['summary']['message'].capitalize(), color=color)
-    #     #             mess.br
-    #     #     else:
-    #     #         for msg in ceph.status.health_summary:
-    #     #             color = colors.get(msg['severity'], "black")
-    #     #             mess.font(msg['summary'].capitalize(), color=color)
-    #     #             mess.br
-    #     #
-    #     #     mess_s = str(mess)
-    #     # else:
-    #     #     mess_s = ""
-
     return t.html(id="table-summary", sortable=False)
-    # return "Status:", str(t) + mess_s
 
 
 def show_issues_table(cluster: Cluster, ceph: CephInfo, report: Report):

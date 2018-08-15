@@ -1,4 +1,5 @@
 import re
+import copy
 import datetime
 from enum import Enum
 from ipaddr import IPv4Address, IPv4Network
@@ -719,7 +720,7 @@ class CephInfo:
 
     log_err_warn: List[str]
 
-    nodes_pg_info: Optional[Dict[str, NodePGStats]]
+    hidden_nodes_pg_info: Optional[Dict[str, NodePGStats]] = field(init=False, default=None)
 
     def __post_init__(self):
         self.has_fs = any(isinstance(osd.storage_info, FileStoreInfo) for osd in self.osds.values())
@@ -742,3 +743,42 @@ class CephInfo:
     @property
     def sorted_osds(self) -> List[CephOSD]:
         return [osd for _, osd in sorted(self.osds.items())]
+
+    @property
+    def nodes_pg_info(self) -> Dict[str, NodePGStats]:
+        if not self.hidden_nodes_pg_info:
+            self.hidden_nodes_pg_info = {}
+            for osd in self.osds.values():
+                assert osd.pg_stats
+                assert osd.pgs is not None
+                if osd.host.name in self.hidden_nodes_pg_info:
+                    info = self.hidden_nodes_pg_info[osd.host.name]
+
+                    info.pg_stats.shallow_scrub_errors += osd.pg_stats.shallow_scrub_errors
+                    info.pg_stats.scrub_errors += osd.pg_stats.scrub_errors
+                    info.pg_stats.deep_scrub_errors += osd.pg_stats.deep_scrub_errors
+                    info.pg_stats.write_b += osd.pg_stats.write_b
+                    info.pg_stats.writes += osd.pg_stats.writes
+                    info.pg_stats.read_b += osd.pg_stats.read_b
+                    info.pg_stats.reads += osd.pg_stats.reads
+                    info.pg_stats.bytes += osd.pg_stats.bytes
+
+                    if osd.d_pg_stats:
+                        info.d_pg_stats.shallow_scrub_errors += osd.d_pg_stats.shallow_scrub_errors
+                        info.d_pg_stats.scrub_errors += osd.d_pg_stats.scrub_errors
+                        info.d_pg_stats.deep_scrub_errors += osd.d_pg_stats.deep_scrub_errors
+                        info.d_pg_stats.write_b += osd.d_pg_stats.write_b
+                        info.d_pg_stats.writes += osd.d_pg_stats.writes
+                        info.d_pg_stats.read_b += osd.d_pg_stats.read_b
+                        info.d_pg_stats.reads += osd.d_pg_stats.reads
+                        info.d_pg_stats.bytes += osd.d_pg_stats.bytes
+
+                    info.pgs.extend(osd.pgs)
+                else:
+                    self.hidden_nodes_pg_info[osd.host.name] = NodePGStats(name=osd.host.name,
+                                                                           pg_stats=copy.copy(osd.pg_stats),
+                                                                           d_pg_stats=None if osd.d_pg_stats is None
+                                                                                      else copy.copy(osd.d_pg_stats),
+                                                                           pgs=osd.pgs[:])
+        return self.hidden_nodes_pg_info
+

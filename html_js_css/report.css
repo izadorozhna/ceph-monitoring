@@ -86,7 +86,7 @@ td { padding: 6px; }
 #table-osd-summary {width: 40%;}
 #table-io-summary {width: 40%;}
 #table-mon-info {width: 60%;}
-#table-hosts-info {width: 60%;}
+#table-hosts-info {width: 80%;}
 #table-hosts-run-info {width: 60%;}
 #table-osd-curr-load {width: 80%;}
 #table-hosts-pg-info-long {width: 60%;}
@@ -97,7 +97,7 @@ td { padding: 6px; }
 #table-pg-per-osd {width: 100%;}
 #table-pg-per-osd-agg {width: 60%;}
 #table-osd-info {width: 100%;}
-#table-osd-load {width: 100%;}
+#table-osd-process-info {width: 80%;}
 #table-issues {width: 80%;}
 #table-rules {width: 100%;}
 #table-settings {width: 60%;}
