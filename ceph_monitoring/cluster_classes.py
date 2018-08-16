@@ -319,6 +319,14 @@ class Host:
                     return adapter
         return None
 
+    def iter_net_addrs(self) -> Iterable[Tuple[NetAdapterAddr, List[NetworkAdapter]]]:
+        """For each ada"""
+        for adapter in self.net_adapters.values():
+            adapter_name = adapter.dev.split(".")[0] if '.' in adapter.dev else adapter.dev
+            sources = self.bonds[adapter_name].sources if adapter_name in self.bonds else [adapter_name]
+            for addr in adapter.ips:
+                yield addr, [self.net_adapters[scr] for scr in sources]
+
 
 @dataclass
 class Cluster:

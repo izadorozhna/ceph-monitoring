@@ -1,11 +1,12 @@
 import time
 import collections
 from pathlib import Path
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Set
 
 import yaml
 
 from cephlib.units import b2ssize_10, b2ssize
+from dataclasses import dataclass, field
 
 from . import table
 from . import html
@@ -325,3 +326,66 @@ def show_ruleset_info(ceph: CephInfo) -> html.HTMLTable:
 @tab("Cluster err/warn")
 def show_cluster_err_warn(ceph: CephInfo) -> str:
     return "<br>".join(ceph.log_err_warn)
+
+
+@tab("Whole cluster net")
+def show_whole_cluster_nets(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
+
+    @dataclass
+    class NetsData:
+        mask: str
+        roles: Set[str] = field(default_factory=set)
+        mtus: Set[int] = field(default_factory=set)
+        speeds: Set[int] = field(default_factory=set)
+        data_transferred: int = 0
+        pps_transferred: int = 0
+        rs_errors: int = 0
+
+    all_nets: Dict[str, NetsData] = {}
+
+    for host in cluster.hosts.values():
+        for addr, hw_adapters in host.iter_net_addrs():
+            if addr.is_routable:
+                dt = all_nets.setdefault(str(addr.net), NetsData(str(addr.net)))
+                for adapter in hw_adapters:
+
+                    if adapter.mtu:
+                        dt.mtus.add(adapter.mtu)
+
+                    if adapter.speed:
+                        dt.speeds.add(adapter.speed)
+
+                    if addr == ceph.cluster_net:
+                        dt.roles.add('ceph-cluster')
+
+                    if addr == ceph.public_net:
+                        dt.roles.add('ceph-public')
+
+                    if adapter.d_usage:
+                        dt.data_transferred += adapter.d_usage.recv_bytes + adapter.d_usage.send_bytes
+                        dt.pps_transferred += adapter.d_usage.recv_packets + adapter.d_usage.send_packets
+                        dt.rs_errors += adapter.d_usage.total_err
+
+
+    class NetsTable(Table):
+        mask = ident()
+        roles = ident()
+        mtus = ident()
+        bw = ident()
+        data_transferred = bytes_sz()
+        pps_transferred = count()
+        rs_errors = count()
+
+    table = NetsTable()
+
+    for _, info in sorted(all_nets.items()):
+        row = table.next_row()
+        row.mask = info.mask
+        row.roles = "<br>".join(info.roles)
+        row.mtus = "<br>".join(map(str, info.mtus))
+        row.bw = "<br>".join(map(b2ssize, info.speeds))
+        row.data_transferred = info.data_transferred
+        row.pps_transferred = info.pps_transferred
+        row.rs_errors = info.rs_errors
+
+    return table.html(id="nets-cluster-table")

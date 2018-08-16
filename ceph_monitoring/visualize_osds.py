@@ -130,7 +130,7 @@ def show_osd_proc_info(ceph: CephInfo) -> html.HTMLTable:
         #  RUN INFO - FD COUNT, TCP CONN, THREADS
         if osd.run_info:
             row.open_files = osd.run_info.fd_count
-            row.ip_conn = osd.run_info.opened_socks
+            row.ip_conn = str(osd.run_info.opened_socks)
             row.threads = osd.run_info.th_count
             row.rss = osd.run_info.vm_rss
             row.vmm = osd.run_info.vm_size

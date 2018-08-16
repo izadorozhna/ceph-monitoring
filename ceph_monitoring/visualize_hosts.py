@@ -466,7 +466,7 @@ def show_host_io_load_in_color(cluster: Cluster, uptime: bool) -> str:
     return "<br>".join(blocks)
 
 
-@tab("Net load")
+@tab("Per host net load")
 @perf_info_required
 def show_host_network_load_in_color(cluster: Cluster, ceph: CephInfo) -> str:
     send_net_io: Dict[str, List[Tuple]] = collections.defaultdict(list)
