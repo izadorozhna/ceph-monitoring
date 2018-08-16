@@ -430,6 +430,7 @@ class Collector:
 
         if code != 0:
             logger.warning("Cmd %s failed %s with code %s", cmd, self.node, code)
+            frmt = 'err'
 
         self.save(path, frmt, code, out, check=False)
         return code, out
