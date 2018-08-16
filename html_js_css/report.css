@@ -102,6 +102,8 @@ td { padding: 6px; }
 #table-rules {width: 100%;}
 #table-settings {width: 60%;}
 #table-pools-io {width: 60%;}
+#table-cluster-nets {width: 60%;}
+#table-cluster-nets-wide {width: 80%;}
 .table-net-load {width: 80%;}
 
 a.link {

@@ -15,7 +15,7 @@ from typing import List, Tuple
 
 from cephlib.storage import make_storage, TypedStorage
 
-from .cluster import load_all, fill_usage
+from .cluster import load_all, fill_usage, fill_cluster_nets_roles
 from .obj_links import host_link
 from .report import Report
 
@@ -111,6 +111,9 @@ def main(argv: List[str]):
             cluster.has_second_report = True
         else:
             cluster, ceph = load_all(TypedStorage(make_storage(d1_path, existing=True)))
+
+        fill_cluster_nets_roles(cluster, ceph)
+
         logger.info("Done")
 
         report = Report(opts.name, "index.html")

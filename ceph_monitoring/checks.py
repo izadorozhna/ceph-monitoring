@@ -620,6 +620,21 @@ def check_filestore_sync_interval(config: CheckConfig, cluster: Cluster, ceph: C
             report.add_result(True, "")
 
 
+@checker(Severity.warning, "Ceph network errors")
+def check_ceph_net_errors(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report: CheckReport):
+    if ceph.has_fs:
+        cfg = config.get('fs_sync_interval', {})
+        max_i = cfg.get("max", 30)
+        min_i = cfg.get("min", 10)
+        real_i = float(ceph.settings.filestore_max_sync_interval)
+        if real_i < min_i or real_i > max_i:
+            msg = f"Filestore sync interval == {real_i} is not in recommended range [{min_i}, {max_i}]"
+            report.add_extra_message(Severity.warning, msg)
+            report.add_result(False, msg)
+        else:
+            report.add_result(True, "")
+
+
 def run_all_checks(config: CheckConfig, cluster: Cluster, ceph: CephInfo) -> List[CheckResult]:
 
     report = CheckReport()

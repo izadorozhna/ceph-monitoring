@@ -576,3 +576,12 @@ def parse_netstats(storage: AttredStorage) -> Optional[AggNetStat]:
         t_no_budget += int(no_budget, 16)
 
     return AggNetStat(t_total, t_drop_no_space, t_no_budget)
+
+
+def fill_cluster_nets_roles(cluster: Cluster, ceph: CephInfo):
+    for net_id, cluster_net_info in cluster.net_data.items():
+        if net_id == str(ceph.cluster_net):
+            cluster_net_info.roles.add('ceph-cluster')
+
+        if net_id == str(ceph.public_net):
+            cluster_net_info.roles.add('ceph-public')

@@ -142,9 +142,33 @@ class NetStats:
     scarrier: int
     scompressed: int
 
+    @classmethod
+    def empty(cls) -> 'NetStats':
+        assert cls is NetStats
+        return NetStats(*([0] * 16))
+
     @property
     def total_err(self) -> int:
         return self.rerrs + self.rdrop + self.serrs + self.sdrop
+
+    def __iadd__(self, other: 'NetStats') -> 'NetStats':
+        self.recv_bytes += other.recv_bytes
+        self.recv_packets += other.recv_packets
+        self.rerrs += other.rerrs
+        self.rdrop += other.rdrop
+        self.rfifo += other.rfifo
+        self.rframe += other.rframe
+        self.rcompressed += other.rcompressed
+        self.rmulticast += other.rmulticast
+        self.send_bytes += other.send_bytes
+        self.send_packets += other.send_packets
+        self.serrs += other.serrs
+        self.sdrop += other.sdrop
+        self.sfifo += other.sfifo
+        self.scolls += other.scolls
+        self.scarrier += other.scarrier
+        self.scompressed += other.scompressed
+        return self
 
 
 @dataclass
@@ -158,6 +182,16 @@ class NetworkAdapter:
     ips: List[NetAdapterAddr] = field(default_factory=list)
     speed_s: Optional[str] = None
     d_usage: Optional[NetStats] = None
+
+
+@dataclass
+class ClusterNetData:
+    mask: str
+    usage: NetStats
+    d_usage: Optional[NetStats] = None
+    roles: Set[str] = field(default_factory=set)
+    mtus: Set[int] = field(default_factory=set)
+    speeds: Set[int] = field(default_factory=set)
 
 
 @dataclass
@@ -336,10 +370,45 @@ class Cluster:
     report_collected_at_gmt: str
     report_collected_at_gmt_s: float
     has_second_report: bool = False
+    _net_data_cache: Optional[Dict[str, ClusterNetData]] = field(default=None, init=False)
 
     @property
     def sorted_hosts(self) -> Iterable[Host]:
         return [host for _, host in sorted(self.hosts.items())]
+
+    @property
+    def net_data(self) -> Dict[str, ClusterNetData]:
+        if self._net_data_cache is None:
+            self._net_data_cache = {}
+            for host in self.hosts.values():
+                for addr, hw_adapters in host.iter_net_addrs():
+                    if addr.is_routable:
+                        net_id = str(addr.net)
+
+                        if net_id not in self._net_data_cache:
+                            nd = ClusterNetData(net_id, NetStats.empty())
+                        else:
+                            nd = self._net_data_cache[net_id]
+
+                        for adapter in hw_adapters:
+
+                            if adapter.mtu:
+                                nd.mtus.add(adapter.mtu)
+
+                            if adapter.speed:
+                                nd.speeds.add(adapter.speed)
+
+                            nd.usage += adapter.usage
+                            if adapter.d_usage:
+                                if not nd.d_usage:
+                                    nd.d_usage = NetStats.empty()
+
+                                nd.d_usage += adapter.d_usage
+
+                        if net_id not in self._net_data_cache:
+                            self._net_data_cache[net_id] = nd
+
+        return self._net_data_cache
 
 
 # ----------------  CEPH -----------------------------------------------------------------------------------------------
