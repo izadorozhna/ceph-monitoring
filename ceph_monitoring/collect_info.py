@@ -875,17 +875,30 @@ class NodeCollector(Collector):
         if not nvme_exists:
             missing.append('nvme-tools')
         else:
-            out_t = self.save_output('nvme_list', 'nvme list -o json', frmt='json')
-            if out_t is not None:
-                code, out = out_t
-                if code == 0:
-                    try:
-                        for dev in json.loads(out)['Devices']:
-                            name = os.path.basename(dev['DevicePath'])
-                            self.save_output('block_devs/{}/nvme_smart_log'.format(name),
-                                             'nvme smart-log {} -o json'.format(dev['DevicePath']), frmt='json')
-                    except:
-                        logging.warning("Failed to process nvme list output")
+            code, _, out = self.node.run('nvme version')
+            if code != 0:
+                ver = 0
+            else:
+                try:
+                    *_, version = out.split()
+                    ver = float(version)
+                except:
+                    ver = 0
+
+            if ver < 1.0:
+                logger.warning("Nvme tool too old %s, at least 1.0 version is required", version)
+            else:
+                out_t = self.save_output('nvme_list', 'nvme list -o json', frmt='json')
+                if out_t is not None:
+                    code, out = out_t
+                    if code == 0:
+                        try:
+                            for dev in json.loads(out)['Devices']:
+                                name = os.path.basename(dev['DevicePath'])
+                                self.save_output('block_devs/{}/nvme_smart_log'.format(name),
+                                                 'nvme smart-log {} -o json'.format(dev['DevicePath']), frmt='json')
+                        except:
+                            logging.warning("Failed to process nvme list output")
 
         if missing:
             logger.warning("%s is not installed on %s", ",".join(missing), self.node.name)
