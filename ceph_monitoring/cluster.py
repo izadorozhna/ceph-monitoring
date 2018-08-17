@@ -6,6 +6,7 @@ import datetime
 from ipaddress import IPv4Network, IPv4Address
 from typing import Iterable, Iterator, Dict, Any, List, Union, Tuple, Optional
 
+import numpy
 import dataclasses
 
 from cephlib.units import ssize2b
@@ -479,6 +480,7 @@ def fill_usage(cluster: Cluster, cluster_old: Cluster, ceph: CephInfo, ceph_old:
 
     dtime = cluster.report_collected_at_gmt_s - cluster_old.report_collected_at_gmt_s
     assert dtime > 1, f"Dtime == {int(dtime)} is less then 1. Check that you provide correct folders for delta"
+    cluster.dtime = dtime
 
     for host_name, host in cluster.hosts.items():
         host_old = cluster_old.hosts[host_name]
@@ -521,10 +523,8 @@ def fill_usage(cluster: Cluster, cluster_old: Cluster, ceph: CephInfo, ceph_old:
 
         assert not host.d_netstat
         if host.netstat and host_old.netstat:
-            host.d_netstat = AggNetStat(processed=host.netstat.processed - host_old.netstat.processed,
-                                        dropped_no_space_in_q=host.netstat.dropped_no_space_in_q -
-                                                              host_old.netstat.dropped_no_space_in_q,
-                                        no_budget=host.netstat.no_budget - host_old.netstat.no_budget)
+            host.d_netstat = host.netstat - host_old.netstat
+
     # pg stats
     for osd in ceph.osds.values():
         assert not osd.d_pg_stats, str(osd.d_pg_stats)
@@ -564,18 +564,8 @@ def fill_usage(cluster: Cluster, cluster_old: Cluster, ceph: CephInfo, ceph_old:
 def parse_netstats(storage: AttredStorage) -> Optional[AggNetStat]:
     if 'softnet_stat' not in storage:
         return None
-
-    t_total = 0
-    t_drop_no_space = 0
-    t_no_budget = 0
-
-    for line in storage.softnet_stat.strip().split():
-        total, drop_no_space, no_budget, *_ = line.split()
-        t_total += int(total, 16)
-        t_drop_no_space += int(drop_no_space, 16)
-        t_no_budget += int(no_budget, 16)
-
-    return AggNetStat(t_total, t_drop_no_space, t_no_budget)
+    lines = storage.softnet_stat.strip().split("\n")
+    return AggNetStat(numpy.array([[int(vl_s, 16) for vl_s in line.split()] for line in lines], dtype=numpy.int64))
 
 
 def fill_cluster_nets_roles(cluster: Cluster, ceph: CephInfo):

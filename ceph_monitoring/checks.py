@@ -620,19 +620,52 @@ def check_filestore_sync_interval(config: CheckConfig, cluster: Cluster, ceph: C
             report.add_result(True, "")
 
 
-@checker(Severity.warning, "Ceph network errors")
+@checker(Severity.warning, "Network errors")
 def check_ceph_net_errors(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report: CheckReport):
-    if ceph.has_fs:
-        cfg = config.get('fs_sync_interval', {})
-        max_i = cfg.get("max", 30)
-        min_i = cfg.get("min", 10)
-        real_i = float(ceph.settings.filestore_max_sync_interval)
-        if real_i < min_i or real_i > max_i:
-            msg = f"Filestore sync interval == {real_i} is not in recommended range [{min_i}, {max_i}]"
-            report.add_extra_message(Severity.warning, msg)
-            report.add_result(False, msg)
-        else:
-            report.add_result(True, "")
+    cfg = config.get('net_issues', {})
+    lost_max = cfg.get("lost_max_prob", 0.0001)
+    no_budget_max_per_hour = cfg.get("no_budget_max_per_hour", 10)
+    max_packets_per_core_diff = cfg.get("max_packets_per_core_diff", 2)
+    failed_hosts = set()
+    for host in cluster.hosts.values():
+        failed = set()
+        for adapter in host.net_adapters.values():
+            usage = adapter.d_usage if adapter.d_usage else adapter.usage
+
+            if usage.rerrs + usage.rdrop > usage.recv_packets * lost_max:
+                failed.add(adapter.dev)
+                continue
+
+            if usage.serrs + usage.sdrop > usage.send_packets * lost_max:
+                failed.add(adapter.dev)
+                continue
+
+        if failed:
+            report.add_extra_message(Severity.warning,
+                                     f"interfaces {', '.join(sorted(failed))} has to hight error rate",
+                                     host_t(host.name))
+            failed_hosts.add(host.name)
+
+        netstat = host.d_netstat if host.d_netstat else host.netstat
+
+        if netstat and netstat.processed_v.max() / (netstat.processed_v.min() + 1) > max_packets_per_core_diff:
+            report.add_extra_message(Severity.warning,
+                                     f"Too high difference (> {max_packets_per_core_diff}) for packets processed " +
+                                     f"on different cores",
+                                     host_t(host.name))
+            failed_hosts.add(host.name)
+
+        dtime = cluster.dtime if host.d_netstat else host.uptime
+        if netstat and netstat.no_budget / dtime / 3600 > no_budget_max_per_hour:
+            report.add_extra_message(Severity.warning,
+                                     f"Too high out-of-net-budget case >{no_budget_max_per_hour} per hour",
+                                     host_t(host.name))
+            failed_hosts.add(host.name)
+
+    if failed_hosts:
+        report.add_result(False, f"Some network errors were found on hosts {', '.join(failed_hosts)}")
+    else:
+        report.add_result(True, "")
 
 
 def run_all_checks(config: CheckConfig, cluster: Cluster, ceph: CephInfo) -> List[CheckResult]:

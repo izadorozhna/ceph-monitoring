@@ -808,8 +808,8 @@ class NodeCollector(Collector):
 
         try:
             self.save_output(
-                "for name in $(lsmod | awk '{print $1}') ; do ; modinfo $name ; echo '-----' ; done",
                 "modinfo_all",
+                "for name in $(lsmod | awk '{print $1}') ; do ; modinfo $name ; echo '-----' ; done",
                 "txt")
         except Exception as exc:
             logger.warning("Failed to list kernel modules info: %r on node %s: %s", "modinfo **", self.node, exc)
@@ -1178,11 +1178,29 @@ class CollectorCoordinator:
                      self.finish_load_collectors]
 
             for func in funcs:
-                for future in [self.executor.submit(run_func) for run_func in func()]:
-                    future.result()
+                futures = []
+                for run_func in func():
+                    future = self.executor.submit(run_func)
+                    future._run__func = run_func
+                    futures.append(future)
+
+                for future in futures:
+                    try:
+                        node = future._run__func.func.__self__.node
+                    except AttributeError:
+                        node = None
+
+                    try:
+                        future.result()
+                    except Exception as exc:
+                        exc.node = node
+                        raise
 
         except Exception as exc:
-            logger.error("Exception happened(see full tb below): %s", exc)
+            if getattr(exc, 'node') is not None:
+                logger.error("Exception happened during collecting from node %s (see full tb below): %s", exc.node, exc)
+            else:
+                logger.error("Exception happened(see full tb below): %s", exc)
             raise
         finally:
             logger.info("Collecting logs and teardown RPC servers")

@@ -317,9 +317,45 @@ class Disk:
 @dataclass
 class AggNetStat:
     """For /proc/net/stat & /proc/net/softnet_stat & Co"""
-    processed: int
-    dropped_no_space_in_q: int
-    no_budget: int
+    raw: numpy.ndarray
+
+    @property
+    def processed_v(self) -> numpy.ndarray:
+        return self.raw[:,0]
+
+    @property
+    def dropped_no_space_in_q_v(self) -> numpy.ndarray:
+        return self.raw[:,1]
+
+    @property
+    def no_budget_v(self) -> numpy.ndarray:
+        return self.raw[:,2]
+
+    @property
+    def processed(self) -> int:
+        return self.processed_v.sum()
+
+    @property
+    def dropped_no_space_in_q(self) -> int:
+        return self.dropped_no_space_in_q_v.sum()
+
+    @property
+    def no_budget(self) -> int:
+        return self.no_budget_v.sum()
+
+    def __add__(self, other: 'AggNetStat') -> 'AggNetStat':
+        return self.__class__(self.raw + other.raw)
+
+    def __iadd__(self, other: 'AggNetStat') -> 'AggNetStat':
+        self.raw += other.raw
+        return self
+
+    def __sub__(self, other: 'AggNetStat') -> 'AggNetStat':
+        return self.__class__(self.raw - other.raw)
+
+    def __isub__(self, other: 'AggNetStat') -> 'AggNetStat':
+        self.raw -= other.raw
+        return self
 
 
 # ----------------   CLUSTER  ------------------------------------------------------------------------------------------
@@ -370,6 +406,7 @@ class Cluster:
     report_collected_at_gmt: str
     report_collected_at_gmt_s: float
     has_second_report: bool = False
+    dtime: Optional[float] = field(default=None, init=False)
     _net_data_cache: Optional[Dict[str, ClusterNetData]] = field(default=None, init=False)
 
     @property

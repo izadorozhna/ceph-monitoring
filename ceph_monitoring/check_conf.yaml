@@ -99,3 +99,7 @@ bs_node_ram:
     min_free: 16
     max_free_: 32
 
+net_issues:
+    lost_max_prob: 0.0
+    no_budget_max_per_hour: 0
+    max_packets_per_core_diff: 2
