@@ -232,16 +232,26 @@ def max_journal_per_device(config: CheckConfig, cluster: Cluster, ceph: CephInfo
 
 
 @checker(Severity.warning, "PG for OSD mast be in configured range")
-def max_journal_per_device(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report: CheckReport):
+def pg_per_osd_count(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report: CheckReport):
     min_pg = config.get("min_pg_per_osd", 100)
     max_pg = config.get("max_pg_per_osd", 400)
+
+    assert min_pg < max_pg
 
     wrong_pg_count = 0
     for osd in ceph.sorted_osds:
         if osd.pg_count < min_pg or osd.pg_count > max_pg:
             wrong_pg_count += 1
+            if osd.pg_count > max_pg:
+                range_lower = (osd.pg_count - max_pg) // 50 * 50 + max_pg
+                range_upper = range_lower + 50
+            else:
+                range_upper = min_pg - (min_pg - osd.pg_count) // 20 * 20
+                range_lower = max(range_upper - 20, 0)
+
             report.add_extra_message(Severity.warning,
-                f"wrong PG count {osd.pg_count}. Recommended to be in range [{min_pg}, {max_pg}]",
+                f"wrong PG count in range [{range_lower}, {range_upper}). " + \
+                f"Recommended to be in range [{min_pg}, {max_pg}]",
                 osd_t(osd.id))
 
     report.add_result(wrong_pg_count == 0, "" if wrong_pg_count == 0 else f"{wrong_pg_count} osd's has wrong PG count")

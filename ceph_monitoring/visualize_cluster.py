@@ -82,16 +82,21 @@ def show_issues_table(cluster: Cluster, ceph: CephInfo, report: Report):
     report.add_block('issues', "Issues:", str(t))
 
     for reporter_id, errs in err_per_test.items():
-        table = html.HTMLTable(headers=["Services", "Error"])
+        table = html.HTMLTable(headers=["Services", "Serv.<br>count", "Error"])
 
         # group errors by services
         err_map: Dict[str, List[str]] = {}
         for err in errs:
             err_map.setdefault(err.message, []).append(str(err.affected_service))
 
-        result_messages = []
+        all_services = set()
         for message, services in err_map.items():
-            table.add_cells("<br>".join(", ".join(items) for items in partition_by_len(services, 80, 1)), message)
+            table.add_cells("<br>".join(", ".join(items) for items in partition_by_len(services, 80, 1)),
+                            str(len(services)), message)
+            all_services.update(services)
+
+        if len(err_map) > 1:
+            table.add_cells("Total affected", str(len(all_services)), "")
 
         report.add_block(err_link(reporter_id).id, None, str(table))
 

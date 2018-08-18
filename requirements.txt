@@ -4,7 +4,6 @@ ifparser
 pandas
 dataclasses
 typing_extensions
-networkx
 beautifulsoup4
 seaborn
 matplotlib

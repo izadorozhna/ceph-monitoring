@@ -19,10 +19,6 @@ function clicked(el_id) {
         window.location.hash = el_id;
         window.scrollTo(0, 0);
     }
-
-    if (el_id === "crush_canvas_div") {
-        draw_crush(root1);
-    }
 }
 
 function onHashChanged() {

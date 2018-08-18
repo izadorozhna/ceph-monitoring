@@ -32,12 +32,12 @@ max_osd_per_class:
     nvme: 8
 
 allowed_schedulers:
-    virtio: [cfg, deadline, noop, null]
-    unknown: [cfg, deadline, noop, null]
-    sata_hdd: [cfg, deadline]
-    sas_hdd: [cfg, deadline]
-    sata_ssd: [cfg, deadline, noop]
-    sas_ssd: [cfg, deadline, noop]
+    virtio: [cfq, deadline, noop, null]
+    unknown: [cfq, deadline, noop, null]
+    sata_hdd: [cfq, deadline]
+    sas_hdd: [cfq, deadline]
+    sata_ssd: [cfq, deadline, noop]
+    sas_ssd: [cfq, deadline, noop]
     nvme: [null]
 
 
@@ -100,6 +100,6 @@ bs_node_ram:
     max_free_: 32
 
 net_issues:
-    lost_max_prob: 0.0
-    no_budget_max_per_hour: 0
-    max_packets_per_core_diff: 2
+    lost_max_prob: 0.0001
+    no_budget_max_per_hour: 10
+    max_packets_per_core_diff: 5
