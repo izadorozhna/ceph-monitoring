@@ -2,3 +2,5 @@
 .idea/
 .mypy_cache/
 venv3/*
+.ipynb_checkpoints/
+Untitled.ipynb
