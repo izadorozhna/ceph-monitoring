@@ -1,5 +1,5 @@
 import weakref
-from typing import Any, Union, Optional, Callable, Iterable, Tuple, List, Dict
+from typing import Any, Union, Optional, Callable, Iterable, Tuple, List, Dict, Type
 from dataclasses import dataclass
 
 from cephlib.units import b2ssize, b2ssize_10
@@ -157,9 +157,13 @@ class Row:
         return Extra(table, self._target__)
 
 
+class Separator:
+    pass
+
+
 class Table:
     def __init__(self) -> None:
-        self.rows: List[Dict[str, Any]] = []
+        self.rows: List[Union[Type[Separator], Dict[str, Any]]] = []
         self.all_names = [name for name, _, _ in self.all_fields()]
 
     @classmethod
@@ -195,6 +199,8 @@ class Table:
         # find all used keys
         all_keys = set()
         for row in self.rows:
+            if row is Separator:
+                continue
             if not set(row.keys()).issubset(names_set):
                 x = 1
             assert set(row.keys()).issubset(names_set), f"{row.keys()} {names_set}"
@@ -208,13 +214,19 @@ class Table:
     def add_row(self, *vals: Any):
         self.rows.append(dict(zip(self.all_names, vals)))
 
-    def html(self, id, **kwargs) -> HTMLTable:
+    def html(self, id=None, **kwargs) -> HTMLTable:
         headers, header_names, types = self.all_headers()
+
+        sortable = kwargs.get('sortable', True)
 
         table = HTMLTable(id, headers=header_names, **kwargs)
 
         for row in self.rows:
             table.next_row()
+            if row is Separator:
+                table.add_row(["----"] * len(headers))
+                continue
+
             for attr_name in headers:
                 val: Any = row.get(attr_name)
                 field = types[attr_name]
@@ -225,13 +237,14 @@ class Table:
                 else:
                     attrs = {}
 
-                if val is None:
-                    table.add_cell(field.null_value, sorttable_customkey=field.null_sort_key, **attrs)
-                else:
-                    if field.custom_sort and 'sorttable_customkey' not in attrs and not field.dont_sort:
-                        table.add_cell(field.converter(val), sorttable_customkey=field.custom_sort(val), **attrs)
-                    else:
-                        table.add_cell(field.converter(val), **attrs)
+                h_val = field.null_value if val is None else field.converter(val)
+                if not field.dont_sort and sortable and 'sorttable_customkey' not in attrs:
+                    attrs['sorttable_customkey'] = field.null_sort_key if val is None else field.custom_sort(val)
+
+                table.add_cell(h_val, **attrs)
 
         return table
+
+    def add_separator(self):
+        self.rows.append(Separator)
 

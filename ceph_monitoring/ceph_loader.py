@@ -1,5 +1,4 @@
 import re
-import copy
 import json
 import logging
 import datetime
@@ -11,14 +10,14 @@ from typing import Dict, Any, List, Union, Tuple, Optional
 import numpy
 import dataclasses
 
-from cephlib.crush import load_crushmap, Crush
+from cephlib.crush import load_crushmap, Crush, Rule, Node
 from cephlib.storage import TypedStorage
 from cephlib.common import AttredDict
 
 from .cluster_classes import (PGDump, PG, PGStatSum, PGId, PGState,
                               Pool, PoolDF, CephVersion, CephMonitor, MonRole, CephStatus, CephStatusCode,
                               Host, CephInfo, CephOSD, OSDStatus, CephVersions, FileStoreInfo, BlueStoreInfo,
-                              OSDProcessInfo, CephDevInfo, OSDPGStats, NodePGStats)
+                              OSDProcessInfo, CephDevInfo, OSDPGStats)
 from .collect_info import parse_proc_file
 
 
@@ -300,7 +299,19 @@ class CephLoader:
         else:
             pgs = None
 
-        return CephInfo(osds=self.load_osds(sum_per_osd, crush, pgs),
+        osdid2rule: Dict[int, List[Tuple[int, float]]] = {}
+        for rule in crush.rules.values():
+            for osd_node in crush.iter_osds_for_rule(rule.id):
+                osdid2rule.setdefault(osd_node.id, []).append((rule.id, osd_node.weight))
+
+        osds = self.load_osds(sum_per_osd, crush, pgs, osdid2rule)
+        osds4rule: Dict[int, List[CephOSD]] = {}
+
+        for osd_id, rule2weights in osdid2rule.items():
+            for rule_id, weight in rule2weights:
+                osds4rule.setdefault(rule_id, []).append(osds[osd_id])
+
+        return CephInfo(osds=osds,
                         mons=load_monitors(self.storage, ceph_master_version, self.hosts),
                         status=load_ceph_status(self.storage, ceph_master_version),
                         version=max(mon_vers.values()),
@@ -316,7 +327,8 @@ class CephLoader:
                         mgrs=None,
                         radosgw=None,
                         crush=crush,
-                        log_err_warn=err_wrn)
+                        log_err_warn=err_wrn,
+                        osds4rule=osds4rule)
 
     def load_osd_procinfo(self, osd_id: int) -> OSDProcessInfo:
         cmdln = [i.decode("utf8")
@@ -363,9 +375,8 @@ class CephLoader:
     def load_osds(self,
                   sum_per_osd: Optional[Dict[int, int]],
                   crush: Crush,
-                  pgs: PGDump = None) -> Dict[int, CephOSD]:
-
-
+                  pgs: Optional[PGDump],
+                  osdid2rule: Dict[int, List[Tuple[int, float]]]) -> Dict[int, CephOSD]:
         try:
             fc = self.storage.txt.master.osd_versions
         except:
@@ -398,11 +409,6 @@ class CephLoader:
                 for osd_id in pg.acting:
                     osd2pg[osd_id].append(pg)
 
-        osd2rules = {}
-        for rule in crush.rules.values():
-            for osd_node in crush.iter_osds_for_rule(rule.id):
-                osd2rules.setdefault(osd_node.id, []).append((rule.name, osd_node.weight))
-
         osd_perf_dump = {int(vals['id']): vals for vals in self.storage.json.master.osd_perf['osd_perf_infos']}
 
         for osd_data in self.storage.json.master.osd_dump['osds']:
@@ -424,9 +430,9 @@ class CephLoader:
             storage_info = self.load_osd_devices(osd_id, host)
 
             #  CRUSH RULES/WEIGHTS
-            crush_info: Dict[str, Tuple[bool, float, float]] = {}
-            for rule, weight in osd2rules.get(osd_id, []):
-                crush_info[rule] = (True, weight, storage_info.data.dev_info.size / (1024 ** 4))
+            crush_rules_weights: Dict[int, float] = {}
+            for rule_id, weight in osdid2rule.get(osd_id, []):
+                crush_rules_weights[rule_id] = weight
 
             pg_stats: Optional[OSDPGStats] = None
             osd_pgs: Optional[List[PG]] = None
@@ -453,14 +459,15 @@ class CephLoader:
                                    public_ip=osd_data['public_addr'].split(":", 1)[0],
                                    reweight=osd_rw_dict[osd_id],
                                    version=osd_versions[osd_id],
-                                   pg_count=None if sum_per_osd is None else sum_per_osd[osd_id],
+                                   pg_count=None if sum_per_osd is None else sum_per_osd.get(osd_id, 0),
                                    used_space=used_space,
                                    free_space=free_space,
                                    free_perc=int((free_space * 100.0) / (free_space + used_space) + 0.5),
                                    host=host,
                                    storage_info=storage_info,
                                    run_info=self.load_osd_procinfo(osd_id) if status != OSDStatus.down else None,
-                                   crush_rules_weights=crush_info,
+                                   expected_weights=storage_info.data.dev_info.size / (1024 ** 4),
+                                   crush_rules_weights=crush_rules_weights,
                                    status=status,
                                    total_space=storage_info.data.dev_info.size,
                                    pgs=osd_pgs,
@@ -475,136 +482,49 @@ class CephLoader:
         return osds
 
 
+def make_rule_tree(rule: Rule, ceph: CephInfo) -> Dict:
+    def fill_data(dt: Dict, node: Node, classname: str = None):
+        dt['name'] = node.name
+        if node.type == 'osd':
+            dt['weight'] = node.weight
+        for ch in node.childs:
+            if ch.type == 'osd' and (ch.class_name != classname and classname is not None):
+                continue
+            nd = {}
+            dt.setdefault('childs', []).append(nd)
+            fill_data(nd, ch, classname)
 
-# def get_osds_info(cluster: Cluster, ceph: CephInfo) -> OSDSInfo:
-#
-#     stor_set = set(osd.storage_type for osd in ceph.osds)
-#     has_bs = OSDStoreType.bluestore in stor_set
-#     has_fs = OSDStoreType.filestore in stor_set
-#     assert has_fs or has_bs
-#
-#     all_vers = get_all_versions(ceph.osds)
-#
-#     osd2pg_map = collections.defaultdict(list)
-#     if ceph.pgs:
-#         for pg in ceph.pgs.pgs.values():
-#             for osd_id in pg.acting:
-#                 osd2pg_map[osd_id].append(pg)
-#
-#     osds: Dict[int, OSDInfo] = {}
-#     for osd in ceph.osds:
-#         disks = cluster.hosts[osd.host.name].disks
-#         storage_devs = cluster.hosts[osd.host.name].storage_devs
-#         assert osd.storage_info is not None
-#
-#         total_b = int(storage_devs[osd.storage_info.data_partition].size)
-#
-#
-#         #  RUN INFO - FD COUNT, TCP CONN, THREADS
-#         if osd.run_info is not None:
-#             pinfo = osd.run_info.procinfo
-#             opened_socks = sum(int(tp.get('inuse', 0)) for tp in pinfo.get('ipv4', {}).values())
-#             opened_socks += sum(int(tp.get('inuse', 0)) for tp in pinfo.get('ipv6', {}).values())
-#
-#             sched = pinfo['sched']
-#             if not sched:
-#                 data = "\n".join(pinfo['sched_raw'].strip().split("\n")[2:])
-#                 sched = parse_proc_file(data, ignore_err=True)
-#
-#             run_info = OSDProcessInfo(fd_count=pinfo["fd_count"],
-#                                       opened_socks=opened_socks,
-#                                       th_count=pinfo["th_count"],
-#                                       cpu_usage=float(sched["se.sum_exec_runtime"]),
-#                                       vm_rss=mem2bytes(pinfo["mem"]["VmRSS"]),
-#                                       vm_size=mem2bytes(pinfo["mem"]["VmSize"]))
-#         else:
-#             run_info = None
-#
-#         #  USER DATA SIZE & TOTAL IO
-#         if ceph.pgs:
-#             pgs = osd2pg_map[osd.id]
-#             bytes = sum(pg.stat_sum.num_bytes for pg in pgs)
-#             reads = sum(pg.stat_sum.num_read for pg in pgs)
-#             read_b = sum(pg.stat_sum.num_read_kb * 1024 for pg in pgs)
-#             writes = sum(pg.stat_sum.num_write for pg in pgs)
-#             write_b = sum(pg.stat_sum.num_write_kb * 1024 for pg in pgs)
-#             scrub_err = sum(pg.stat_sum.num_scrub_errors for pg in pgs)
-#             deep_scrub_err = sum(pg.stat_sum.num_deep_scrub_errors for pg in pgs)
-#             shallow_scrub_err = sum(pg.stat_sum.num_shallow_scrub_errors for pg in pgs)
-#
-#             pg_stats = OSDPGStats(bytes, reads, read_b, writes, write_b, scrub_err, deep_scrub_err, shallow_scrub_err)
-#
-#             # USER DATA SIZE DELTA
-#             if ceph.pgs_second:
-#                 smap = ceph.pgs_second.pgs
-#                 d_bytes = sum(smap[pg.pgid.id].stat_sum.num_bytes for pg in pgs) - bytes
-#                 d_reads = sum(smap[pg.pgid.id].stat_sum.num_read for pg in pgs) - reads
-#                 d_read_b = sum(smap[pg.pgid.id].stat_sum.num_read_kb * 1024 for pg in pgs) - read_b
-#                 d_writes = sum(smap[pg.pgid.id].stat_sum.num_write for pg in pgs) - writes
-#                 d_write_b = sum(smap[pg.pgid.id].stat_sum.num_write_kb * 1024 for pg in pgs) - write_b
-#
-#                 dtime = (ceph.pgs_second.collected_at - ceph.pgs.collected_at).total_seconds()
-#
-#                 d_stats = OSDDStats(d_bytes // dtime,
-#                                     d_reads // dtime,
-#                                     d_read_b // dtime,
-#                                     d_writes // dtime,
-#                                     d_write_b // dtime)
-#             else:
-#                 d_stats = None
-#         else:
-#             d_stats = None
-#             pg_stats = None
-#
-#         # JOURNAL/WAL/DB info
-#         sinfo = osd.storage_info
-#         if isinstance(sinfo, FileStoreInfo):
-#             collocation = sinfo.journal_dev != sinfo.data_dev
-#             on_file = sinfo.journal_partition == sinfo.data_partition
-#             drive_type = disks[sinfo.journal_dev].tp
-#             size = None if collocation and on_file else storage_devs[sinfo.journal_partition].size
-#             fs_info = JInfo(collocation, on_file, drive_type, size)
-#             bs_info = None
-#         else:
-#             assert isinstance(sinfo, BlueStoreInfo)
-#             wal_collocation = sinfo.wal_dev != sinfo.data_dev
-#             wal_drive_type = disks[sinfo.wal_dev].tp
-#
-#             if sinfo.wal_partition not in (sinfo.db_partition, sinfo.data_partition):
-#                 wal_size = int(storage_devs[sinfo.wal_partition].size)
-#             else:
-#                 wal_size = None
-#
-#             db_collocation = sinfo.db_dev != sinfo.data_dev
-#             db_drive_type = disks[sinfo.db_dev].tp
-#             if sinfo.db_partition != sinfo.data_partition:
-#                 db_size = int(storage_devs[sinfo.db_partition].size)
-#             else:
-#                 db_size = None
-#
-#             fs_info = None
-#             bs_info = WALDBInfo(wal_collocation=wal_collocation,
-#                                 wal_drive_type=wal_drive_type,
-#                                 wal_size=wal_size,
-#                                 db_collocation=db_collocation,
-#                                 db_drive_type=db_drive_type,
-#                                 db_size=db_size)
-#
-#         osds[osd.id] = OSDInfo(pgs=osd2pg_map[osd.id] if ceph.pgs else None,
-#                                total_space=total_b,
-#                                used_space=0,
-#                                free_space=0,
-#                                total_user_data=0,
-#                                crush_trees_weights=crush_info,
-#                                data_drive_type=disks[osd.storage_info.data_dev].tp,
-#                                data_part_size=storage_devs[osd.storage_info.data_partition].size,
-#                                j_info=fs_info,
-#                                wal_db_info=bs_info,
-#                                run_info=run_info,
-#                                pg_stats=pg_stats,
-#                                d_stats=d_stats)
-#
-#     return OSDSInfo(has_bs=has_bs, has_fs=has_fs, all_versions=all_vers, largest_ver=max(all_vers),
-#                     osds=osds)
+    data: Dict[str, Any] = {}
+    fill_data(data, ceph.crush.get_root(rule.root), rule.class_name)
 
+    def fill_weights(dt: Dict) -> float:
+        if 'weight' not in dt:
+            if 'childs' in dt:
+                dt['weight'] = sum(fill_weights(ch) for ch in dt['childs'])
+            else:
+                dt['weight'] = 0.0
+        return dt['weight']
 
+    fill_weights(data)
+
+    def drop_zeros(dt: Dict):
+        if 'childs' in dt:
+            dt['childs'] = [ch for ch in dt['childs'] if ch['weight'] > 1e-5]
+            for ch in dt['childs']:
+                drop_zeros(ch)
+            if not dt['childs']:
+                del dt['childs']
+
+    drop_zeros(data)
+
+    def drop_osds(dt: Dict):
+        if 'childs' in dt:
+            dt['childs'] = [ch for ch in dt['childs'] if not ch['name'].startswith("osd.")]
+            for ch in dt['childs']:
+                drop_osds(ch)
+            if not dt['childs']:
+                del dt['childs']
+
+    drop_osds(data)
+
+    return data

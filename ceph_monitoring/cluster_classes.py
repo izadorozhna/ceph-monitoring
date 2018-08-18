@@ -397,6 +397,13 @@ class Host:
             for addr in adapter.ips:
                 yield addr, [self.net_adapters[scr] for scr in sources]
 
+    @property
+    def cpu_cores(self) -> Optional[int]:
+        if self.hw_info:
+            return sum(inf.cores for inf in self.hw_info.cpu_info)
+        else:
+            return None
+
 
 @dataclass
 class Cluster:
@@ -747,6 +754,7 @@ class NodePGStats:
     d_pg_stats: Optional[OSDPGStats]
 
 
+
 @dataclass
 class CephOSD:
     id: int
@@ -767,7 +775,8 @@ class CephOSD:
     total_space: int
 
     pgs: Optional[List[PG]]
-    crush_rules_weights: Dict[str, Tuple[bool, float, float]]
+    expected_weights: float
+    crush_rules_weights: Dict[int, float]
 
     run_info: Optional[OSDProcessInfo]
 
@@ -820,6 +829,7 @@ class CephInfo:
     osd_pool_pg_2d: Dict[int, Dict[str, int]]
     sum_per_pool: Dict[str, int]
     sum_per_osd: Dict[int, int]
+    osds4rule: Dict[int, List[CephOSD]]
 
     crush: Crush
     cluster_net: IPv4Network

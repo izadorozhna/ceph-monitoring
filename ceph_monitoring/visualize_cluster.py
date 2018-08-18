@@ -1,12 +1,11 @@
 import time
 import collections
 from pathlib import Path
-from typing import Callable, Dict, List, Set
+from typing import Callable, Dict, List
 
 import yaml
 
 from cephlib.units import b2ssize_10, b2ssize
-from dataclasses import dataclass, field
 
 from . import table
 from . import html
@@ -286,7 +285,7 @@ def show_ruleset_info(ceph: CephInfo) -> html.HTMLTable:
             row.osd_class = '*' if rule.class_name is None else rule.class_name
 
         row.replication_level = rule.replicated_on
-        osds = [ceph.osds[osd_node.id] for osd_node in ceph.crush.iter_osds_for_rule(rule.id)]
+        osds = ceph.osds4rule[rule.id]
         row.num_osd = len(osds)
         total_sz = sum(osd.free_space + osd.used_space for osd in osds)
         row.size = total_sz

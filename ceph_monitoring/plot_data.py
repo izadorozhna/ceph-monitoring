@@ -50,7 +50,6 @@ def get_img(plt: Any, format: str = 'svg') -> AnyStr:
         img_start = b"<!-- Created with matplotlib (http://matplotlib.org/) -->"
         return bio.getvalue().split(img_start, 1)[1].decode("utf8")
 
-
 def plot_img(func: Callable, *args, **kwargs) -> Any:
     fs = kwargs.pop('figsize', (6, 4))
     tl = kwargs.pop('tight_layout', True)

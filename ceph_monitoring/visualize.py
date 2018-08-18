@@ -12,6 +12,7 @@ import subprocess
 import logging.config
 from pathlib import Path
 from typing import List, Tuple
+import distutils.spawn
 
 from cephlib.storage import make_storage, TypedStorage
 
@@ -19,6 +20,7 @@ from .cluster import load_all, fill_usage, fill_cluster_nets_roles
 from .obj_links import host_link
 from .report import Report
 
+from .ceph_loader import make_rule_tree
 from .visualize_cluster import show_cluster_summary, show_issues_table, show_primary_settings, show_ruleset_info, \
                                show_io_status, show_mons_info, show_cluster_err_warn, show_whole_cluster_nets
 from .visualize_pools_pgs import show_pools_info, show_pg_state, show_pg_size_kde, show_pools_lifetime_load, \
@@ -167,6 +169,33 @@ def main(argv: List[str]):
 
         for _, host in sorted(cluster.hosts.items()):
             report.add_block(host_link(host.name).id, None, host_info(host, ceph))
+
+        # add crush canvas info
+        # report.add_block("crush_canvas_div", None,
+        #                  '<center><canvas id="crush_canvas" width="1700" height="900"></canvas></center>',
+        #                  "Crush canvas")
+        # report.scripts.append(f'const root1 = {json.dumps(data)}')
+
+        neato_path = distutils.spawn.find_executable('neato')
+
+        if not neato_path:
+            logger.warning("Neato tool not found, probably graphviz package is not installed. " +
+                           "Rules graphs would not be generated")
+        else:
+            for rule in ceph.crush.rules.values():
+                data = make_rule_tree(rule, ceph)
+
+                # make dot
+                def make_dot(node) -> List[str]:
+                    yield f'{node["name"].replace("-", "_")} [label="{node["name"]}\\n{node["weight"]:.2f}"];'
+                    for ch in node.get('childs', []):
+                        yield from make_dot(ch)
+                        yield f"{node['name'].replace('-', '_')} -> {ch['name'].replace('-', '_')};"
+
+                dot = "digraph " + rule.name + " {\n    overlap = scale;\n    " + "\n    ".join(make_dot(data)) + "\n}"
+                svg = subprocess.check_output("neato -Tsvg", shell=True, input=dot.encode('utf8')).decode("utf8")
+                svg = svg[svg.index("<svg "):]
+                report.add_block(f"crush_svg_{rule.name}", None, svg, f"Tree for '{rule.name}'")
 
         report.save_to(Path(opts.out), opts.pretty_html, embed=opts.embed)
         logger.info("Report successfully stored to %r", index_path)

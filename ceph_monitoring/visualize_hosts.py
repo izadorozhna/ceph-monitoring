@@ -1,5 +1,5 @@
 import collections
-from typing import Dict, List, Union, Iterable, Callable, Optional, Tuple, Any
+from typing import Dict, List, Union, Iterable, Callable, Optional, Tuple, Set
 
 from cephlib.units import b2ssize, b2ssize_10
 from cephlib.common import flatten
@@ -10,16 +10,16 @@ from .cluster_classes import Cluster, CephInfo, CephOSD, Host, FileStoreInfo, Bl
 from .visualize_utils import tab, perf_info_required, val_to_color, partition_by_len
 from .obj_links import host_link, osd_link, mon_link
 from .groupby import group_by
-from .table import Table, bytes_sz, ident, idents_list, exact_count, extra_columns, float_vl
+from .table import Table, bytes_sz, ident, idents_list, exact_count, extra_columns, float_vl, yes_or_no, count
 
 
 @tab("Hosts configs")
 def show_hosts_config(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
     mon_hosts = {mon.host.name for mon in ceph.mons.values()}
 
-    host2osds = {}
+    host2osds: Dict[str, Set[int]] = {}
     for osd in ceph.osds.values():
-        host2osds.setdefault(osd.host.name, []).append(str(osd.id))
+        host2osds.setdefault(osd.host.name, set()).add(osd.id)
 
     rule2host2osds: Dict[Dict[str, List[CephOSD]]] = {}
     for rule in ceph.crush.rules.values():
@@ -37,7 +37,7 @@ def show_hosts_config(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
             if adapter.is_phy:
                 by_speed[adapter.speed if adapter.speed else 0] += 1
 
-        nets = "<br>".join(f"{b2ssize_10(speed * 8) if speed else '???'} * {count}"
+        nets = "<br>".join(f"{b2ssize_10(speed * 8) if speed else 'Unknown'} * {count}"
                            for speed, count in sorted(by_speed.items()))
 
         cl = host.find_interface(ceph.cluster_net)
@@ -65,22 +65,30 @@ def show_hosts_config(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
             else:
                 client_bw = b2ssize(bw) + (" + unknown" if has_unknown else "")
 
+        root2osd = [rule2host2osds.get(root_name, {}).get(host.name, []) for root_name in root_names]
+        all_osds_in_roots = set()
+        for rosds in root2osd:
+            all_osds_in_roots.update(osd.id for osd in rosds)
+
+        all_osds_no_root = host2osds.get(host.name, set()).difference(all_osds_in_roots)
+
         hosts_configs.append({
             "name": host.name,
-            "osds_count": tuple(len(rule2host2osds[root_name].get(host.name, [])) for root_name in root_names),
+            "osds_count": (len(all_osds_no_root),) + tuple(len(rosds) for rosds in root2osd),
             'has_mon': host.name in mon_hosts,
-            'cores': sum(inf.cores for inf in host.hw_info.cpu_info),
+            'cores': host.cpu_cores,
             'ram': int(host.mem_total / 2 ** 30 + 0.5),
             'net': nets,
             'cluster_bw': cluster_bw,
             'client_bw': client_bw
         })
 
+    assert '_no_root' not in root_names
 
     class HostsConfigTable(Table):
         count = exact_count()
         names = idents_list(chars_per_line=60)
-        osds_count = extra_columns(exact_count(),
+        osds_count = extra_columns(exact_count(), _no_root="osd with<br>no root",
                                    **{root_name: f"osd count for<br>{root_name}" for root_name in root_names})
         has_mon = ident()
         cores = exact_count("CPU<br>Cores+HT")
@@ -99,7 +107,8 @@ def show_hosts_config(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
         row.count = len(items)
         row.names = [(host_link(itm['name']).link, itm['name']) for itm in items]
 
-        for name, vl in zip(root_names, first_item["osds_count"]):
+        row.osds_count['_no_root'] = first_item["osds_count"][0]
+        for name, vl in zip(root_names, first_item["osds_count"][1:]):
             row.osds_count[name] = vl
 
         row.has_mon = 'yes' if first_item["has_mon"] else 'no'
@@ -115,8 +124,10 @@ def show_hosts_config(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
 class HostRunInfo(Table):
     name = ident()
     services = ident(dont_sort=True)
+    ram_total = bytes_sz("RAM<br>total")
     ram_free = bytes_sz("RAM<br>free")
     swap = bytes_sz("Swap<br>used")
+    cores = exact_count("CPU<br>cores")
     load = float_vl("Load avg<br>5m")
     ip_conn = ident("Conn<br>tcp/udp")
     ips = idents_list("IP's")
@@ -157,8 +168,10 @@ def show_hosts_status(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
         row.services = (mon_str + "<br>" if mon_str else "") + '''<font color="#c77405">OSD's</font>: ''' + \
                         "<br>".join(", ".join(chunk) for chunk in partition_by_len(srv_strs, 70, 1))
 
+        row.ram_total = host.mem_total
         row.ram_free = host.mem_free
         row.swap = host.swap_total - host.swap_free
+        row.cores = host.cpu_cores
         row.load = host.load_5m
         row.ip_conn = f"{host.open_tcp_sock}/{host.open_udp_sock}", host.open_tcp_sock + host.open_udp_sock
 
@@ -189,31 +202,30 @@ def show_hosts_status(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
     return run_info.html(id="table-hosts-run-info", align=html.TableAlign.center_right)
 
 
-def host_info(host: Host, ceph: CephInfo) -> str:
+def host_net_table(host: Host, ceph: CephInfo) -> html.HTMLTable:
     cluster_networks = [(ceph.public_net, 'ceph-public'), (ceph.cluster_net, 'ceph-cluster')]
+    class HostInfoNet(Table):
+        name = ident()
+        type = ident()
+        duplex = yes_or_no()
+        mtu = exact_count('MTU')
+        speed = count()
+        ips = ident("IP's")
+        roles = ident()
 
-    doc = html.Doc()
-    doc.center.H3(host.name)
-    doc.br
-    doc.center.H4("Interfaces:")
-    doc.br
-
-    table = html.HTMLTable(headers=["Name", "Type", "Duplex", "MTU", "Speed", "IP's", "Roles"],
-                           extra_cls=["hostinfo-net"],
-                           sortable=False,
-                           align=html.TableAlign.left_center)
+    table = HostInfoNet()
 
     def add_adapter_line(adapter, name):
         tp = "phy" if adapter.is_phy else ('bond' if adapter.dev in host.bonds else 'virt')
         roles = [role for net, role in cluster_networks if any((ip.ip in net) for ip in adapter.ips)]
-        table.add_row(
-            [name,
-             tp,
-             "" if adapter.duplex is None else str(adapter.duplex),
-             "" if adapter.mtu is None else str(adapter.mtu),
-             "" if adapter.speed is None else str(adapter.speed),
-             "<br>".join(f"{ip.ip} / {ip.net.prefixlen}" for ip in adapter.ips),
-             "<br>".join(roles)])
+        row = table.next_row()
+        row.name = name, adapter.dev
+        row.type = tp
+        row.duplex = adapter.duplex
+        row.mtu = adapter.mtu
+        row.speed = adapter.speed
+        row.ips = "<br>".join(f"{ip.ip} / {ip.net.prefixlen}" for ip in adapter.ips)
+        row.roles = "<br>".join(roles)
 
     all_ifaces = set(host.net_adapters)
 
@@ -236,19 +248,19 @@ def host_info(host: Host, ceph: CephInfo) -> str:
                 add_adapter_line(host.net_adapters[adapter_name],
                                  f'<div class="disk-children-2">->{adapter_name}</dev>')
 
-        table.add_row(["-------"] * len(table.headers))
+        table.add_separator()
 
     for name in sorted(all_ifaces):
         if name != 'lo':
             add_adapter_line(host.net_adapters[name], name)
 
-    doc.center(str(table))
-    doc.br
-    doc.center.H4("HW disks:")
-    doc.br
+    return table.html(align=html.TableAlign.left_center, sortable=False, extra_cls=["hostinfo-net"])
 
-    mib_and_mb = lambda x: f"{b2ssize(x)}B / {b2ssize_10(x)}B"
 
+mib_and_mb = lambda x: f"{b2ssize(x)}B / {b2ssize_10(x)}B"
+
+
+def find_stor_roles(host: Host, ceph: CephInfo) -> Tuple[Dict[str, Dict[str, Set[str]]], Dict[str, Set[str]]]:
     stor_roles = collections.defaultdict(lambda: collections.defaultdict(set))
     stor_classes = collections.defaultdict(set)
 
@@ -281,18 +293,34 @@ def host_info(host: Host, ceph: CephInfo) -> str:
                     stor_classes[osd.storage_info.wal.partition_name].add(osd.class_name)
                     stor_classes[osd.storage_info.wal.name].add(osd.class_name)
 
+    return stor_roles, stor_classes
+
+
+def html_roles(name: str, stor_roles: Dict[str, Dict[str, Set[str]]]) -> str:
     order = ['data', 'journal', 'db', 'wal']
+    return "<br>".join(name + ": " + ", ".join(map(str, sorted(ids)))
+                       for name, ids in sorted(stor_roles[name].items(), key=lambda x: order.index(x[0])))
 
-    def html_roles(name: str) -> str:
-        return "<br>".join(name + ": " + ", ".join(map(str, sorted(ids)))
-                           for name, ids in sorted(stor_roles[name].items(), key=lambda x: order.index(x[0])))
 
-    table = html.HTMLTable(headers=["Name", "Type", "Size"] +
-                                   (["Roles"] if ceph.is_luminous else []) +
-                                   ["Classes", "Scheduler", "Model info", "RQ-size", "Phy Sec", "Min IO"],
-                            extra_cls=["hostinfo-disks"])
+def host_disks_table(host: Host, ceph: CephInfo,
+                     stor_roles: Dict[str, Dict[str, Set[str]]], stor_classes: Dict[str, Set[str]]) -> html.HTMLTable:
+
+    class HostInfoDisks(Table):
+        name = ident()
+        type = ident()
+        size = ident()
+        roles = ident(dont_sort=True)
+        classes = ident(dont_sort=True)
+        scheduler = ident()
+        model_info = ident()
+        rq_size = exact_count()
+        phy_sec = bytes_sz()
+        min_io = bytes_sz()
+
+    table = HostInfoDisks()
 
     for _, disk in sorted(host.disks.items()):
+        row = table.next_row()
 
         if disk.hw_model.model and disk.hw_model.vendor:
             model = f"Model: {disk.hw_model.vendor.strip()} / {disk.hw_model.model}"
@@ -303,40 +331,54 @@ def host_info(host: Host, ceph: CephInfo) -> str:
         else:
             model = ""
 
-        serial = "" if disk.hw_model.serial is None else ("Serial: " + disk.hw_model.serial)
+        serial = "" if disk.hw_model.serial is None else f"Serial: {disk.hw_model.serial}"
 
         if model and serial:
-            info = f"{model}<br>{serial}"
+            row.model_info = f"{model}<br>{serial}"
         elif model or serial:
-            info = model if model else serial
+            row.model_info = model if model else serial
         else:
-            info = ""
+            row.model_info = ""
 
-        table.add_row([disk.name, disk.tp.name, mib_and_mb(disk.size),
-                       html_roles(disk.name)] +
-                       (["<br>".join(stor_classes.get(disk.name, []))] if ceph.is_luminous else []) +
-                       ["" if disk.scheduler is None else str(disk.scheduler),
-                       info,
-                       str(disk.rq_size),
-                       str(disk.phy_sec),
-                       str(disk.min_io)])
+        row.name = disk.name
+        row.type = disk.tp.name
+        row.size = mib_and_mb(disk.size), disk.size
+        row.roles  = html_roles(disk.name, stor_roles)
+        if ceph.is_luminous:
+            row.classes = "<br>".join(stor_classes.get(disk.name, []))
+        row.scheduler = disk.scheduler
+        row.rq_size = disk.rq_size
+        row.phy_sec = disk.phy_sec
+        row.min_io = disk.min_io
 
-    doc.center(str(table))
-    doc.br
-    doc.center.H4("Mountable:")
-    doc.br
-    table = html.HTMLTable(headers=["Name", "Size", "Type", "Mountpoint", "Ceph role", "Fs", "Free space", "Label"],
-                           extra_cls=["hostinfo-mountable"], sortable=False)
+    return table.html(extra_cls=["hostinfo-disks"])
+
+
+def host_mountable_table(host: Host, stor_roles: Dict[str, Dict[str, Set[str]]]) -> html.HTMLTable:
+
+    class HostInfoMountable(Table):
+        name = ident()
+        type = ident()
+        size = ident()
+        mountpoint = ident(dont_sort=True)
+        ceph_roles = ident()
+        fs = ident()
+        free_space = ident()
+        label = ident()
+
+    table = HostInfoMountable()
 
     def run_over_children(obj: Union[Disk, LogicBlockDev], level: int):
-        table.add_row([f'<div class="disk-children-{level}">{obj.name}</div>',
-                       mib_and_mb(obj.size),
-                       obj.tp.name if level == 0 else '',
-                       obj.mountpoint if obj.mountpoint else '',
-                       "" if level == 0 else html_roles(obj.name),
-                       obj.fs if obj.fs else '',
-                       mib_and_mb(obj.free_space) if obj.free_space is not None else '',
-                       "" if obj.label is None else obj.label])
+        row = table.next_row()
+
+        row.name = f'<div class="disk-children-{level}">{obj.name}</div>', obj.name
+        row.size = mib_and_mb(obj.size), obj.size
+        row.type = obj.tp.name if level == 0 else ''
+        row.mountpoint = obj.mountpoint
+        row.ceph_roles = "" if level == 0 else html_roles(obj.name, stor_roles)
+        row.fs = obj.fs
+        row.free_space = (mib_and_mb(obj.free_space), obj.free_space) if obj.free_space is not None else ('', 0)
+        row.label  = obj.label
 
         for _, ch in sorted(obj.children.items(), key=lambda x: x[1].partition_num):
             run_over_children(ch, level + 1)
@@ -344,8 +386,27 @@ def host_info(host: Host, ceph: CephInfo) -> str:
     for _, disk in sorted(host.disks.items()):
         run_over_children(disk, 0)
 
-    doc.center(str(table))
+    return table.html(extra_cls=["hostinfo-mountable"], sortable=False)
 
+
+def host_info(host: Host, ceph: CephInfo) -> str:
+    stor_roles, stor_classes = find_stor_roles(host, ceph)
+    doc = html.Doc()
+    doc.center.H3(host.name)
+    doc.br
+    doc.center.H4("Interfaces:")
+    doc.br
+    doc.center(str(host_net_table(host, ceph)))
+    doc.br
+    doc.br
+    doc.center.H4("HW disks:")
+    doc.br
+    doc.center(str(host_disks_table(host, ceph, stor_roles, stor_classes)))
+    doc.br
+    doc.br
+    doc.center.H4("Mountable:")
+    doc.br
+    doc.center(str(host_mountable_table(host, stor_roles)))
     return str(doc)
 
 

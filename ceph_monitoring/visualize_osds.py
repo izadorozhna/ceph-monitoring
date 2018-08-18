@@ -102,6 +102,7 @@ def show_osd_state(ceph: CephInfo) -> html.HTMLTable:
 class OSDLoadTable(Table):
     id = ident()
     node = ident()
+    class_and_rules = ident("Class<br>rules")
     pgs = exact_count("PG's")
     open_files = exact_count("open<br>files")
     ip_conn = ident("ip<br>conn")
@@ -126,6 +127,8 @@ def show_osd_proc_info(ceph: CephInfo) -> html.HTMLTable:
         row.id = osd_link(osd.id).link, osd.id
         row.node = host_link(osd.host.name).link, osd.host.name
         row.pgs = osd.pg_count
+        rule_names = '<br>'.join(ceph.crush.rules[rule_id].name for rule_id in osd.crush_rules_weights)
+        row.class_and_rules = f"{osd.class_name}<br>{rule_names}", osd.class_name
 
         #  RUN INFO - FD COUNT, TCP CONN, THREADS
         if osd.run_info:
@@ -198,12 +201,7 @@ def show_osd_info(ceph: CephInfo) -> html.HTMLTable:
         row.pg = to_html_histo(pgs)
 
         for rule in ceph.crush.rules.values():
-            weights = []
-            for gosd in osds:
-                wok, weight, expected_weight = gosd.crush_rules_weights.get(rule.name, (False, None, None))
-                if wok:
-                    weights.append(weight)
-
+            weights = [tosd.crush_rules_weights[rule.id] for tosd in osds if rule.id in tosd.crush_rules_weights]
             if weights:
                 row.weights[f"w_{rule.name}"] = to_html_histo(weights, show_int=False)
 
@@ -411,6 +409,7 @@ def show_osd_pool_agg_pg_distribution(ceph: CephInfo) -> Optional[html.HTMLTable
     class PGAggTable(Table):
         name = ident()
         pg = exact_count("PG copies")
+        osds = exact_count("OSDS")
         min = ident(dont_sort=True)
         p10 = exact_count("10%")
         p30 = exact_count("30%")
@@ -420,11 +419,13 @@ def show_osd_pool_agg_pg_distribution(ceph: CephInfo) -> Optional[html.HTMLTable
         max = ident(dont_sort=True)
 
     table = PGAggTable()
-    for pool, counts in pool2osd_count.items():
+    for pool_name, counts in pool2osd_count.items():
+        pool = ceph.pools[pool_name]
         counts.sort()
         row = table.next_row()
-        row.name = pool
-        row.pg = ceph.pools[pool].pg * ceph.pools[pool].size
+        row.name = pool_name
+        row.pg = pool.pg * pool.size
+        row.osds = len(ceph.osds4rule[pool.crush_rule])
         row.min = "<br>".join(osd_link(osd_id).link + f": {cnt}" for cnt, osd_id in counts[:5])
         row.max = "<br>".join(osd_link(osd_id).link + f": {cnt}" for cnt, osd_id in counts[-5:])
         row.p10 = counts[int(len(counts) * 0.1)]
