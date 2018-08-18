@@ -170,12 +170,6 @@ def main(argv: List[str]):
         for _, host in sorted(cluster.hosts.items()):
             report.add_block(host_link(host.name).id, None, host_info(host, ceph))
 
-        # add crush canvas info
-        # report.add_block("crush_canvas_div", None,
-        #                  '<center><canvas id="crush_canvas" width="1700" height="900"></canvas></center>',
-        #                  "Crush canvas")
-        # report.scripts.append(f'const root1 = {json.dumps(data)}')
-
         neato_path = distutils.spawn.find_executable('neato')
 
         if not neato_path:
