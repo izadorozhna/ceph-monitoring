@@ -13,6 +13,14 @@ import logging.config
 from pathlib import Path
 from typing import List, Tuple
 
+import matplotlib
+matplotlib.use('Agg')
+del matplotlib
+
+import seaborn
+seaborn.set()
+del seaborn
+
 from cephlib.storage import make_storage, TypedStorage
 
 from .cluster import load_all, fill_usage, fill_cluster_nets_roles

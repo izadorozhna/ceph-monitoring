@@ -14,7 +14,7 @@ from cephlib.crush import load_crushmap, Crush
 from cephlib.storage import TypedStorage
 from cephlib.common import AttredDict
 
-from .cluster_classes import (PGDump, PG, PGStatSum, PGId, PGState,
+from .cluster_classes import (PGDump, PG, PGStatSum, PGId, PGState, StatusRegion,
                               Pool, PoolDF, CephVersion, CephMonitor, MonRole, CephStatus, CephStatusCode,
                               Host, CephInfo, CephOSD, OSDStatus, CephVersions, FileStoreInfo, BlueStoreInfo,
                               OSDProcessInfo, CephDevInfo, OSDPGStats)
@@ -299,7 +299,7 @@ class CephLoader:
                     errors_count = {ERR_MAP[int(err_id)]: cnt for err_id, cnt in log_count_dct.items()}
 
                 try:
-                    status_regions = self.storage.json.mon[f"{mon}/status_regions"]
+                    status_regions = [StatusRegion(*dt) for dt in self.storage.json.mon[f"{mon}/status_regions"]]
                 except KeyError:
                     pass
 

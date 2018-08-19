@@ -815,6 +815,21 @@ class RadosGW:
 
 
 @dataclass
+class StatusRegion:
+    healty: bool
+    begin: int
+    end: int
+
+    # @property
+    # def start_str(self) -> str:
+    #     pass
+    #
+    # @property
+    # def stop_str(self) -> str:
+    #     pass
+
+
+@dataclass
 class CephInfo:
     osds: Dict[int, CephOSD]
     mons: Dict[str, CephMonitor]
@@ -840,7 +855,7 @@ class CephInfo:
     pgs_second: Optional[PGDump]
 
     errors_count: Optional[Dict[str, int]]
-    status_regions: Optional[List[Tuple[bool, int, int]]]
+    status_regions: Optional[List[StatusRegion]]
     log_err_warn: List[str]
 
     has_fs: bool = field(init=False)

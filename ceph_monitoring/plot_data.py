@@ -8,11 +8,7 @@ import distutils.spawn
 from typing_extensions import Protocol
 
 import numpy
-import seaborn
-seaborn.set()
 
-import matplotlib
-matplotlib.use('Agg')
 from matplotlib import pyplot
 
 with warnings.catch_warnings():
@@ -38,7 +34,6 @@ from .report import Report
 logger = logging.getLogger('cephlib.report')
 
 # ----------------------------------------------------------------------------------------------------------------------
-
 
 
 class ReportProto(Protocol):

@@ -1,4 +1,5 @@
 import time
+import datetime
 import collections
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -376,7 +377,7 @@ def show_whole_cluster_nets(cluster: Cluster) -> html.HTMLTable:
 
 
 @tab("Errors summary")
-def show_cluster_err_warn_summary(ceph: CephInfo) -> Optional[html.HTMLTable]:
+def show_cluster_err_warn_summary(ceph: CephInfo) -> Optional[str]:
     if not ceph.errors_count:
         return None
 
@@ -389,4 +390,39 @@ def show_cluster_err_warn_summary(ceph: CephInfo) -> Optional[html.HTMLTable]:
     for name, cnt in sorted(ceph.errors_count.items(), key=lambda x: x[1]):
         table.add_row(name, cnt)
 
-    return table.html(id="table-errors-summary")
+    res = str(table.html(id="table-errors-summary"))
+    health_svg = plot_healthnes(ceph)
+    if health_svg:
+        return f"{res}<br><br><br>{health_svg}"
+    return res
+
+
+def plot_healthnes(ceph: CephInfo, width: int = 1400, height: int = 100) -> Optional[str]:
+    if not ceph.status_regions:
+        return
+
+    begin = ceph.status_regions[0].begin
+    end = ceph.status_regions[-1].end
+
+    if end - begin < 100:
+        return
+
+    total_len = end - begin
+
+    doc = html.Doc()
+
+    begin_s = datetime.datetime.utcfromtimestamp(begin).strftime('%Y-%m-%d %H:%M:%S')
+    end_s = datetime.datetime.utcfromtimestamp(end).strftime('%Y-%m-%d %H:%M:%S')
+
+    doc.center.H4(f"Health status over time. Begin at {begin_s}, ends at {end_s}")
+    doc.br
+    doc.br
+    with doc.svg(width=width, height=height):
+        curr_x = 0
+        for region in ceph.status_regions:
+            color = "#6282EA" if region.healty else "#DD5F4B"
+            end_x = width * (region.end - begin) / total_len
+            doc.rect(x=curr_x, y=0, width=end_x - curr_x, height=height, style=f"fill:{color}")
+            curr_x = end_x
+
+    return str(doc)
