@@ -324,9 +324,10 @@ def load_hdds(hostname: str,
     storage_devs: Dict[str, LogicBlockDev] = {}
     df_info = {info.name: info for info in parse_df(stor_node.df)}
 
-    def walk_all(dsk):
+    def walk_all(dsk: LogicBlockDev):
         if dsk.name in df_info:
             dsk.free_space = df_info[dsk.name].free
+        storage_devs[dsk.name] = dsk
         for ch in dsk.children.values():
             walk_all(ch)
 
@@ -334,9 +335,7 @@ def load_hdds(hostname: str,
 
     for dsk in parse_lsblkjs(jstor_node.lsblkjs['blockdevices'], hostname, diskstats):
         disks[dsk.name] = dsk
-        walk_all(dsk)
-        storage_devs[dsk.name] = dsk.logic_dev
-        storage_devs.update(dsk.children)
+        walk_all(dsk.logic_dev)
 
     return disks, storage_devs
 

@@ -20,6 +20,9 @@ from .table import Table, count, bytes_sz, ident, idents_list, exact_count, to_s
 
 @tab("Status")
 def show_cluster_summary(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
+    """
+    Cluster short summary
+    """
     class SummaryTable(table.Table):
         setting = table.ident()
         value = table.to_str()
@@ -64,6 +67,9 @@ def show_cluster_summary(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
 
 
 def show_issues_table(cluster: Cluster, ceph: CephInfo, report: Report):
+    """
+    Cluster issues
+    """
     config = yaml.load((Path(__file__).parent / 'check_conf.yaml').open())
     check_results = run_all_checks(config, cluster, ceph)
 
@@ -104,6 +110,9 @@ def show_issues_table(cluster: Cluster, ceph: CephInfo, report: Report):
 
 @tab("Current IO Activity")
 def show_io_status(ceph: CephInfo) -> html.HTMLTable:
+    """
+    Current cluster IO load
+    """
     t = html.HTMLTable("table-io-summary", ["IO type", "Value"], sortable=False)
     t.add_cells("Client IO Write MiBps", b2ssize(ceph.status.write_bytes_sec // 2 ** 20))
     t.add_cells("Client IO Write OPS", b2ssize(ceph.status.write_op_per_sec))
@@ -116,9 +125,22 @@ def show_io_status(ceph: CephInfo) -> html.HTMLTable:
     return t
 
 
+class MonitorInfoTable(Table):
+   name = ident(help="Monitor/host name")
+   health = ident(help="Monitor health")
+   role = ident(help="Monitor role")
+   free = ident("Disk free,<br>B (%)", help="Free space on used disk")
+   db_size = bytes_sz("DB size", help="Monitor database size")
+
+
 @tab("Monitors info")
 def show_mons_info(ceph: CephInfo) -> html.HTMLTable:
-    table = html.HTMLTable("table-mon-info", ["Name", "Health", "Role", "Disk free<br>B (%)"])
+    """
+    Monitors info
+    {MonitorInfoTable.help()}
+    """
+
+    table = MonitorInfoTable()
 
     for _, mon in sorted(ceph.mons.items()):
         role = "Unknown"
@@ -138,20 +160,24 @@ def show_mons_info(ceph: CephInfo) -> html.HTMLTable:
             perc = "Unknown"
             sort_by = "0"
         else:
-            perc = f"{b2ssize(mon.kb_avail * 1024)} ({mon.avail_percent})"
+            perc = f"{b2ssize(mon.kb_avail * 1024)} ({mon.avail_percent}%)"
             sort_by = str(mon.kb_avail)
 
-        table.add_cell(mon_link(mon.name).link)
-        table.add_cell(health)
-        table.add_cell(role)
-        table.add_cell(perc, sorttable_customkey=sort_by)
-        table.next_row()
+        row = table.next_row()
+        row.name = mon_link(mon.name).link, mon.name
+        row.health = health, mon.status
+        row.role = role
+        row.free = perc, sort_by
+        row.db_size = mon.database_size
 
-    return table
+    return table.html("table-mon-info")
 
 
 @tab("Settings")
 def show_primary_settings(ceph: CephInfo) -> html.HTMLTable:
+    """
+    Most important cluster settings
+    """
     table = html.HTMLTable("table-settings", ["Name", "Value"])
 
     table.add_cell("<b>Common</b>", colspan="2")
@@ -255,25 +281,30 @@ def show_primary_settings(ceph: CephInfo) -> html.HTMLTable:
     return table
 
 
+class RulesetsTable(Table):
+    rule = ident(help="Rule name")
+    id = exact_count(help="Rule id")
+    pools = idents_list(help="Pools, this rule is used for")
+    osd_class = ident(help='OSD class used int his rule')
+    replication_level = ident("Replication<br>level", help='Level on which this rule doing replication')
+    pg = exact_count("PG", help='Total PG count, managed by this rule')
+    pg_per_osd = exact_count("PG/OSD", help='Average PG per OSD for this rule')
+    num_osd = exact_count("# OSD", help="OSD count, this rule put data to")
+    size = bytes_sz(help="Total space osd all OSD's used by this rule")
+    free_size = to_str(help="Free space on OSD's, managed by this rule (not counting replication)")
+    data = bytes_sz(help="User data size, managed by this rule (without replication)")
+    objs = count(help="Object count managed by this rule")
+    data_disk_sizes = ident(help="Disk sizes, used to store data for this rule on OSD's")
+    disk_types = idents_list(delim='<br>', help="Disk types, used to store data for this rule on OSD's")
+    data_disk_models = idents_list(help="Disk models, used to store data for this rule on OSD's")
+
+
 @tab("Crush rulesets")
 def show_ruleset_info(ceph: CephInfo) -> html.HTMLTable:
-
-    class RulesetsTable(Table):
-        rule = ident()
-        id = exact_count()
-        pools = idents_list()
-        osd_class = ident()
-        replication_level = ident("Replication<br>level")
-        pg = exact_count("PG")
-        pg_per_osd = exact_count("PG/OSD")
-        num_osd = exact_count("# OSD")
-        size = bytes_sz()
-        free_size = to_str()
-        data = bytes_sz()
-        objs = count()
-        data_disk_sizes = ident()
-        disk_types = idents_list(delim='<br>')
-        data_disk_models = idents_list()
+    f"""
+    Crush ruleset info
+    {RulesetsTable.help()}
+    """
 
     pools = {}
     for pool in ceph.pools.values():
@@ -333,22 +364,36 @@ def show_cluster_err_warn(ceph: CephInfo) -> str:
     return "<br>".join(ceph.log_err_warn)
 
 
+class NetsTable(Table):
+    mask = ident(help="Network mask")
+    roles = ident("Ceph roles", help="Ceph roles, this network is used for (client/cluster)")
+    mtus = ident("MTU's", help="MTU's set on adaters of nodes")
+    bw = ident("Interfaces<br>speeds<br>bits per second",
+               help="Interfaces speed settings in Gbps (10**9 bits per second)")
+    data_transferred = bytes_sz("Bytes<br>transferred",
+                                help="Total bytes transferred (send+recv) on all adapters between reports")
+    pps_transferred = count("Packets<br>transferred",
+                            help="Total packets transferred (send+recv) on all adapters between reports")
+    multicast = count("Multicast<br>packets",
+                      help="Total count of multicast packages received on all adapters between reports")
+    total_err = count("Wire<br>errors",
+                      help="Total count if transmit errors between reports during all nodes uptime")
+    data_transferred_uptime = bytes_sz("Bytes<br>transferred<br>uptime",
+                                       help="Bytes transferred during all nodes uptime")
+    pps_transferred_uptime = count("Packets<br>transferred<br>uptime",
+                                   help="Total packets transferred (send+recv) on all " +
+                                        "adapters  during all nodes uptime")
+    multicast_uptime = count("Multicast<br>packets<br>uptime",
+                             help="Total multicast packages received on all adapters during all nodes uptime")
+    total_err_uptime = count("Errors<br>uptime", help="Total error on all adapters during all nodes uptime")
+
+
 @tab("Whole cluster net")
 def show_whole_cluster_nets(cluster: Cluster) -> html.HTMLTable:
-
-    class NetsTable(Table):
-        mask = ident()
-        roles = ident("Ceph roles")
-        mtus = ident("MTU's")
-        bw = ident("Interfaces<br>speeds<br>bits per second")
-        data_transferred = bytes_sz("Bytes<br>transferred")
-        pps_transferred = count("Packets<br>transferred")
-        multicast = count("Multicast<br>packets")
-        total_err = count("Wire<br>errors")
-        data_transferred_uptime = bytes_sz("Bytes<br>transferred<br>uptime")
-        pps_transferred_uptime = count("Packets<br>transferred<br>uptime")
-        multicast_uptime = count("Multicast<br>packets<br>uptime")
-        total_err_uptime = count("Errors<br>uptime")
+    f"""
+    Cluster networks summary
+    {NetsTable.help()}
+    """
 
     table = NetsTable()
     any_d_usage = False
@@ -376,14 +421,20 @@ def show_whole_cluster_nets(cluster: Cluster) -> html.HTMLTable:
     return table.html(id=("table-cluster-nets-wide" if any_d_usage else "table-cluster-nets"))
 
 
+class IssuesTable(Table):
+    type = ident(help="Error short name")
+    count = exact_count(help="Error count of this type")
+
+
 @tab("Errors summary")
 def show_cluster_err_warn_summary(ceph: CephInfo) -> Optional[str]:
+    f"""
+    Cluster logs errors/warnings summary and cluster health timeline
+    {IssuesTable.help()}
+    """
+
     if not ceph.errors_count:
         return None
-
-    class IssuesTable(Table):
-        type = ident()
-        count = exact_count()
 
     table = IssuesTable()
 
@@ -397,7 +448,7 @@ def show_cluster_err_warn_summary(ceph: CephInfo) -> Optional[str]:
     return res
 
 
-def plot_healthnes(ceph: CephInfo, width: int = 1400, height: int = 100) -> Optional[str]:
+def plot_healthnes(ceph: CephInfo, width: int = 1400, height: int = 30) -> Optional[str]:
     if not ceph.status_regions:
         return
 

@@ -761,6 +761,8 @@ class CephDataCollector(Collector):
             self.save_output("config", self.ceph_cmd + "daemon mon.{} config show".format(self.node.mon),
                              frmt='json')
 
+            self.save_output("ceph_var_dirs_size", "du -s /var/lib/ceph/m*")
+
             log_issues = self.node.rpc.sensors.find_issues_in_ceph_log(self.opts.ceph_log_max_lines)
             self.save("ceph_log_wrn_err", "txt", 0, log_issues, check=False)
 

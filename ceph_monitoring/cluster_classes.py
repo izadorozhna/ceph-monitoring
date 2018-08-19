@@ -533,7 +533,7 @@ class CephMonitor:
     host: Host
     role: MonRole
     version: CephVersion
-
+    database_size: Optional[int] = None
     kb_avail: Optional[int] = None
     avail_percent: Optional[int] = None
 

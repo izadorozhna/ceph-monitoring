@@ -19,6 +19,7 @@ class Field:
     null_sort_key: str = ''
     null_value: str = ''
     dont_sort: bool = False
+    help: Optional[str] = None
 
     def __post_init__(self):
         assert self.tp is not tuple
@@ -35,36 +36,36 @@ class ExtraColumns:
         return getattr(self.base_type, name)
 
 
-def count(name: str = None) -> Field:
-    return Field(int, name, b2ssize_10, null_sort_key='-1')
+def count(name: str = None, **kwargs) -> Field:
+    return Field(int, name, b2ssize_10, null_sort_key='-1', **kwargs)
 
 
-def exact_count(name: str = None) -> Field:
-    return Field(int, name, null_sort_key='-1')
+def exact_count(name: str = None, **kwargs) -> Field:
+    return Field(int, name, null_sort_key='-1', **kwargs)
 
 
-def bytes_sz(name: str = None) -> Field:
-    return Field(int, name, b2ssize, null_sort_key='-1')
+def bytes_sz(name: str = None, **kwargs) -> Field:
+    return Field(int, name, b2ssize, null_sort_key='-1', **kwargs)
 
 
 def ident(name: str = None, **kwargs) -> Field:
     return Field(str, name, **kwargs)
 
 
-def to_str(name: str = None) -> Field:
-    return Field(None, name)
+def to_str(name: str = None, **kwargs) -> Field:
+    return Field(None, name, **kwargs)
 
 
-def float_vl(name: str = None) -> Field:
-    return Field((int, float), name, converter=lambda x: f"{x:.2f}")
+def float_vl(name: str = None, **kwargs) -> Field:
+    return Field((int, float), name, converter=lambda x: f"{x:.2f}", **kwargs)
 
 
-def seconds(name: str = None) -> Field:
-    return count(name)
+def seconds(name: str = None, **kwargs) -> Field:
+    return count(name, **kwargs)
 
 
 def idents_list(name: str = None, delim: str = "<br>", chars_per_line: int = None,
-                partition_size: int = 1, part_delim: str = ', ') -> Field:
+                partition_size: int = 1, part_delim: str = ', ', **kwargs) -> Field:
     def converter(vals: List[Any]) -> str:
         if chars_per_line is not None:
             assert partition_size == 1
@@ -79,20 +80,20 @@ def idents_list(name: str = None, delim: str = "<br>", chars_per_line: int = Non
         else:
             assert all(not isinstance(vl, tuple) for vl in vals)
             return delim.join(map(str, vals))
-    return Field(list, name, converter=converter, dont_sort=True)
+    return Field(list, name, converter=converter, dont_sort=True, **kwargs)
 
 
-def ok_or_fail(name: str = None) -> Field:
-    return Field(bool, name, converter=lambda val: ok('ok') if val else fail('fail'))
+def ok_or_fail(name: str = None, **kwargs) -> Field:
+    return Field(bool, name, converter=lambda val: ok('ok') if val else fail('fail'), **kwargs)
 
 
-def yes_or_no(name: str = None, true_fine: bool = True) -> Field:
+def yes_or_no(name: str = None, true_fine: bool = True, **kwargs) -> Field:
     def converter(val: bool) -> str:
         if true_fine:
             return str(ok('yes') if val else fail('no'))
         else:
             return str(fail('yes') if val else ok('no'))
-    return Field(bool, name, converter=converter)
+    return Field(bool, name, converter=converter, **kwargs)
 
 
 def extra_columns(tp: Field, **names: str) -> ExtraColumns:
@@ -248,3 +249,6 @@ class Table:
     def add_separator(self):
         self.rows.append(Separator)
 
+    @classmethod
+    def help(cls) -> str:
+        return ""

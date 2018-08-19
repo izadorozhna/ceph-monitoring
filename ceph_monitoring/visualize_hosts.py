@@ -202,16 +202,18 @@ def show_hosts_status(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
     return run_info.html(id="table-hosts-run-info", align=html.TableAlign.center_right)
 
 
+class HostInfoNet(Table):
+    name = ident()
+    type = ident()
+    duplex = yes_or_no()
+    mtu = exact_count('MTU')
+    speed = count()
+    ips = ident("IP's")
+    roles = ident()
+
+
 def host_net_table(host: Host, ceph: CephInfo) -> html.HTMLTable:
     cluster_networks = [(ceph.public_net, 'ceph-public'), (ceph.cluster_net, 'ceph-cluster')]
-    class HostInfoNet(Table):
-        name = ident()
-        type = ident()
-        duplex = yes_or_no()
-        mtu = exact_count('MTU')
-        speed = count()
-        ips = ident("IP's")
-        roles = ident()
 
     table = HostInfoNet()
 
@@ -302,20 +304,21 @@ def html_roles(name: str, stor_roles: Dict[str, Dict[str, Set[str]]]) -> str:
                        for name, ids in sorted(stor_roles[name].items(), key=lambda x: order.index(x[0])))
 
 
+class HostInfoDisks(Table):
+    name = ident()
+    type = ident()
+    size = ident()
+    roles = ident(dont_sort=True)
+    classes = ident(dont_sort=True)
+    scheduler = ident()
+    model_info = ident()
+    rq_size = exact_count()
+    phy_sec = bytes_sz()
+    min_io = bytes_sz()
+
+
 def host_disks_table(host: Host, ceph: CephInfo,
                      stor_roles: Dict[str, Dict[str, Set[str]]], stor_classes: Dict[str, Set[str]]) -> html.HTMLTable:
-
-    class HostInfoDisks(Table):
-        name = ident()
-        type = ident()
-        size = ident()
-        roles = ident(dont_sort=True)
-        classes = ident(dont_sort=True)
-        scheduler = ident()
-        model_info = ident()
-        rq_size = exact_count()
-        phy_sec = bytes_sz()
-        min_io = bytes_sz()
 
     table = HostInfoDisks()
 
@@ -354,17 +357,18 @@ def host_disks_table(host: Host, ceph: CephInfo,
     return table.html(extra_cls=["hostinfo-disks"])
 
 
-def host_mountable_table(host: Host, stor_roles: Dict[str, Dict[str, Set[str]]]) -> html.HTMLTable:
+class HostInfoMountable(Table):
+    name = ident()
+    type = ident()
+    size = ident()
+    mountpoint = ident(dont_sort=True)
+    ceph_roles = ident()
+    fs = ident()
+    free_space = ident()
+    label = ident()
 
-    class HostInfoMountable(Table):
-        name = ident()
-        type = ident()
-        size = ident()
-        mountpoint = ident(dont_sort=True)
-        ceph_roles = ident()
-        fs = ident()
-        free_space = ident()
-        label = ident()
+
+def host_mountable_table(host: Host, stor_roles: Dict[str, Dict[str, Set[str]]]) -> html.HTMLTable:
 
     table = HostInfoMountable()
 

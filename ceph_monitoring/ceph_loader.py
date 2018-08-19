@@ -138,7 +138,6 @@ def parse_ceph_versions(data: str) -> Dict[str, CephVersion]:
 def load_monitors(storage: TypedStorage, ver: CephVersions, hosts: Dict[str, Host]) -> Dict[str, CephMonitor]:
     if ver >= CephVersions.luminous:
         mons = storage.json.master.status['monmap']['mons']
-        # mon_status = self.storage.json.master.mon_status
     else:
         srv_health = storage.json.master.status['health']['health']['health_services']
         assert len(srv_health) == 1
@@ -164,7 +163,18 @@ def load_monitors(storage: TypedStorage, ver: CephVersions, hosts: Dict[str, Hos
                     if mon_db_root.startswith(info.mountpoint) and len(root) < len(info.mountpoint):
                         assert info.free_space is not None
                         mon.kb_avail = info.free_space
+                        mon.avail_percent = info.free_space * 1024 * 100 // info.size
                         root = info.mountpoint
+
+            try:
+                ceph_var_dirs_size = storage.txt.mon[f'{srv["name"]}/ceph_var_dirs_size']
+            except KeyError:
+                pass
+            else:
+                for ln in ceph_var_dirs_size.strip().split("\n"):
+                    sz, name = ln.split()
+                    if '/var/lib/ceph/mon' == name:
+                        mon.database_size = int(sz)
 
         result[mon.name] = mon
     return result
