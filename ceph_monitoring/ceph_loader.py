@@ -10,7 +10,7 @@ from typing import Dict, Any, List, Union, Tuple, Optional
 import numpy
 import dataclasses
 
-from cephlib.crush import load_crushmap, Crush, Rule, Node
+from cephlib.crush import load_crushmap, Crush
 from cephlib.storage import TypedStorage
 from cephlib.common import AttredDict
 
@@ -43,36 +43,38 @@ def parse_txt_ceph_config(data: str) -> Dict[str, str]:
 
 def parse_pg_dump(data: Dict[str, Any]) -> PGDump:
     pgs: List[PG] = []
+
+    def pgid_conv(vl_any):
+        pool_s, pg_s = vl_any.split(".")
+        return PGId(pool=int(pool_s), num=int(pg_s, 16), id=vl_any)
+
+    def datetime_conv(vl_any):
+        # datetime.datetime.strptime is too slow
+        vl_s, mks = vl_any.split(".")
+        ymd, hms = vl_s.split()
+        return datetime.datetime(*map(int, ymd.split("-")+ hms.split(":")), int(mks))
+
+    name_map = {
+        "stat_sum": lambda x: PGStatSum(**x),
+        "state": lambda x: {getattr(PGState, status) for status in x.split("+")},
+        "pgid": pgid_conv
+    }
+
+    for field in dataclasses.fields(PG):
+        if field.name not in name_map:
+            if field.type is datetime.datetime:
+                name_map[field.name] = datetime_conv
+
+    class TabulaRasa:
+        pass
+
     for pg_info in data['pg_stats']:
-        dt = {}
-        for field in dataclasses.fields(PG):
-            name = field.name
-            tp = field.type
-            vl_any = pg_info[name]
-            if tp is datetime.datetime:
-                vl_s, mks = vl_any.split(".")
-                vl = datetime.datetime.strptime(vl_s, '%Y-%m-%d %H:%M:%S').replace(microsecond=int(mks))
-            elif name in ("reported_epoch", "reported_seq"):
-                vl = int(vl_any)
-            elif tp in (int, str, bool):
-                assert isinstance(vl_any, tp), f"Wrong type for field {name}. Expected {tp} got {type(vl_any)}"
-                vl = vl_any
-            elif name == 'stat_sum':
-                vl = PGStatSum(**pg_info['stat_sum'])
-            elif name in ('acting', 'blocked_by', 'up'):
-                assert isinstance(vl_any, list)
-                assert all(isinstance(vl_elem, int) for vl_elem in vl_any)
-                vl = vl_any
-            elif name == 'state':
-                statuses = vl_any.split("+")
-                vl = set(getattr(PGState, status) for status in statuses)
-            elif name == 'pgid':
-                pool_s, pg_s = vl_any.split(".")
-                vl = PGId(pool=int(pool_s), num=int(pg_s, 16), id=vl_any)
-            else:
-                raise ValueError(f"Unknown field tp {tp} for field {name}")
-            dt[name] = vl
-        pgs.append(PG(**dt))
+        # hack to optimize load speed
+        dt = {k: (name_map[k](v) if k in name_map else v) for k, v in pg_info.items()}
+        tr = TabulaRasa()
+        tr.__dict__ = dt
+        tr.__class__ = PG
+        pgs.append(tr)
 
     datetm, mks = data['stamp'].split(".")
     collected_at = datetime.datetime.strptime(datetm, '%Y-%m-%d %H:%M:%S').replace(microsecond=int(mks))
@@ -222,8 +224,6 @@ def load_osd_perf_data(osd_id: int,
     return osd_perf
 
 
-
-
 def load_pools(storage: TypedStorage, ver: CephVersions) -> Dict[int, Pool]:
     df_info: Dict[int, PoolDF] = {}
 
@@ -254,6 +254,19 @@ def load_pools(storage: TypedStorage, ver: CephVersions) -> Dict[int, Pool]:
     return pools
 
 
+ERR_MAP = {
+    0: "HEALTH_OK",
+    1: "SCRUB_MISSMATCH",
+    2: "CLOCK_SKEW",
+    3: "OSD_DOWN",
+    4: "REDUCED_AVAIL",
+    5: "DEGRADED",
+    6: "NO_ACTIVE_MGR",
+    7: "SLOW_REQUESTS",
+    8: "MON_ELECTION"
+}
+
+
 class CephLoader:
     def __init__(self,
                  storage: TypedStorage,
@@ -271,9 +284,25 @@ class CephLoader:
         settings = AttredDict(**parse_txt_ceph_config(self.storage.txt.master.default_config))
 
         err_wrn = []
+        errors_count = None
+        status_regions = None
+
         for is_file, mon in self.storage.txt.mon:
             if not is_file:
                 err_wrn = self.storage.txt.mon[f"{mon}/ceph_log_wrn_err"].split("\n")
+                try:
+                    log_count_dct = self.storage.json.mon[f"{mon}/log_issues_count"]
+                except KeyError:
+                    log_count_dct = None
+
+                if log_count_dct:
+                    errors_count = {ERR_MAP[int(err_id)]: cnt for err_id, cnt in log_count_dct.items()}
+
+                try:
+                    status_regions = self.storage.json.mon[f"{mon}/status_regions"]
+                except KeyError:
+                    pass
+
                 break
 
         mon_vers = parse_ceph_versions(self.storage.txt.master.mon_versions)
@@ -299,6 +328,8 @@ class CephLoader:
         else:
             pgs = None
 
+        logger.debug("Preparing PG/osd caches")
+
         osdid2rule: Dict[int, List[Tuple[int, float]]] = {}
         for rule in crush.rules.values():
             for osd_node in crush.iter_osds_for_rule(rule.id):
@@ -310,6 +341,8 @@ class CephLoader:
         for osd_id, rule2weights in osdid2rule.items():
             for rule_id, weight in rule2weights:
                 osds4rule.setdefault(rule_id, []).append(osds[osd_id])
+
+        logger.debug("Loading monitors/status")
 
         return CephInfo(osds=osds,
                         mons=load_monitors(self.storage, ceph_master_version, self.hosts),
@@ -328,7 +361,9 @@ class CephLoader:
                         radosgw=None,
                         crush=crush,
                         log_err_warn=err_wrn,
-                        osds4rule=osds4rule)
+                        osds4rule=osds4rule,
+                        errors_count=errors_count,
+                        status_regions=status_regions)
 
     def load_osd_procinfo(self, osd_id: int) -> OSDProcessInfo:
         cmdln = [i.decode("utf8")
@@ -477,6 +512,5 @@ class CephLoader:
                                    osd_perf_counters=perf_cntrs,
                                    osd_perf_dump=osd_perf_dump[osd_id]['perf_stats'],
                                    class_name=crush.nodes_map[f'osd.{osd_id}'].class_name)
-
 
         return osds

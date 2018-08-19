@@ -5,9 +5,6 @@ from typing import List, Dict, IO
 
 import numpy
 
-import seaborn
-seaborn.set()
-
 from cephlib.sensors_rpc_plugin import CephOp
 from cephlib.plot import auto_edges
 

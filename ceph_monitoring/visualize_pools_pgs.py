@@ -1,5 +1,5 @@
 import collections
-from typing import Dict, Optional, Tuple, Any
+from typing import Dict, Optional
 
 import numpy
 
@@ -187,10 +187,9 @@ def show_pg_state(ceph: CephInfo) -> html.HTMLTable:
 
 
 @plot
-@tab("PG's sizes")
+@tab("PG's sizes histo")
 def show_pg_size_kde(ceph: CephInfo) -> Optional[str]:
     if ceph.pgs:
-        vals = [pg.stat_sum.num_bytes for pg in ceph.pgs.pgs.values()]
-        # return "PG sizes", get_kde_img(numpy.array(vals))
-        return get_histo_img(numpy.array(vals))
+        vals = [pg.stat_sum.num_bytes / 2 ** 30 for pg in ceph.pgs.pgs.values()]
+        return get_histo_img(numpy.array(vals), xlabel="PG size GiB", y_ticks=True)
     return None

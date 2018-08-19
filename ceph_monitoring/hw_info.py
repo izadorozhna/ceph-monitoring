@@ -10,7 +10,6 @@ def get_data(rr: str, data: str) -> str:
     return re.search("(?ims)" + rr, data).group(0)  # type: ignore
 
 
-
 def parse_hw_info(lshw_out: str) -> Optional[LSHWInfo]:
     lshw_et = ET.fromstring(lshw_out)
 

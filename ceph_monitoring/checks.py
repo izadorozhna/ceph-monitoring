@@ -1,6 +1,6 @@
 import collections
 from enum import Enum
-from typing import List, Dict, Callable, Any, Sequence
+from typing import List, Dict, Callable, Any
 from dataclasses import dataclass
 
 from .cluster_classes import Cluster, CephInfo, FileStoreInfo, BlueStoreInfo, DiskType
@@ -126,7 +126,6 @@ def checker(severity: Severity, description: str, *readmeurls: str) -> Callable[
         ALL_CHECKS.append(func)
         return func
     return closure
-
 
 
 @checker(Severity.warning, "Scrub errors count")

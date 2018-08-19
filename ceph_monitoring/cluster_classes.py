@@ -839,10 +839,12 @@ class CephInfo:
     pgs: Optional[PGDump]
     pgs_second: Optional[PGDump]
 
+    errors_count: Optional[Dict[str, int]]
+    status_regions: Optional[List[Tuple[bool, int, int]]]
+    log_err_warn: List[str]
+
     has_fs: bool = field(init=False)
     has_bs: bool = field(init=False)
-
-    log_err_warn: List[str]
 
     hidden_nodes_pg_info: Optional[Dict[str, NodePGStats]] = field(init=False, default=None)
 

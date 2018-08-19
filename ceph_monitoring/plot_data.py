@@ -8,6 +8,8 @@ import distutils.spawn
 from typing_extensions import Protocol
 
 import numpy
+import seaborn
+seaborn.set()
 
 import matplotlib
 matplotlib.use('Agg')
@@ -25,7 +27,7 @@ from .cluster import Cluster
 from .ceph_loader import NO_VALUE, CephInfo
 from .osd_ops import calc_stages_time, iter_ceph_ops, ALL_STAGES
 from .perf_parser import STAGES_PRINTABLE_NAMES
-from .visualize_utils import perf_info_required, plot
+from .visualize_utils import perf_info_required, plot, tab
 from .report import Report
 
 # from .resource_usage import get_hdd_resource_usage
@@ -55,7 +57,8 @@ def get_img(plt: Any, format: str = 'svg') -> AnyStr:
         img_start = b"<!-- Created with matplotlib (http://matplotlib.org/) -->"
         return bio.getvalue().split(img_start, 1)[1].decode("utf8")
 
-def plot_img(func: Callable, *args, **kwargs) -> Any:
+
+def plot_img(func: Callable, *args, **kwargs) -> str:
     fs = kwargs.pop('figsize', (6, 4))
     tl = kwargs.pop('tight_layout', True)
 
@@ -70,16 +73,17 @@ def plot_img(func: Callable, *args, **kwargs) -> Any:
 
 
 @plot
-def show_osd_used_space_histo(ceph: CephInfo) -> Optional[Tuple[str, Any]]:
+@tab("OSD used space")
+def show_osd_used_space_histo(ceph: CephInfo) -> Optional[AnyStr]:
     min_osd: int = 3
-    vals = [(100 - osd.free_perc) for osd in ceph.osds if osd.free_perc is not None]
+    vals = [(100 - osd.free_perc) for osd in ceph.osds.values() if osd.free_perc is not None]
     if len(vals) >= min_osd:
-        img = plot_img(plot_histo, numpy.array(vals), left=0, right=100, ax=True)
-        return "OSD used space (GiB)", img
+        return plot_img(plot_histo, numpy.array(vals), left=0, right=100, ax=True,
+                        xlabel="OSD used space GiB", y_ticks=True)
 
 
-def get_histo_img(vals: numpy.ndarray) -> str:
-    return plot_img(plot_histo, vals, left=min(vals) * 0.9, right=max(vals) * 1.1, ax=True)
+def get_histo_img(vals: numpy.ndarray, **kwargs) -> str:
+    return plot_img(plot_histo, vals, left=min(vals) * 0.9, right=max(vals) * 1.1, ax=True, **kwargs)
 
 
 def get_kde_img(vals: numpy.ndarray) -> str:
@@ -211,14 +215,30 @@ def show_osd_ops_boxplot(ceph: CephInfo) -> Tuple[str, Any]:
 def plot_crush_rules(ceph: CephInfo, report: Report):
     neato_path = distutils.spawn.find_executable('neato')
 
-    colormap = numpy.array([(0.8584083044982699, 0.9134486735870818, 0.9645674740484429),
-                            (0.7309496347558632, 0.8394771241830065, 0.9213225682429834),
-                            (0.5356862745098039, 0.746082276047674, 0.8642522106881968),
-                            (0.32628988850442137, 0.6186236063052672, 0.802798923490965),
-                            (0.16696655132641292, 0.48069204152249134, 0.7291503267973857),
-                            (0.044059976931949255, 0.3338869665513264, 0.6244521337946944)])
+    colormap_host = (numpy.array([(0.5274894271434064, 0.304959630911188, 0.03729334871203383),
+                                 (0.7098039215686275, 0.46897347174163784, 0.14955786236063054),
+                                 (0.8376009227220299, 0.6858131487889272, 0.39792387543252583),
+                                 (0.9328719723183391, 0.8572087658592848, 0.6678200692041522),
+                                 (0.9625528642829682, 0.9377931564782775, 0.8723567858515955),
+                                 (0.8794309880815072, 0.9413302575932334, 0.932487504805844),
+                                 (0.6821222606689737, 0.8775086505190313, 0.8482122260668975),
+                                 (0.415455594002307, 0.7416378316032297, 0.6991926182237602),
+                                 (0.16785851595540177, 0.554479046520569, 0.5231064975009612),
+                                 (0.003537101114955786, 0.3838523644752019, 0.35094194540561324)]
+                                 ) * 256).astype(numpy.uint8)
 
-    colormap_i = (colormap * 256).astype(numpy.uint8)
+    colormap_repl = (numpy.array([(0.11864667435601693, 0.37923875432525955, 0.6456747404844292),
+                                  (0.2366013071895425, 0.5418685121107266, 0.7470203767781622),
+                                  (0.481430219146482, 0.714878892733564, 0.8394463667820069),
+                                  (0.7324106113033448, 0.8537485582468282, 0.9162629757785467),
+                                  (0.9014225297962322, 0.9367935409457901, 0.9562475970780469),
+                                  (0.9792387543252595, 0.9191080353710112, 0.8837370242214534),
+                                  (0.9797001153402538, 0.7840830449826992, 0.6848904267589392),
+                                  (0.9222606689734718, 0.5674740484429068, 0.4486735870818917),
+                                  (0.8115340253748559, 0.32110726643598614, 0.27581699346405225),
+                                  (0.6692041522491349, 0.08489042675893888, 0.16401384083044984)]
+                                 ) * 256).astype(numpy.uint8)
+
 
     if not neato_path:
         logger.warning("Neato tool not found, probably graphviz package is not installed. " +
@@ -229,23 +249,36 @@ def plot_crush_rules(ceph: CephInfo, report: Report):
             if not root_node:
                 continue
 
-            max_node_w = max(node.weight for node in root_node.iter_nodes('host'))
+            max_host_w = max(node.weight for node in root_node.iter_nodes('host'))
+            min_host_w = min(min(node.weight for node in root_node.iter_nodes('host')), max_host_w * 0.6)
+            max_repr_w = max(node.weight for node in root_node.iter_nodes(rule.replicated_on))
+            min_repr_w = min(min(node.weight for node in root_node.iter_nodes(rule.replicated_on)), max_repr_w * 0.6)
 
-            def get_color(w: float) -> Tuple[int, int, int]:
-                if abs(w - max_node_w) < 1e-5:
-                    return tuple(colormap_i[-1])
-                idx = w / max_node_w * (len(colormap) - 1)
+            def get_color(w: float, is_host: bool) -> Tuple[int, int, int]:
+                cm = colormap_host if is_host else colormap_repl
+                max_w = max_host_w if is_host else max_repr_w
+                min_w = min_host_w if is_host else min_repr_w
+
+                if abs(w - max_w) < 1e-5:
+                    return tuple(cm[-1])
+
+                idx = (w - min_w) / (max_w - min_w) * (len(cm) - 1)
                 lidx = int(idx)
                 c1 = 1.0 - (idx - lidx)
-                return (c1 * colormap[lidx] + (1.0 - c1) * colormap[lidx + 1]).astype(numpy.uint8)
+                return (c1 * cm[lidx] + (1.0 - c1) * cm[lidx + 1]).astype(numpy.uint8)
 
             # make dot
             def make_dot(node: Node) -> List[str]:
                 if node.type == 'host':
-                    r, g, b = get_color(node.weight)
-                    bgcolor = f"#{r:02X}{g:02X}{b:02X}A0"
+                    r, g, b = get_color(node.weight, True)
+                    a = 160
+                elif node.type == rule.replicated_on:
+                    r, g, b = get_color(node.weight, False)
+                    a = 160
                 else:
-                    bgcolor = "#FFFFFFFF"
+                    r = g = b = a = 256
+
+                bgcolor = f"#{r:02X}{g:02X}{b:02X}{a:02X}"
 
                 def to_dot_name(name: str) -> str:
                     return name.replace("-", "_").replace('.', '_')

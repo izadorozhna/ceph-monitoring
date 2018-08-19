@@ -749,11 +749,20 @@ class CephDataCollector(Collector):
             tail_ln = "tail -n {} ".format(self.opts.ceph_log_max_lines)
             self.save_output("mon_log", tail_ln + "/var/log/ceph/ceph-mon.{}.log".format(self.node.mon))
             self.save_output("ceph_log", tail_ln + " /var/log/ceph/ceph.log")
+
             log_issues = self.node.rpc.sensors.find_issues_in_ceph_log(self.opts.ceph_log_max_lines)
             self.save("ceph_log_wrn_err", "txt", 0, log_issues, check=False)
+
+            issues_count, regions = self.node.rpc.sensors.analyze_ceph_logs_for_issues()
+            self.save("log_issues_count", "json", 0, json.dumps(issues_count), check=False)
+            self.save("status_regions", "json", 0, json.dumps(regions), check=False)
+
             self.save_output("ceph_audit", tail_ln + " /var/log/ceph/ceph.audit.log")
             self.save_output("config", self.ceph_cmd + "daemon mon.{} config show".format(self.node.mon),
                              frmt='json')
+
+            log_issues = self.node.rpc.sensors.find_issues_in_ceph_log(self.opts.ceph_log_max_lines)
+            self.save("ceph_log_wrn_err", "txt", 0, log_issues, check=False)
 
 
 class NodeCollector(Collector):
@@ -809,7 +818,7 @@ class NodeCollector(Collector):
         try:
             self.save_output(
                 "modinfo_all",
-                "for name in $(lsmod | awk '{print $1}') ; do ; modinfo $name ; echo '-----' ; done",
+                "for name in $(lsmod | awk '{print $1}') ; do modinfo $name ; echo '-----' ; done",
                 "txt")
         except Exception as exc:
             logger.warning("Failed to list kernel modules info: %r on node %s: %s", "modinfo **", self.node, exc)

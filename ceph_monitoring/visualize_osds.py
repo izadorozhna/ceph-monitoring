@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Union, Tuple, Any
 import numpy
 from dataclasses import dataclass
 
-from cephlib.units import b2ssize
+from cephlib.units import b2ssize, b2ssize_10
 
 from . import html
 from .cluster_classes import CephInfo, OSDStatus, DiskType, CephVersion, BlueStoreInfo, FileStoreInfo, LogicBlockDev, \
@@ -99,6 +99,63 @@ def show_osd_state(ceph: CephInfo) -> html.HTMLTable:
     return table
 
 
+class OSDLoadTableAgg(Table):
+    ids = ident("OSD id's", dont_sort=True)
+    node = ident()
+    class_and_rules = ident("Class<br>rules")
+    pgs = ident("PG's", dont_sort=True)
+    open_files = ident("open<br>files")
+    ip_conn = ident("ip<br>conn")
+    threads = ident("thr")
+    rss = ident("RSS")
+    vmm = ident("VMM")
+    cpu_used = ident("CPU<br>Used, s")
+    data = ident("Total<br>data")
+    read_ops = ident("Read<br>ops<br>uptime")
+    read = ident("Read<br>uptime")
+    write_ops = ident("Write<br>ops<br>uptime")
+    write = ident("Write<br>uptime")
+
+
+@tab("OSD process info aggregated")
+def show_osd_proc_info_agg(ceph: CephInfo) -> html.HTMLTable:
+
+    records: Dict[Tuple[str, str, Tuple[str]], List[CephOSD]] = collections.defaultdict(list)
+
+    for osd in ceph.osds.values():
+        rules = tuple(ceph.crush.rules[rule_id].name for rule_id in osd.crush_rules_weights)
+        records[(osd.host.name, osd.class_name, rules)].append(osd)
+
+    table = OSDLoadTableAgg()
+
+    for (hostname, classname, rules), osds in sorted(records.items()):
+        row = table.next_row()
+        ids = [(osd_link(osd.id).link, len(str(osd.id))) for osd in sorted(osds, key=lambda x: x.id)]
+        row.ids = "<br>".join(", ".join(part) for part in partition_by_len(ids, 20, 1))
+        row.node = host_link(hostname).link, hostname
+        row.pgs = to_html_histo([osd.pg_count for osd in osds], short=True)
+        rule_names = '<br>'.join("rule: " + rule for rule in rules)
+        row.class_and_rules = f"cls: {classname}<br>{rule_names}", classname
+
+        #  RUN INFO - FD COUNT, TCP CONN, THREADS
+        if all(osd.run_info for osd in osds):
+            row.open_files = to_html_histo([osd.run_info.fd_count for osd in osds], short=True)
+            row.ip_conn = to_html_histo([osd.run_info.opened_socks for osd in osds], short=True)
+            row.threads = to_html_histo([osd.run_info.th_count for osd in osds], short=True)
+            row.rss = to_html_histo([osd.run_info.vm_rss for osd in osds], short=True, tostr=b2ssize)
+            row.vmm = to_html_histo([osd.run_info.vm_size for osd in osds], short=True, tostr=b2ssize)
+            row.cpu_used = to_html_histo([int(osd.run_info.cpu_usage) for osd in osds], short=True)
+
+        row.data = to_html_histo([osd.pg_stats.bytes for osd in osds], short=True, tostr=b2ssize)
+        row.read_ops = to_html_histo([osd.pg_stats.reads for osd in osds], short=True, tostr=b2ssize_10)
+        row.read = to_html_histo([osd.pg_stats.read_b for osd in osds], short=True, tostr=b2ssize)
+        row.write_ops = to_html_histo([osd.pg_stats.writes for osd in osds], short=True, tostr=b2ssize_10)
+        row.write = to_html_histo([osd.pg_stats.write_b for osd in osds], short=True, tostr=b2ssize)
+
+
+    return table.html(id="table-osd-process-info-agg", align=html.TableAlign.left_right)
+
+
 class OSDLoadTable(Table):
     id = ident()
     node = ident()
@@ -117,18 +174,16 @@ class OSDLoadTable(Table):
     write = bytes_sz("Write<br>uptime")
 
 
-@tab("OSD process info & uptime load")
+@tab("OSD process info")
 def show_osd_proc_info(ceph: CephInfo) -> html.HTMLTable:
-
     table = OSDLoadTable()
-
     for osd in ceph.sorted_osds:
         row = table.next_row()
         row.id = osd_link(osd.id).link, osd.id
         row.node = host_link(osd.host.name).link, osd.host.name
         row.pgs = osd.pg_count
-        rule_names = '<br>'.join(ceph.crush.rules[rule_id].name for rule_id in osd.crush_rules_weights)
-        row.class_and_rules = f"{osd.class_name}<br>{rule_names}", osd.class_name
+        rule_names = '<br>'.join("rule: " + ceph.crush.rules[rule_id].name for rule_id in osd.crush_rules_weights)
+        row.class_and_rules = f"cls: {osd.class_name}<br>{rule_names}", osd.class_name
 
         #  RUN INFO - FD COUNT, TCP CONN, THREADS
         if osd.run_info:
@@ -144,7 +199,6 @@ def show_osd_proc_info(ceph: CephInfo) -> html.HTMLTable:
         row.read = osd.pg_stats.read_b
         row.write_ops = osd.pg_stats.writes
         row.write = osd.pg_stats.write_b
-
     return table.html(id="table-osd-process-info", align=html.TableAlign.left_right)
 
 

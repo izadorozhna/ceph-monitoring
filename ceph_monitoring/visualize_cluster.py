@@ -1,7 +1,7 @@
 import time
 import collections
 from pathlib import Path
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Optional
 
 import yaml
 
@@ -373,3 +373,20 @@ def show_whole_cluster_nets(cluster: Cluster) -> html.HTMLTable:
         row.total_err_uptime = info.usage.total_err
 
     return table.html(id=("table-cluster-nets-wide" if any_d_usage else "table-cluster-nets"))
+
+
+@tab("Errors summary")
+def show_cluster_err_warn_summary(ceph: CephInfo) -> Optional[html.HTMLTable]:
+    if not ceph.errors_count:
+        return None
+
+    class IssuesTable(Table):
+        type = ident()
+        count = exact_count()
+
+    table = IssuesTable()
+
+    for name, cnt in sorted(ceph.errors_count.items(), key=lambda x: x[1]):
+        table.add_row(name, cnt)
+
+    return table.html(id="table-errors-summary")

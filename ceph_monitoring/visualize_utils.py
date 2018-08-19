@@ -1,6 +1,6 @@
 import bisect
 import collections
-from typing import Union, Iterable, Dict, Callable, Sequence, Tuple, List, TypeVar
+from typing import Union, Iterable, Dict, Callable, Sequence, Tuple, List, TypeVar, Any
 
 import numpy
 
@@ -98,17 +98,31 @@ def val_to_color(val: float, color_map: CMap = def_color_map) -> str:
     return f"#{ncolor[0]:02X}{ncolor[1]:02X}{ncolor[2]:02X}"
 
 
-def to_html_histo(vals: Sequence[Union[int, float]], show_int: bool = True) -> Tuple[str, Union[int, float]]:
-    fmt = (lambda x: str(int(x + 0.4999))) if show_int else "{0:.2f}".format
+def to_html_histo(vals: Sequence[Union[int, float]],
+                  show_int: bool = True,
+                  short: bool = True,
+                  tostr: Callable[[Any], str] = None) -> Tuple[str, Union[int, float]]:
+
+    if tostr is None:
+        fmt = (lambda x: str(int(x + 0.4999))) if show_int else "{0:.2f}".format
+    elif show_int:
+        fmt = lambda x: tostr(int(x))
+    else:
+        fmt = lambda x: tostr(x)
+
     vals_s = set(vals)
     if len(vals_s) == 1:
         return f"{fmt(vals[0])}", vals[0]
-    elif len(vals_s) < 7:
-        return "<br>".join(f"{fmt(val)}: {vals.count(val)} osd" for val in sorted(vals_s)), sum(vals) / len(vals)
+    elif len(vals_s) < (3 if short else 7):
+        return "<br>".join(f"{fmt(val)}: {vals.count(val)}" for val in sorted(vals_s)), sum(vals) / len(vals)
     else:
-        p0, p25, p50, p75, p90, p95, p100 = numpy.percentile(vals, [0, 25, 50, 75, 90, 95, 100])
-    return (f"min = {fmt(p0)}<br>25% < {fmt(p25)}<br>mediana = {fmt(p50)}<br>75% < {fmt(p75)}" +
-            f"<br>90% < {fmt(p90)}<br>95% < {fmt(p95)}<br>max = {fmt(p100)}", p50)
+        if short:
+            p0, p50, p100 = numpy.percentile(vals, [0, 50, 100])
+            return (f"min = {fmt(p0)}<br>mediana = {fmt(p50)}<br>max = {fmt(p100)}", p50)
+        else:
+            p0, p25, p50, p75, p90, p95, p100 = numpy.percentile(vals, [0, 25, 50, 75, 90, 95, 100])
+            return (f"min = {fmt(p0)}<br>25% < {fmt(p25)}<br>mediana = {fmt(p50)}<br>75% < {fmt(p75)}" +
+                    f"<br>90% < {fmt(p90)}<br>95% < {fmt(p95)}<br>max = {fmt(p100)}", p50)
 
 
 T = TypeVar('T')
