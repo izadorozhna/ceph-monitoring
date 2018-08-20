@@ -459,6 +459,7 @@ class CephDataCollector(Collector):
         self.radosgw_admin_cmd = "radosgw-admin {}".format(opt)
         self.ceph_cmd = "ceph {}--format json ".format(opt)
         self.ceph_cmd_txt = "ceph {}".format(opt)
+        self.rbd_cmd = "rbd {} ".format(opt)
         self.rados_cmd = "rados {}--format json ".format(opt)
         self.rados_cmd_txt = "rados {}".format(opt)
 
@@ -534,7 +535,6 @@ class CephDataCollector(Collector):
             cmds.extend(['osd tree',
                          'df',
                          'auth list',
-                         'osd dump',
                          'health',
                          'mon_status',
                          'osd lspools',
@@ -544,6 +544,24 @@ class CephDataCollector(Collector):
 
             for cmd in cmds:
                 self.save_output(cmd.replace(" ", "_"), self.ceph_cmd + cmd, 'json')
+
+            osd_dump = self.save_output('osd_dump', self.ceph_cmd + "osd dump", 'json')
+
+            if not self.opts.no_rbd_info:
+                rbd_pools = []
+                if osd_dump and osd_dump[0] == 0:
+                    for pool in json.loads(osd_dump[1])['pools']:
+                        if 'application_metadata' in pool:
+                            if 'rbd' in pool.get('application_metadata'):
+                                rbd_pools.append(pool['pool_name'])
+                        elif 'rgw' not in pool['pool_name']:
+                            rbd_pools.append(pool['pool_name'])
+
+                for pool in rbd_pools:
+                    self.save_output('rbd_du_{}'.format(pool), self.rbd_cmd + "du", 'txt')
+                    cmd = 'for image in $(rbd list -p rbd) ; do echo "{}" ; echo "$image" ; {} info "$image" ; done'
+                    cmd = cmd.format('-' * 60, self.rbd_cmd)
+                    self.save_output("rbd_images_{}".format(pool), cmd, "txt")
 
             self.save_output("default_config", self.ceph_cmd_txt + "--show-config", 'txt')
             self.save_output("rados_df", self.rados_cmd + "df", 'json')
@@ -559,6 +577,7 @@ class CephDataCollector(Collector):
             self.save_output("realm_list", self.radosgw_admin_cmd + "realm list", "txt")
             self.save_output("zonegroup_list", self.radosgw_admin_cmd + "zonegroup list", "txt")
             self.save_output("zone_list", self.radosgw_admin_cmd + "zone list", "txt")
+            self.save_output("osd dump", self.ceph_cmd_txt + "osd dump", "txt")
 
             temp_fl = "%08X" % random.randint(0, 2 << 64)
             cr_fname = "/tmp/ceph_collect." + temp_fl + ".cr"
@@ -1262,7 +1281,8 @@ def parse_args(argv: List[str]) -> Any:
     p.add_argument("-c", "--collectors", default="ceph,node,load",
                    help="Comma separated list of collectors. Select from : " +
                    ",".join(coll.name for coll in ALL_COLLECTORS))
-    p.add_argument("--ceph-master",metavar="NODE", help="Run all ceph cluster commands from NODE")
+    p.add_argument("--ceph-master", metavar="NODE", help="Run all ceph cluster commands from NODE")
+    p.add_argument("--no-rbd-info", action='store_true', help="Con't collect info for rbd volumes")
     p.add_argument("--ceph-master-only", action="store_true", help="Run only ceph master data collection, " +
                    "no info from osd/monitors would be collected")
     p.add_argument("-C", "--ceph-extra", default="", help="Extra opts to pass to 'ceph' command")
