@@ -25,6 +25,16 @@ from cephlib.units import b2ssize
 # radosgw performance metrics!
 # cpu/disk/net per user request
 
+# osd_class_update_on_start = true
+# osd_crush_update_on_start = true
+# osd_crush_update_weight_set = true
+# add check that osd get to at least one root
+# add check that osd located in correct host in crush
+# for bluestore check that cache ram works correctly
+# check for unused devices on osd node, the same as used for ceph
+# check that all osd of same crush node has the same ip in osdmap
+# check gaps in osd map
+
 
 class Severity(Enum):
     ok = 0
@@ -676,15 +686,6 @@ def check_ceph_net_errors(config: CheckConfig, cluster: Cluster, ceph: CephInfo,
     else:
         report.add_result(True, "")
 
-
-# osd_class_update_on_start = true
-# osd_crush_update_on_start = true
-# osd_crush_update_weight_set = true
-# add check that osd get to at least one root
-# add check that osd located in correct host in crush
-# for bluestore check that cache ram works correctly
-# check for unused devices on osd node, the same as used for ceph
-# check that all osd of same crush node has the same ip in osdmap
 
 def run_all_checks(config: CheckConfig, cluster: Cluster, ceph: CephInfo) -> List[CheckResult]:
 

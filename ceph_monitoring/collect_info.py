@@ -647,12 +647,14 @@ class CephDataCollector(Collector):
                     if not osd.config:
                         code, osd.config = self.save_output("config",
                                                             "ceph daemon osd.{} config show".format(osd.id),
-                                                            "txt")
+                                                            "json")
                         assert code == 0
+                        jcfg = json.loads(osd.config)
+                        dir_path = jcfg["osd_data"]
                     else:
+                        dir_path = re.search("osd_data = (?P<dir_path>.*?)\n", osd.config).group("dir_path")
                         self.save("config", "txt", 0, osd.config)
 
-                    dir_path = re.search("osd_data = (?P<dir_path>.*?)\n", osd.config).group("dir_path")
                     stor_type = self.node.get_file(os.path.join(dir_path, 'type'))
                     stor_type = stor_type.decode('utf8').strip()
                     assert stor_type in ('filestore', 'bluestore')

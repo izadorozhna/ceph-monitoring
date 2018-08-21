@@ -469,7 +469,12 @@ class CephLoader:
             free_space = osd_df_data['kb_avail']  * 1024
             cluster_ip = osd_data['cluster_addr'].split(":", 1)[0]
 
-            config = AttredDict(**parse_txt_ceph_config(self.storage.txt.osd[str(osd_id)].config))
+            try:
+                cfg_txt = self.storage.txt.osd[str(osd_id)].config
+            except AttributeError:
+                config = AttredDict(**self.storage.json.osd[str(osd_id)].config)
+            else:
+                config = AttredDict(**parse_txt_ceph_config(cfg_txt))
 
             try:
                 host = self.ip2host[cluster_ip]
