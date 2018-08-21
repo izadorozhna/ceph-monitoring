@@ -21,7 +21,7 @@ def show_hosts_config(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
     for osd in ceph.osds.values():
         host2osds.setdefault(osd.host.name, set()).add(osd.id)
 
-    rule2host2osds: Dict[Dict[str, List[CephOSD]]] = {}
+    rule2host2osds: Dict[str, Dict[str, List[CephOSD]]] = {}
     for rule in ceph.crush.rules.values():
         curr = rule2host2osds[rule.name] = {}
         for osd_node in ceph.crush.iter_osds_for_rule(rule.id):
@@ -32,7 +32,7 @@ def show_hosts_config(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
 
     hosts_configs = []
     for host in cluster.sorted_hosts:
-        by_speed = collections.Counter()
+        by_speed: Dict[int, int] = collections.Counter()
         for adapter in host.net_adapters.values():
             if adapter.is_phy:
                 by_speed[adapter.speed if adapter.speed else 0] += 1
@@ -45,28 +45,26 @@ def show_hosts_config(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
         cluster_bw = None
         client_bw = None
 
-        for adapter in [cl, pb]:
-            if not adapter:
-                continue
+        for adapter2 in [cl, pb]:
+            if adapter2:
+                adapter_name = adapter2.dev.split(".")[0] if '.' in adapter2.dev else adapter2.dev
+                sources = host.bonds[adapter_name].sources if adapter_name in host.bonds else [adapter_name]
 
-            adapter_name = adapter.dev.split(".")[0] if '.' in adapter.dev else adapter.dev
-            sources = host.bonds[adapter_name].sources if adapter_name in host.bonds else [adapter_name]
+                bw = 0
+                has_unknown = False
+                for src in sources:
+                    if host.net_adapters[src].speed:
+                        bw += host.net_adapters[src].speed  # type: ignore
+                    else:
+                        has_unknown = True
 
-            bw = 0
-            has_unknown = False
-            for src in sources:
-                if host.net_adapters[src].speed:
-                    bw += host.net_adapters[src].speed
+                if adapter2 is cl:
+                    cluster_bw = b2ssize(bw) + (" + unknown" if has_unknown else "")
                 else:
-                    has_unknown = True
-
-            if adapter is cl:
-                cluster_bw = b2ssize(bw) + (" + unknown" if has_unknown else "")
-            else:
-                client_bw = b2ssize(bw) + (" + unknown" if has_unknown else "")
+                    client_bw = b2ssize(bw) + (" + unknown" if has_unknown else "")
 
         root2osd = [rule2host2osds.get(root_name, {}).get(host.name, []) for root_name in root_names]
-        all_osds_in_roots = set()
+        all_osds_in_roots: Set[int] = set()
         for rosds in root2osd:
             all_osds_in_roots.update(osd.id for osd in rosds)
 
@@ -105,10 +103,10 @@ def show_hosts_config(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
         first_item = items[0]
         row = configs.next_row()
         row.count = len(items)
-        row.names = [(host_link(itm['name']).link, itm['name']) for itm in items]
+        row.names = [(host_link(itm['name']).link, itm['name']) for itm in items]  # type: ignore
 
-        row.osds_count['_no_root'] = first_item["osds_count"][0]
-        for name, vl in zip(root_names, first_item["osds_count"][1:]):
+        row.osds_count['_no_root'] = first_item["osds_count"][0]  # type: ignore
+        for name, vl in zip(root_names, first_item["osds_count"][1:]):  # type: ignore
             row.osds_count[name] = vl
 
         row.has_mon = 'yes' if first_item["has_mon"] else 'no'
@@ -145,7 +143,7 @@ def show_hosts_status(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
 
     host2osds: Dict[str, List[int]] = {}
     for osd in ceph.osds.values():
-        host2osds.setdefault(osd.host.name, []).append(str(osd.id))
+        host2osds.setdefault(osd.host.name, []).append(osd.id)
 
     for host in cluster.sorted_hosts:
 
@@ -156,7 +154,7 @@ def show_hosts_status(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
         row.name = host_link(host.name).link, host.name
 
         if host.name in mon_hosts:
-            mon_str = f'<font color="#8080FF">Mon</font>: ' + mon_link(host.name).link
+            mon_str: Optional[str] = f'<font color="#8080FF">Mon</font>: ' + mon_link(host.name).link
         else:
             mon_str = None
 
@@ -166,7 +164,7 @@ def show_hosts_status(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
                 srv_strs.append((osd_link(osd_id).link, len(str(osd_id))))
 
         row.services = (mon_str + "<br>" if mon_str else "") + '''<font color="#c77405">OSD's</font>: ''' + \
-                        "<br>".join(", ".join(chunk) for chunk in partition_by_len(srv_strs, 70, 1))
+                        "<br>".join(", ".join(chunk) for chunk in partition_by_len(srv_strs, 70, 1))  # type: ignore
 
         row.ram_total = host.mem_total
         row.ram_free = host.mem_free
@@ -262,12 +260,13 @@ def host_net_table(host: Host, ceph: CephInfo) -> html.HTMLTable:
 mib_and_mb = lambda x: f"{b2ssize(x)}B / {b2ssize_10(x)}B"
 
 
-def find_stor_roles(host: Host, ceph: CephInfo) -> Tuple[Dict[str, Dict[str, Set[str]]], Dict[str, Set[str]]]:
-    stor_roles = collections.defaultdict(lambda: collections.defaultdict(set))
-    stor_classes = collections.defaultdict(set)
+def find_stor_roles(host: Host, ceph: CephInfo) -> Tuple[Dict[str, Dict[str, Set[int]]], Dict[str, Set[str]]]:
+    stor_roles: Dict[str, Dict[str, Set[int]]] = collections.defaultdict(lambda: collections.defaultdict(set))
+    stor_classes: Dict[str, Set[str]] = collections.defaultdict(set)
 
     for osd in ceph.osds.values():
         if osd.host is host:
+            assert osd.storage_info
             stor_roles[osd.storage_info.data.partition_name]['data'].add(osd.id)
             stor_roles[osd.storage_info.data.name]['data'].add(osd.id)
 
@@ -298,7 +297,7 @@ def find_stor_roles(host: Host, ceph: CephInfo) -> Tuple[Dict[str, Dict[str, Set
     return stor_roles, stor_classes
 
 
-def html_roles(name: str, stor_roles: Dict[str, Dict[str, Set[str]]]) -> str:
+def html_roles(name: str, stor_roles: Dict[str, Dict[str, Set[int]]]) -> str:
     order = ['data', 'journal', 'db', 'wal']
     return "<br>".join(name + ": " + ", ".join(map(str, sorted(ids)))
                        for name, ids in sorted(stor_roles[name].items(), key=lambda x: order.index(x[0])))
@@ -318,7 +317,7 @@ class HostInfoDisks(Table):
 
 
 def host_disks_table(host: Host, ceph: CephInfo,
-                     stor_roles: Dict[str, Dict[str, Set[str]]], stor_classes: Dict[str, Set[str]]) -> html.HTMLTable:
+                     stor_roles: Dict[str, Dict[str, Set[int]]], stor_classes: Dict[str, Set[str]]) -> html.HTMLTable:
 
     table = HostInfoDisks()
 
@@ -368,7 +367,7 @@ class HostInfoMountable(Table):
     label = ident()
 
 
-def host_mountable_table(host: Host, stor_roles: Dict[str, Dict[str, Set[str]]]) -> html.HTMLTable:
+def host_mountable_table(host: Host, stor_roles: Dict[str, Dict[str, Set[int]]]) -> html.HTMLTable:
 
     table = HostInfoMountable()
 

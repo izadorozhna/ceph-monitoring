@@ -4,3 +4,4 @@
 venv3/*
 .ipynb_checkpoints/
 Untitled.ipynb
+.dmypy.json

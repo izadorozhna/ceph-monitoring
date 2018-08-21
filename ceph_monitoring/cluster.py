@@ -223,7 +223,8 @@ def parse_df(data: str) -> Iterator[DFInfo]:
     assert lines[0].split() == ["Filesystem", "1K-blocks", "Used", "Available", "Use%", "Mounted", "on"]
     for ln in lines[1:]:
         name, size, _, free, _, mountpoint = ln.split()
-        yield DFInfo(path=name, name=name.split("/")[-1], size=int(size), free=int(free), mountpoint=mountpoint)
+        yield DFInfo(path=DevPath(name), name=name.split("/")[-1], size=int(size),
+                     free=int(free), mountpoint=mountpoint)
 
 
 # --- load functions ---------------------------------------------------------------------------------------------------
@@ -498,26 +499,26 @@ def fill_usage(cluster: Cluster, cluster_old: Cluster, ceph: CephInfo, ceph_old:
                 queue_depth=None,
                 lat=None)
 
-        for dev_name, dev in host.net_adapters.items():
-            dev_old = host_old.net_adapters[dev_name]
-            assert not dev.d_usage
-            dev.d_usage = NetStats(
-                    recv_bytes=int((dev.usage.recv_bytes - dev_old.usage.recv_bytes) / dtime + 0.499),
-                    recv_packets=int((dev.usage.recv_packets - dev_old.usage.recv_packets) / dtime + 0.499),
-                    rerrs=int((dev.usage.rerrs - dev_old.usage.rerrs) / dtime + 0.499),
-                    rdrop=int((dev.usage.rdrop - dev_old.usage.rdrop) / dtime + 0.499),
-                    rfifo=int((dev.usage.rfifo - dev_old.usage.rfifo) / dtime + 0.499),
-                    rframe=int((dev.usage.rframe - dev_old.usage.rframe) / dtime + 0.499),
-                    rcompressed=int((dev.usage.rcompressed - dev_old.usage.rcompressed) / dtime + 0.499),
-                    rmulticast=int((dev.usage.rmulticast - dev_old.usage.rmulticast) / dtime + 0.499),
-                    send_bytes=int((dev.usage.send_bytes - dev_old.usage.send_bytes) / dtime + 0.499),
-                    send_packets=int((dev.usage.send_packets - dev_old.usage.send_packets) / dtime + 0.499),
-                    serrs=int((dev.usage.serrs - dev_old.usage.serrs) / dtime + 0.499),
-                    sdrop=int((dev.usage.sdrop - dev_old.usage.sdrop) / dtime + 0.499),
-                    sfifo=int((dev.usage.sfifo - dev_old.usage.sfifo) / dtime + 0.499),
-                    scolls=int((dev.usage.scolls - dev_old.usage.scolls) / dtime + 0.499),
-                    scarrier=int((dev.usage.scarrier - dev_old.usage.scarrier) / dtime + 0.499),
-                    scompressed=int((dev.usage.scompressed - dev_old.usage.scompressed) / dtime + 0.499)
+        for dev_name, netdev in host.net_adapters.items():
+            netdev_old = host_old.net_adapters[dev_name]
+            assert not netdev.d_usage
+            netdev.d_usage = NetStats(
+                    recv_bytes=int((netdev.usage.recv_bytes - netdev_old.usage.recv_bytes) / dtime + 0.499),
+                    recv_packets=int((netdev.usage.recv_packets - netdev_old.usage.recv_packets) / dtime + 0.499),
+                    rerrs=int((netdev.usage.rerrs - netdev_old.usage.rerrs) / dtime + 0.499),
+                    rdrop=int((netdev.usage.rdrop - netdev_old.usage.rdrop) / dtime + 0.499),
+                    rfifo=int((netdev.usage.rfifo - netdev_old.usage.rfifo) / dtime + 0.499),
+                    rframe=int((netdev.usage.rframe - netdev_old.usage.rframe) / dtime + 0.499),
+                    rcompressed=int((netdev.usage.rcompressed - netdev_old.usage.rcompressed) / dtime + 0.499),
+                    rmulticast=int((netdev.usage.rmulticast - netdev_old.usage.rmulticast) / dtime + 0.499),
+                    send_bytes=int((netdev.usage.send_bytes - netdev_old.usage.send_bytes) / dtime + 0.499),
+                    send_packets=int((netdev.usage.send_packets - netdev_old.usage.send_packets) / dtime + 0.499),
+                    serrs=int((netdev.usage.serrs - netdev_old.usage.serrs) / dtime + 0.499),
+                    sdrop=int((netdev.usage.sdrop - netdev_old.usage.sdrop) / dtime + 0.499),
+                    sfifo=int((netdev.usage.sfifo - netdev_old.usage.sfifo) / dtime + 0.499),
+                    scolls=int((netdev.usage.scolls - netdev_old.usage.scolls) / dtime + 0.499),
+                    scarrier=int((netdev.usage.scarrier - netdev_old.usage.scarrier) / dtime + 0.499),
+                    scompressed=int((netdev.usage.scompressed - netdev_old.usage.scompressed) / dtime + 0.499)
                 )
 
         assert not host.d_netstat
@@ -527,7 +528,10 @@ def fill_usage(cluster: Cluster, cluster_old: Cluster, ceph: CephInfo, ceph_old:
     # pg stats
     for osd in ceph.osds.values():
         assert not osd.d_pg_stats, str(osd.d_pg_stats)
+        assert osd.pg_stats is not None
         osd_old = ceph_old.osds[osd.id]
+
+        assert osd_old.pg_stats
         osd.d_pg_stats = OSDPGStats(
             bytes=int((osd.pg_stats.bytes - osd_old.pg_stats.bytes) / dtime),
             reads=int((osd.pg_stats.reads - osd_old.pg_stats.reads) / dtime),

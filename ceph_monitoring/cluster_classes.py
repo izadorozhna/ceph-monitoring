@@ -321,40 +321,40 @@ class AggNetStat:
 
     @property
     def processed_v(self) -> numpy.ndarray:
-        return self.raw[:,0]
+        return self.raw[:, 0]  # type: ignore
 
     @property
     def dropped_no_space_in_q_v(self) -> numpy.ndarray:
-        return self.raw[:,1]
+        return self.raw[:, 1]  # type: ignore
 
     @property
     def no_budget_v(self) -> numpy.ndarray:
-        return self.raw[:,2]
+        return self.raw[:, 2]  # type: ignore
 
     @property
     def processed(self) -> int:
-        return self.processed_v.sum()
+        return self.processed_v.sum()  # type: ignore
 
     @property
     def dropped_no_space_in_q(self) -> int:
-        return self.dropped_no_space_in_q_v.sum()
+        return self.dropped_no_space_in_q_v.sum()  # type: ignore
 
     @property
     def no_budget(self) -> int:
-        return self.no_budget_v.sum()
+        return self.no_budget_v.sum()  # type: ignore
 
     def __add__(self, other: 'AggNetStat') -> 'AggNetStat':
         return self.__class__(self.raw + other.raw)
 
     def __iadd__(self, other: 'AggNetStat') -> 'AggNetStat':
-        self.raw += other.raw
+        self.raw += other.raw  # type: ignore
         return self
 
     def __sub__(self, other: 'AggNetStat') -> 'AggNetStat':
         return self.__class__(self.raw - other.raw)
 
     def __isub__(self, other: 'AggNetStat') -> 'AggNetStat':
-        self.raw -= other.raw
+        self.raw -= other.raw  # type: ignore
         return self
 
 
@@ -413,8 +413,8 @@ class Cluster:
     report_collected_at_gmt: str
     report_collected_at_gmt_s: float
     has_second_report: bool = False
-    dtime: Optional[float] = field(default=None, init=False)
-    _net_data_cache: Optional[Dict[str, ClusterNetData]] = field(default=None, init=False)
+    dtime: Optional[float] = field(default=None, init=False)  # type: ignore
+    _net_data_cache: Optional[Dict[str, ClusterNetData]] = field(default=None, init=False)  # type: ignore
 
     @property
     def sorted_hosts(self) -> Iterable[Host]:
@@ -867,7 +867,7 @@ class CephInfo:
     has_fs: bool = field(init=False)
     has_bs: bool = field(init=False)
 
-    hidden_nodes_pg_info: Optional[Dict[str, NodePGStats]] = field(init=False, default=None)
+    hidden_nodes_pg_info: Optional[Dict[str, NodePGStats]] = field(init=False, default=None)  # type: ignore
 
     def __post_init__(self):
         self.has_fs = any(isinstance(osd.storage_info, FileStoreInfo) for osd in self.osds.values())
@@ -900,7 +900,6 @@ class CephInfo:
                 assert osd.pgs is not None
                 if osd.host.name in self.hidden_nodes_pg_info:
                     info = self.hidden_nodes_pg_info[osd.host.name]
-
                     info.pg_stats.shallow_scrub_errors += osd.pg_stats.shallow_scrub_errors
                     info.pg_stats.scrub_errors += osd.pg_stats.scrub_errors
                     info.pg_stats.deep_scrub_errors += osd.pg_stats.deep_scrub_errors
@@ -911,6 +910,7 @@ class CephInfo:
                     info.pg_stats.bytes += osd.pg_stats.bytes
 
                     if osd.d_pg_stats:
+                        assert info.d_pg_stats
                         info.d_pg_stats.shallow_scrub_errors += osd.d_pg_stats.shallow_scrub_errors
                         info.d_pg_stats.scrub_errors += osd.d_pg_stats.scrub_errors
                         info.d_pg_stats.deep_scrub_errors += osd.d_pg_stats.deep_scrub_errors

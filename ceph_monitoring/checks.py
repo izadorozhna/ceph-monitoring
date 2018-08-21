@@ -1,6 +1,6 @@
 import collections
 from enum import Enum
-from typing import List, Dict, Callable, Any
+from typing import List, Dict, Callable, Any, Optional, Tuple
 from dataclasses import dataclass
 
 from .cluster_classes import Cluster, CephInfo, FileStoreInfo, BlueStoreInfo, DiskType
@@ -79,7 +79,7 @@ class CheckResult:
     severity: Severity
     check_description: str
     passed: bool
-    message: str
+    message: Optional[str]
     readmeurls: List[str]
     fails: List[CheckMessage]
 
@@ -130,9 +130,9 @@ ALL_CHECKS = []
 
 def checker(severity: Severity, description: str, *readmeurls: str) -> Callable[[CheckerFunc], CheckerFunc]:
     def closure(func: CheckerFunc) -> CheckerFunc:
-        func.severity = severity
-        func.description = description
-        func.readmeurls = readmeurls
+        func.severity = severity  # type: ignore
+        func.description = description  # type: ignore
+        func.readmeurls = readmeurls  # type: ignore
         ALL_CHECKS.append(func)
         return func
     return closure
@@ -143,6 +143,7 @@ def no_scrub_errors(config: CheckConfig, cluster: Cluster, ceph: CephInfo, repor
     total_scrub_err = 0
     err_per_osd: Dict[int, int] = {}
     for osd in ceph.sorted_osds:
+        assert osd.pg_stats
         err_per_osd[osd.id] = osd.pg_stats.scrub_errors + osd.pg_stats.deep_scrub_errors + \
             osd.pg_stats.shallow_scrub_errors
 
@@ -202,7 +203,7 @@ def separated_ceph_nets(config: CheckConfig, cluster: Cluster, ceph: CephInfo, r
 
 @checker(Severity.warning, "Max journal per device")
 def max_journal_per_device(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report: CheckReport):
-    host_dev_j_count = collections.Counter()
+    host_dev_j_count: Dict[str, int] = collections.Counter()
 
     duuid = lambda node, dev_name: f"{node.name}::{dev_name}"
 
@@ -210,6 +211,7 @@ def max_journal_per_device(config: CheckConfig, cluster: Cluster, ceph: CephInfo
         if isinstance(osd.storage_info, FileStoreInfo):
             host_dev_j_count[duuid(osd.host, osd.storage_info.journal.name)] += 1
         else:
+            assert isinstance(osd.storage_info, BlueStoreInfo)
             host_dev_j_count[duuid(osd.host, osd.storage_info.wal.name)] += 1
             if osd.storage_info.db.name != osd.storage_info.wal.name:
                 host_dev_j_count[duuid(osd.host, osd.storage_info.db.name)] += 1
@@ -389,11 +391,12 @@ def all_osds_in_root_the_same(config: CheckConfig, cluster: Cluster, ceph: CephI
     for rule in ceph.crush.rules.values():
         osds = list(ceph.crush.iter_osds_for_rule(rule.id))
 
-        sizes = collections.Counter()
-        types = collections.Counter()
+        sizes: Dict[int, int] = collections.Counter()
+        types: Dict[DiskType, int] = collections.Counter()
 
         for osd_node in osds:
             osd = ceph.osds[osd_node.id]
+            assert osd.storage_info
             sizes[osd.storage_info.data.partition_info.size] += 1
             types[osd.storage_info.data.dev_info.tp] += 1
 
@@ -402,6 +405,8 @@ def all_osds_in_root_the_same(config: CheckConfig, cluster: Cluster, ceph: CephI
 
         for osd_node in osds:
             osd = ceph.osds[osd_node.id]
+            assert osd.storage_info
+
 
             sz = osd.storage_info.data.partition_info.size
 
@@ -429,7 +434,7 @@ def all_osds_in_root_the_same(config: CheckConfig, cluster: Cluster, ceph: CephI
 
 @checker(Severity.warning, "OSD's with same size have close usage")
 def osd_of_same_size_has_close_data_size(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report: CheckReport):
-    data_per_osd = collections.defaultdict(list)
+    data_per_osd: Dict[int, List[float]] = collections.defaultdict(list)
     for osd in ceph.osds.values():
         total_space = osd.used_space + osd.free_space
         data_per_osd[total_space].append(osd.free_space / total_space)
@@ -448,7 +453,8 @@ def osd_of_same_size_has_close_data_size(config: CheckConfig, cluster: Cluster, 
 
 @checker(Severity.warning, "OSD of the same type load evenly distributed")
 def osd_of_same_size_has_close_load(config: CheckConfig, cluster: Cluster, ceph: CephInfo, report: CheckReport):
-    io_per_osd = collections.defaultdict(lambda: collections.defaultdict(list))
+    io_per_osd: Dict[str, Dict[int, List[Tuple[int, int]]]] = \
+        collections.defaultdict(lambda: collections.defaultdict(list))
     for osd in ceph.osds.values():
         for attr in ("reads", "writes", "read_b", "write_b"):
             io_per_osd[attr][osd.total_space].append((getattr(osd.pg_stats, attr), osd.id))
@@ -675,6 +681,7 @@ def check_ceph_net_errors(config: CheckConfig, cluster: Cluster, ceph: CephInfo,
             failed_hosts.add(host.name)
 
         dtime = cluster.dtime if host.d_netstat else host.uptime
+        assert dtime is not None and dtime > 1
         if netstat and netstat.no_budget / dtime / 3600 > no_budget_max_per_hour:
             report.add_extra_message(Severity.warning,
                                      f"Too high out-of-net-budget case >{no_budget_max_per_hour} per hour",

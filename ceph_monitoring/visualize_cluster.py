@@ -10,7 +10,7 @@ from cephlib.units import b2ssize_10, b2ssize
 
 from . import table
 from . import html
-from .cluster_classes import CephInfo, Cluster, FileStoreInfo, BlueStoreInfo
+from .cluster_classes import CephInfo, Cluster, FileStoreInfo, BlueStoreInfo, MonRole, Pool
 from .visualize_utils import tab, seconds_to_str, get_all_versions, partition_by_len
 from .checks import run_all_checks, CheckMessage
 from .report import Report
@@ -154,7 +154,8 @@ def show_mons_info(ceph: CephInfo) -> html.HTMLTable:
                         break
         else:
             health = html.ok("HEALTH_OK") if mon.status == "HEALTH_OK" else html.fail(mon.status)
-            role = mon.role
+            role = "leader" if mon.role == MonRole.master else \
+                ("follower"  if mon.role == MonRole.master else "Unknown")
 
         if mon.kb_avail is None:
             perc = "Unknown"
@@ -306,7 +307,7 @@ def show_ruleset_info(ceph: CephInfo) -> html.HTMLTable:
     {RulesetsTable.help()}
     """
 
-    pools = {}
+    pools: Dict[int, List[Pool]] = {}
     for pool in ceph.pools.values():
         pools.setdefault(pool.crush_rule, []).append(pool)
 
@@ -340,6 +341,7 @@ def show_ruleset_info(ceph: CephInfo) -> html.HTMLTable:
         disks_info = set()
 
         for osd in osds:
+            assert osd.storage_info
             dsk = osd.storage_info.data.dev_info
             storage_disks_types.add(dsk.tp.name)
             if isinstance(osd.storage_info, FileStoreInfo):
@@ -450,13 +452,13 @@ def show_cluster_err_warn_summary(ceph: CephInfo) -> Optional[str]:
 
 def plot_healthnes(ceph: CephInfo, width: int = 1400, height: int = 30) -> Optional[str]:
     if not ceph.status_regions:
-        return
+        return None
 
     begin = ceph.status_regions[0].begin
     end = ceph.status_regions[-1].end
 
     if end - begin < 100:
-        return
+        return None
 
     total_len = end - begin
 
@@ -469,7 +471,7 @@ def plot_healthnes(ceph: CephInfo, width: int = 1400, height: int = 30) -> Optio
     doc.br
     doc.br
     with doc.svg(width=width, height=height):
-        curr_x = 0
+        curr_x: float = 0
         for region in ceph.status_regions:
             color = "#6282EA" if region.healty else "#DD5F4B"
             end_x = width * (region.end - begin) / total_len

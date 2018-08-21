@@ -1,5 +1,5 @@
 import weakref
-from typing import Any, Union, Optional, Callable, Iterable, Tuple, List, Dict, Type
+from typing import Any, Union, Optional, Callable, Iterable, Tuple, List, Dict, Type, Set
 from dataclasses import dataclass
 
 from cephlib.units import b2ssize, b2ssize_10
@@ -13,7 +13,7 @@ class Field:
     tp: Any
     name: Optional[str] = None
     converter: Callable[[Any], Union[str, TagProxy]] = lambda x: str(x)
-    custom_sort: Optional[Callable[[Any], str]] = lambda x: str(x)
+    custom_sort: Callable[[Any], str] = lambda x: str(x)
     allow_none: bool = True
     skip_if_no_data: bool = True
     null_sort_key: str = ''
@@ -129,8 +129,12 @@ def prepare_field(table: 'Table', name: str, val: Any, must_fld: bool = True) ->
     return rval
 
 
+class Separator:
+    pass
+
+
 class Row:
-    def __init__(self, table: 'Table', target: Dict[str, Any]) -> None:
+    def __init__(self, table: 'Table', target: Union[Type[Separator], Dict[str, Any]]) -> None:
         self.__dict__['_target__'] = target
         self.__dict__['_table__'] = weakref.ref(table)
 
@@ -158,17 +162,13 @@ class Row:
         return Extra(table, self._target__)
 
 
-class Separator:
-    pass
-
-
 class Table:
     def __init__(self) -> None:
         self.rows: List[Union[Type[Separator], Dict[str, Any]]] = []
         self.all_names = [name for name, _, _ in self.all_fields()]
 
     @classmethod
-    def all_fields(cls) -> Iterable[Tuple[str, Field, str]]:
+    def all_fields(cls) -> Iterable[Tuple[str, Field, Optional[str]]]:
         for key, val in cls.__dict__.items():
             if isinstance(val, Field):
                 yield (key, val, val.name)
@@ -192,20 +192,17 @@ class Table:
 
         for key, fld, pname in items:
             names.append(key)
-            printable_names[key] = pname
+            printable_names[key] = key if pname is None else pname
             types[key] = fld
 
         names_set = set(names)
 
         # find all used keys
-        all_keys = set()
+        all_keys: Set[Tuple[str, ...]] = set()
         for row in self.rows:
-            if row is Separator:
-                continue
-            if not set(row.keys()).issubset(names_set):
-                x = 1
-            assert set(row.keys()).issubset(names_set), f"{row.keys()} {names_set}"
-            all_keys.update(row.keys())
+            if row is not Separator:
+                assert set(row.keys()).issubset(names_set), f"{row.keys()} {names_set}"  # type: ignore
+                all_keys.update(row.keys())  # type: ignore
 
         headers = [name for name, val, _ in items if name in all_keys or not val.skip_if_no_data]
         headers.sort(key=names.index)
@@ -229,7 +226,7 @@ class Table:
                 continue
 
             for attr_name in headers:
-                val: Any = row.get(attr_name)
+                val: Any = row.get(attr_name)  # type: ignore
                 field = types[attr_name]
 
                 if isinstance(val, WithAttrs):
@@ -238,9 +235,10 @@ class Table:
                 else:
                     attrs = {}
 
-                h_val = field.null_value if val is None else field.converter(val)
+                h_val = field.null_value if val is None else field.converter(val)  # type: ignore
                 if not field.dont_sort and sortable and 'sorttable_customkey' not in attrs:
-                    attrs['sorttable_customkey'] = field.null_sort_key if val is None else field.custom_sort(val)
+                    attrs['sorttable_customkey'] = field.null_sort_key \
+                                                   if val is None else field.custom_sort(val)   # type: ignore
 
                 table.add_cell(h_val, **attrs)
 

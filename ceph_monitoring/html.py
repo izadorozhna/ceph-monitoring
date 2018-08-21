@@ -1,6 +1,6 @@
 import sys
 from enum import Enum
-from typing import Callable, List, Dict, Union, Iterable
+from typing import Callable, List, Dict, Union, Iterable, Optional, Tuple
 
 from cephlib.units import b2ssize, b2ssize_10
 
@@ -44,7 +44,7 @@ class TagProxy:
         self.__name = name
         self.__text = ""
         self.__attrs: Dict[str, str] = {}
-        self.__childs: List[str] = []
+        self.__childs: List[Union[str, TagProxy]] = []
 
     def __call__(self, text: str = "", **attrs) -> 'TagProxy':
         self.__childs.append(text)
@@ -166,9 +166,9 @@ class HTMLTable:
             header_attrs = {}
 
         if headers is not None:
-            self.headers = [(header, header_attrs) for header in headers]
+            self.headers: List[Tuple[str, Optional[Dict[str, str]]]] = [(header, header_attrs) for header in headers]
         else:
-            self.headers = None
+            self.headers = []
         self.cells: List[List] = [[]]
 
     def add_header(self, text: str, attrs: Dict[str, str] = None):

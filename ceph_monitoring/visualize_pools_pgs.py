@@ -1,5 +1,5 @@
 import collections
-from typing import Dict, Optional
+from typing import Dict, Optional, Union
 
 import numpy
 
@@ -103,13 +103,13 @@ def show_pools_info(ceph: CephInfo) -> html.HTMLTable:
         row.pool = pool_link(pool.name).link, pool.name
         row.id = pool.id
 
-        vl = f"{pool.size} / {pool.min_size}"
+        vl: Union[html.TagProxy, str] = f"{pool.size} / {pool.min_size}"
         if pool.name == 'gnocchi':
             if pool.size != 2 or pool.min_size != 1:
-                vl = html.fail(vl)
+                vl = html.fail(str(vl))
         else:
             if pool.size != 3 or pool.min_size != 2:
-                vl = html.fail(vl)
+                vl = html.fail(str(vl))
         row.size = vl, pool.size
 
         obj_perc = pool.df.num_objects * 100 // total_objs

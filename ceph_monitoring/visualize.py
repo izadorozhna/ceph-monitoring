@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import List, Tuple
 
 import matplotlib
+
+
 matplotlib.use('Agg')
 del matplotlib
 
@@ -27,6 +29,7 @@ from .cluster import load_all, fill_usage, fill_cluster_nets_roles
 from .obj_links import host_link
 from .report import Report
 
+from .visualize_utils import StopError
 from .visualize_cluster import show_cluster_summary, show_issues_table, show_primary_settings, show_ruleset_info, \
                                show_io_status, show_mons_info, show_cluster_err_warn, show_whole_cluster_nets, \
                                show_cluster_err_warn_summary
@@ -100,7 +103,7 @@ def main(argv: List[str]):
         remove_d2, d2_path = prepare_path(opts.old_path)
     else:
         remove_d2 = False
-        d2_path = None
+        d2_path = None  # type: ignore
 
     out_p = Path(opts.out)
     index_path = out_p / 'index.html'
@@ -182,6 +185,8 @@ def main(argv: List[str]):
 
         report.save_to(Path(opts.out), opts.pretty_html, embed=opts.embed)
         logger.info("Report successfully stored to %r", index_path)
+    except StopError:
+        pass
     finally:
         if remove_d1:
             shutil.rmtree(d1_path)

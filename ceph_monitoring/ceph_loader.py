@@ -14,6 +14,7 @@ from cephlib.crush import load_crushmap, Crush
 from cephlib.storage import TypedStorage
 from cephlib.common import AttredDict
 
+from .visualize_utils import StopError
 from .cluster_classes import (PGDump, PG, PGStatSum, PGId, PGState, StatusRegion,
                               Pool, PoolDF, CephVersion, CephMonitor, MonRole, CephStatus, CephStatusCode,
                               Host, CephInfo, CephOSD, OSDStatus, CephVersions, FileStoreInfo, BlueStoreInfo,
@@ -80,7 +81,7 @@ def parse_pg_dump(data: Dict[str, Any]) -> PGDump:
         tr = TabulaRasa()
         tr.__dict__ = dt
         tr.__class__ = PG
-        pgs.append(tr)
+        pgs.append(tr)  # type: ignore
 
     datetm, mks = data['stamp'].split(".")
     collected_at = datetime.datetime.strptime(datetm, '%Y-%m-%d %H:%M:%S').replace(microsecond=int(mks))
@@ -136,6 +137,7 @@ def parse_ceph_versions(data: str) -> Dict[str, CephVersion]:
             rr = version_rr.match(json.loads(data_js)["version"])
             if not rr:
                 logger.error("Can't parse version %r from %r", json.loads(data_js)["version"], line)
+                raise StopError()
             major, minor, bugfix = map(int, rr.group("version").split("."))
             vers[name.strip()] = CephVersion(major, minor, bugfix, rr.group("hash"))
     return vers
@@ -213,31 +215,31 @@ class OSDStoreType(Enum):
     unknown = 2
 
 
-def load_osd_perf_data(osd_id: int,
-                       storage_type: OSDStoreType,
-                       osd_perf_dump: Dict[int, List[Dict]]) -> Dict[str, numpy.ndarray]:
-    osd_perf_dump = osd_perf_dump[osd_id]
-    osd_perf: Dict[str, numpy.ndarray] = {}
-
-    if storage_type == OSDStoreType.filestore:
-        fstor = [obj["filestore"] for obj in osd_perf_dump]
-        for field in ("apply_latency", "commitcycle_latency", "journal_latency"):
-            count = [obj[field]["avgcount"] for obj in fstor]
-            values = [obj[field]["sum"] for obj in fstor]
-            osd_perf[field] = avg_counters(count, values)
-
-        arr = numpy.array([obj['journal_wr_bytes']["avgcount"] for obj in fstor], dtype=numpy.float32)
-        osd_perf["journal_ops"] = arr[1:] - arr[:-1]  # type: ignore
-        arr = numpy.array([obj['journal_wr_bytes']["sum"] for obj in fstor], dtype=numpy.float32)
-        osd_perf["journal_bytes"] = arr[1:] - arr[:-1]  # type: ignore
-    else:
-        bstor = [obj["bluestore"] for obj in osd_perf_dump]
-        for field in ("commit_lat",):
-            count = [obj[field]["avgcount"] for obj in bstor]
-            values = [obj[field]["sum"] for obj in bstor]
-            osd_perf[field] = avg_counters(count, values)
-
-    return osd_perf
+# def load_osd_perf_data(osd_id: int,
+#                        storage_type: OSDStoreType,
+#                        osd_perf_dump: Dict[int, List[Dict]]) -> Dict[str, numpy.ndarray]:
+#     osd_perf_dump = osd_perf_dump[osd_id]
+#     osd_perf: Dict[str, numpy.ndarray] = {}
+#
+#     if storage_type == OSDStoreType.filestore:
+#         fstor = [obj["filestore"] for obj in osd_perf_dump]
+#         for field in ("apply_latency", "commitcycle_latency", "journal_latency"):
+#             count = [obj[field]["avgcount"] for obj in fstor]
+#             values = [obj[field]["sum"] for obj in fstor]
+#             osd_perf[field] = avg_counters(count, values)
+#
+#         arr = numpy.array([obj['journal_wr_bytes']["avgcount"] for obj in fstor], dtype=numpy.float32)
+#         osd_perf["journal_ops"] = arr[1:] - arr[:-1]  # type: ignore
+#         arr = numpy.array([obj['journal_wr_bytes']["sum"] for obj in fstor], dtype=numpy.float32)
+#         osd_perf["journal_bytes"] = arr[1:] - arr[:-1]  # type: ignore
+#     else:
+#         bstor = [obj["bluestore"] for obj in osd_perf_dump]
+#         for field in ("commit_lat",):
+#             count = [obj[field]["avgcount"] for obj in bstor]
+#             values = [obj[field]["sum"] for obj in bstor]
+#             osd_perf[field] = avg_counters(count, values)
+#
+#     return osd_perf
 
 
 def load_pools(storage: TypedStorage, ver: CephVersions) -> Dict[int, Pool]:
@@ -299,13 +301,12 @@ class CephLoader:
     def load_ceph(self) -> CephInfo:
         settings = AttredDict(**parse_txt_ceph_config(self.storage.txt.master.default_config))
 
-        err_wrn = []
         errors_count = None
         status_regions = None
 
         for is_file, mon in self.storage.txt.mon:
             if not is_file:
-                err_wrn = self.storage.txt.mon[f"{mon}/ceph_log_wrn_err"].split("\n")
+                err_wrn: List[str] = self.storage.txt.mon[f"{mon}/ceph_log_wrn_err"].split("\n")
                 try:
                     log_count_dct = self.storage.json.mon[f"{mon}/log_issues_count"]
                 except KeyError:
@@ -340,7 +341,7 @@ class CephLoader:
 
         if pg_dump:
             logger.debug("Load pgdump")
-            pgs = parse_pg_dump(pg_dump)
+            pgs: Optional[PGDump] = parse_pg_dump(pg_dump)
         else:
             pgs = None
 

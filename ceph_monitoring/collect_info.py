@@ -96,7 +96,7 @@ class Node(INode):
         return {'name': self.hostname, 'ssh_enpoint': self.ssh_enpoint, 'all_ips': list(self.all_ips)}
 
     @property
-    def name(self) -> str:
+    def name(self) -> str:  # type: ignore
         return self.hostname
 
     def __str__(self) -> str:
@@ -916,7 +916,7 @@ class NodeCollector(Collector):
         else:
             code, _, out = self.node.run('nvme version')
             if code != 0:
-                ver = 0
+                ver = 0  # type: float
             else:
                 try:
                     *_, version = out.split()
@@ -957,7 +957,6 @@ class NodeCollector(Collector):
 
     def collect_interfaces_info(self) -> None:
         interfaces = {}
-        unknown_speed = []
         for is_phy, dev in get_host_interfaces(self.node):
             interface = {'dev': dev, 'is_phy': is_phy}
             interfaces[dev] = interface
@@ -972,8 +971,6 @@ class NodeCollector(Collector):
                     interface['iwconfig'] = iwconfig_out
 
         self.save('interfaces', 'json', 0, json.dumps(interfaces))
-        if unknown_speed:
-            logger.warning("Can't detect speed for interface(s): %s", ",".join(unknown_speed))
 
 
 class LoadCollector(Collector):
@@ -1400,7 +1397,7 @@ def pack_output_folder(out_folder: str, out_file: Optional[str], log_level: str)
 def commit_into_git(git_dir: str, log_file: str, target_log_file: str, git_push: bool, ceph_status: Dict[str, Any]):
     logger.info("Comiting into git")
 
-    [h_weak_ref().flush() for h_weak_ref in logging._handlerList]
+    [h_weak_ref().flush() for h_weak_ref in logging._handlerList]  # type: ignore
     shutil.copy(log_file, target_log_file)
     os.unlink(log_file)
 
@@ -1503,7 +1500,7 @@ def main(argv: List[str]) -> int:
                 pack_output_folder(out_folder, opts.output, opts.log_level)
 
             if opts.save_to_git:
-                assert isinstance(target_log_file, str)
+                assert isinstance(target_log_file, str) and isinstance(log_file, str)
                 ceph_health = json.loads(storage.get_raw("ceph_health_dict").decode("utf8"))
                 commit_into_git(opts.save_to_git,
                                 log_file=log_file,

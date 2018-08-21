@@ -11,7 +11,7 @@ def auto_group_by(items: Sequence[T], border: float = 0.3) -> Iterable[Iterable[
     assert all(set(item.__dict__) == all_attrs for item in items)
     entropy = {}
     for attr in all_attrs:
-        vals = Counter()
+        vals: Dict[str, int] = Counter()
         for item in items:
             vals[getattr(item, attr)] += 1
 

@@ -2,6 +2,7 @@ import shutil
 import logging
 import urllib.request
 from pathlib import Path
+from urllib.error import URLError
 from typing import Optional, List, Any, Tuple
 
 logger = logging.getLogger('report')
@@ -38,7 +39,7 @@ class Report:
             if link.startswith("http://") or link.startswith("https://"):
                 return False, link
             fname = link.rsplit('/', 1)[-1]
-            return True, static_files_dir / fname
+            return True, str(static_files_dir / fname)
 
         for link in self.style_links + self.script_links:
             local, fname = get_path(link)
@@ -51,8 +52,8 @@ class Report:
                     shutil.copyfile(fname, output_dir / Path(fname).name)
             else:
                 try:
-                    data = urllib.request.urlopen(fname, timeout=10)
-                except (TimeoutError, urllib.request.URLError):
+                    data = urllib.request.urlopen(fname, timeout=10).read().decode("utf8")
+                except (TimeoutError, URLError):
                     logger.warning(f"Can't retrieve {fname}")
 
             if data is not None:

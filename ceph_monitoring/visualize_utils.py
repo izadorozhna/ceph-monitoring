@@ -7,6 +7,10 @@ import numpy
 from .cluster_classes import  CephOSD, CephMonitor, CephVersion
 
 
+class StopError(Exception):
+    pass
+
+
 def seconds_to_str(seconds: Union[int, float]) -> str:
     seconds = int(seconds)
 
@@ -42,7 +46,7 @@ def get_all_versions(services: Iterable[Union[CephOSD, CephMonitor]]) -> Dict[Ce
 
 def tab(name: str) -> Callable[[Callable], Callable]:
     def closure(func: Callable) -> Callable:
-        func.report_name = name
+        func.report_name = name  # type: ignore
         return func
     return closure
 
@@ -112,17 +116,20 @@ def to_html_histo(vals: Sequence[Union[int, float]],
 
     vals_s = set(vals)
     if len(vals_s) == 1:
-        return f"{fmt(vals[0])}", vals[0]
+        return f"{fmt(vals[0])}", vals[0]  # type: ignore
     elif len(vals_s) < (3 if short else 7):
-        return "<br>".join(f"{fmt(val)}: {vals.count(val)}" for val in sorted(vals_s)), sum(vals) / len(vals)
+        msg = "<br>".join(f"{fmt(val)}: {vals.count(val)}" for val in sorted(vals_s))  # type: ignore
+        return msg, sum(vals) / len(vals)
     else:
         if short:
-            p0, p50, p100 = numpy.percentile(vals, [0, 50, 100])
-            return (f"min = {fmt(p0)}<br>mediana = {fmt(p50)}<br>max = {fmt(p100)}", p50)
+            p0, p50, p100 = numpy.percentile(vals, [0, 50, 100])  # type: ignore
+            return (f"min = {fmt(p0)}<br>mediana = {fmt(p50)}<br>max = {fmt(p100)}", p50)  # type: ignore
         else:
-            p0, p25, p50, p75, p90, p95, p100 = numpy.percentile(vals, [0, 25, 50, 75, 90, 95, 100])
-            return (f"min = {fmt(p0)}<br>25% < {fmt(p25)}<br>mediana = {fmt(p50)}<br>75% < {fmt(p75)}" +
-                    f"<br>90% < {fmt(p90)}<br>95% < {fmt(p95)}<br>max = {fmt(p100)}", p50)
+            p0, p25, p50, p75, p90, p95, p100 = numpy.percentile(vals, [0, 25, 50, 75, 90, 95, 100])  # type: ignore
+
+            msg = f"min = {fmt(p0)}<br>25% < {fmt(p25)}<br>mediana = {fmt(p50)}<br>75% < {fmt(p75)}"  # type: ignore
+            msg += f"<br>90% < {fmt(p90)}<br>95% < {fmt(p95)}<br>max = {fmt(p100)}"  # type: ignore
+            return (msg, p50)
 
 
 T = TypeVar('T')
