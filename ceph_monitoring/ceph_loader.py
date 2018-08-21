@@ -5,7 +5,7 @@ import datetime
 import collections
 from enum import Enum
 from ipaddress import IPv4Network
-from typing import Dict, Any, List, Union, Tuple, Optional
+from typing import Dict, Any, List, Union, Tuple, Optional, Set
 
 import numpy
 import dataclasses
@@ -54,9 +54,15 @@ def parse_pg_dump(data: Dict[str, Any]) -> PGDump:
         ymd, hms = vl_s.split()
         return datetime.datetime(*map(int, ymd.split("-")+ hms.split(":")), int(mks))
 
+    def process_status(status: str) -> Set[PGState]:
+        try:
+            return {getattr(PGState, status) for status in status.split("+")}
+        except AttributeError:
+            raise ValueError(f"Unknown status {status}")
+
     name_map = {
         "stat_sum": lambda x: PGStatSum(**x),
-        "state": lambda x: {getattr(PGState, status) for status in x.split("+")},
+        "state": process_status,
         "pgid": pgid_conv
     }
 

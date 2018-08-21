@@ -124,7 +124,7 @@ def show_osd_proc_info_agg(ceph: CephInfo) -> html.HTMLTable:
 
     for osd in ceph.osds.values():
         rules = tuple(ceph.crush.rules[rule_id].name for rule_id in osd.crush_rules_weights)
-        records[(osd.host.name, osd.class_name, rules)].append(osd)
+        records[(osd.host.name, osd.class_name if osd.class_name else '', rules)].append(osd)
 
     table = OSDLoadTableAgg()
 

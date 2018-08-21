@@ -584,6 +584,12 @@ class PGState(Enum):
     active = 0
     clean = 1
     peering = 2
+    recovery_wait = 3
+    degraded = 4
+    remapped = 5
+    backfill_wait = 6
+    recovering = 7
+    backfilling = 8
 
 
 @dataclass

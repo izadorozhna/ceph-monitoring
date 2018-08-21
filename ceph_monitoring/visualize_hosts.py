@@ -196,8 +196,8 @@ def show_hosts_status(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
             row.net_err = total_net_err
 
         if host.d_netstat:
-            row.net_err_no_buff = host.d_netstat.dropped_no_space_in_q
-            row.net_budget_over = host.d_netstat.no_budget
+            row.net_err_no_buff = int(host.d_netstat.dropped_no_space_in_q)
+            row.net_budget_over = int(host.d_netstat.no_budget)
 
     return run_info.html(id="table-hosts-run-info", align=html.TableAlign.center_right)
 
