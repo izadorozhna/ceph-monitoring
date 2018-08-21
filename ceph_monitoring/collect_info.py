@@ -288,7 +288,7 @@ def discover_ceph_services(master_node: INode, opts: Any, thcount: int = 1) -> C
         mons[ip] = name
 
     osds = {}  # type: Dict[str, List[OSDInfo]]
-    osd_nodes = get_osds_nodes(exec_func, opts.ceph_extra, thcount=thcount)
+    osd_nodes = get_osds_nodes(exec_func, opts.ceph_extra, get_config=False)
     for ip, osds_info in osd_nodes.items():
         assert ip not in osds
         osds[ip] = osds_info
@@ -644,7 +644,14 @@ class CephDataCollector(Collector):
 
                 # TODO: much of this can be done even id osd is down for filestore
                 if osd.id in running_osds:
-                    self.save("config", "txt", 0, osd.config)
+                    if not osd.config:
+                        code, osd.config = self.save_output("config",
+                                                            "ceph daemon osd.{} config show".format(osd.id),
+                                                            "txt")
+                        assert code == 0
+                    else:
+                        self.save("config", "txt", 0, osd.config)
+
                     dir_path = re.search("osd_data = (?P<dir_path>.*?)\n", osd.config).group("dir_path")
                     stor_type = self.node.get_file(os.path.join(dir_path, 'type'))
                     stor_type = stor_type.decode('utf8').strip()
