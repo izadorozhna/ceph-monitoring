@@ -4,6 +4,8 @@ import warnings
 import subprocess
 from io import BytesIO
 from typing import Callable, Any, AnyStr, Optional, Tuple, Dict, Iterator, Set, Union
+
+from cephlib.units import b2ssize
 from dataclasses import dataclass
 
 import distutils.spawn
@@ -248,37 +250,6 @@ def to_dot_name(name: str) -> str:
     return name.replace("-", "_").replace('.', '_')
 
 
-# def make_dot(node: Node, cmaps: Dict[str, numpy.ndarray]) -> Iterator[str]:
-#     if node.type == 'host':
-#         r, g, b = get_color(node.weight, True)
-#         a = 160
-#     elif node.type == rule.replicated_on:
-#         r, g, b = get_color(node.weight, False)
-#         a = 160
-#     else:
-#         r = g = b = a = 256
-#
-#     bgcolor = f"#{r:02X}{g:02X}{b:02X}{a:02X}"
-#
-#
-#     yield f'{to_dot_name(node.name)} [label="{node.name}\\n{node.weight:.2f}"' + \
-#           f' fillcolor="{bgcolor}" style=filled];'
-#
-#     for ch in node.childs:
-#         if ch.type != 'osd':
-#             yield from make_dot(ch, rule)
-#             yield f"{to_dot_name(node.name)} -> {to_dot_name(ch.name)};"
-#
-#             cm = colormap_host if is_host else colormap_repl
-#             max_w = max_host_w if is_host else max_repr_w
-#             min_w = min_host_w if is_host else min_repr_w
-#
-#             max_host_w = max(node.weight for node in root_node.iter_nodes('host'))
-#             min_host_w = min(min(node.weight for node in root_node.iter_nodes('host')), max_host_w * 0.6)
-#             max_repr_w = max(node.weight for node in root_node.iter_nodes(rule.replicated_on))
-#             min_repr_w = min(min(node.weight for node in root_node.iter_nodes(rule.replicated_on)), max_repr_w * 0.6)
-
-
 @dataclass
 class ValsSummary:
     max: float
@@ -331,18 +302,20 @@ def calc_min_max(levels: Set[str], summaries: Dict[str, ValsSummary],
     return sett
 
 
-def get_weight_colors(root_node: Node, ceph: CephInfo, rule: Rule, cmaps: Dict[str, numpy.ndarray]) -> Dict[str, str]:
+def get_weight_colors(root_node: Node, ceph: CephInfo, rule: Rule,
+                      cmaps: Dict[str, numpy.ndarray]) -> Dict[str, Tuple[str, str]]:
+
     def get_weight(node: Node, ceph: CephInfo) -> float:
         return node.weight
 
     types = {"host", rule.replicated_on}
     weights = get_values(root_node, ceph, types=types, getval=get_weight)
     sett = calc_min_max(types, weights, 0.6 )
-    return val2colors(weights, sett, cmaps)
+    return val2colors(weights, sett, cmaps, lambda x: f"{x:.2f}")
 
 
 def get_data_size_colors(root_node: Node, ceph: CephInfo, rule: Rule,
-                         cmaps: Dict[str, numpy.ndarray]) -> Dict[str, str]:
+                         cmaps: Dict[str, numpy.ndarray]) -> Dict[str, Tuple[str, str]]:
     sizes: Dict[str, float] = {}
 
     def set_data_size(node: Node) -> float:
@@ -360,11 +333,11 @@ def get_data_size_colors(root_node: Node, ceph: CephInfo, rule: Rule,
 
     types = {"host", rule.replicated_on}
     data_size = get_values(root_node, ceph, types=types, getval=get_data_size)
-    return val2colors(data_size, calc_min_max(types, data_size, 0.6), cmaps)
+    return val2colors(data_size, calc_min_max(types, data_size, 0.6), cmaps, b2ssize)
 
 
 def get_free_space_colors(root_node: Node, ceph: CephInfo, rule: Rule,
-                          cmaps: Dict[str, numpy.ndarray]) -> Dict[str, str]:
+                          cmaps: Dict[str, numpy.ndarray]) -> Dict[str, Tuple[str, str]]:
     free_space: Dict[str, float] = {}
 
     def set_free_space(node: Node) -> float:
@@ -382,12 +355,13 @@ def get_free_space_colors(root_node: Node, ceph: CephInfo, rule: Rule,
 
     types = {"host", rule.replicated_on}
     free_summ = get_values(root_node, ceph, types=types, getval=get_free_space)
-    return val2colors(free_summ, calc_min_max(types, free_summ, 0.6), cmaps)
+    return val2colors(free_summ, calc_min_max(types, free_summ, 0.6), cmaps, b2ssize)
 
 
 def get_free_perc_colors(root_node: Node, ceph: CephInfo, rule: Rule,
-                          cmaps: Dict[str, numpy.ndarray]) -> Dict[str, str]:
+                         cmaps: Dict[str, numpy.ndarray]) -> Dict[str, Tuple[str, str]]:
     free_perc: Dict[str, float] = {}
+
     def set_free_perc(node: Node) -> float:
         if node.name not in free_perc:
             if node.type == 'osd':
@@ -403,26 +377,29 @@ def get_free_perc_colors(root_node: Node, ceph: CephInfo, rule: Rule,
 
     types = {"host", rule.replicated_on}
     free_summ = get_values(root_node, ceph, types=types, getval=get_free_perc)
-    return val2colors(free_summ, calc_min_max(types, free_summ, 0.6), cmaps)
+    return val2colors(free_summ, calc_min_max(types, free_summ, 0.6), cmaps, lambda x: f"{int(x)}%")
 
 
 def val2colors(vals: Dict[str, ValsSummary],
                sett: Dict[str, Tuple[float, float]],
-               cmaps: Dict[str, numpy.ndarray]) -> Dict[str, str]:
-    res: Dict[str, str] = {}
+               cmaps: Dict[str, numpy.ndarray],
+               tostr: Callable[[float], str]) -> Dict[str, Tuple[str, str]]:
+    res: Dict[str, Tuple[str, str]] = {}
     a = 160
     for key, (max_v, min_v) in sett.items():
         for name, val in vals[key].values.items():
             r, g, b = get_color(val, cmaps[key], min_v, max_v)
             assert name not in res
-            res[name] = f"#{r:02X}{g:02X}{b:02X}{a:02X}"
+            res[name] = f"#{r:02X}{g:02X}{b:02X}{a:02X}", tostr(val)
     return res
 
 
 def make_dot(node: Node, idmap: Dict[str, str], id_prefix: str = "") -> Iterator[str]:
     dname = to_dot_name(node.name)
     htmlid = id_prefix + dname
-    yield f'{dname} [label="{node.name}\\n{node.weight:.2f}", id="{htmlid}"]'
+
+    # 00.00 is a stub for data, later will be filled into svg by js
+    yield f'{dname} [label="{node.name}\\n00.00", id="{htmlid}"]'
     assert node.name not in idmap
     idmap[node.name] = htmlid
     for ch in node.childs:
@@ -459,14 +436,14 @@ def plot_crush_rules(ceph: CephInfo, report: Report):
             targets = []
             div_id = f'div_{rule.name}'
             for func, name in [(get_weight_colors, 'weight'),
-                               (get_data_size_colors, 'size'),
+                               (get_data_size_colors, 'data_size'),
                                (get_free_space_colors, 'freespace'),
                                (get_free_perc_colors, 'free_perc')]:
 
                 colors = func(root_node, ceph, rule, cmaps)
                 colors_js = {idmap[name]: v for name, v in colors.items()}
                 varname = f"colors_{rule.name}_{name}"
-                report.scripts.append(f"{varname} = {json.dumps(colors_js)}")
+                report.scripts.append(f"const {varname} = {json.dumps(colors_js)}")
 
                 linkid = f'ptr_crush_{rule.name}_{name}'
                 targets.append(

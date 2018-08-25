@@ -38,8 +38,11 @@ function onHashChanged() {
 
 
 function setColors(cmap, divid, linkid) {
-    for (const [itemId, color] of Object.entries(cmap)) {
-        document.querySelector("#" + itemId + " ellipse").style.fill = color;
+    for (const [itemId, color_and_text] of Object.entries(cmap)) {
+        const [color, text] = color_and_text;
+        const ellips = document.querySelector("#" + itemId + " ellipse");
+        ellips.style.fill = color;
+        ellips.parentElement.children[3].innerHTML = text;
     }
 
     for(const el of document.querySelectorAll("div#" + divid + " span.selected"))
