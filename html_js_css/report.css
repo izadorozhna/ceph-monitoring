@@ -3,17 +3,13 @@ body {
     font: 10pt sans;
 }
 
-table.zebra-table tr:nth-child(even) {background-color: #E0E0FF;}
-table th {background: #e0e0e0;}
-
-.table-line-bg {background-color: #E0E0FF;}
-
 .right{
     position:relative;
     margin:0;
     padding:0;
     float:right;
 }
+
 .left{
     position:relative;
     margin:0;
@@ -21,7 +17,45 @@ table th {background: #e0e0e0;}
     float:left;
 }
 
-td { padding: 6px; }
+.menu-ceph {
+    width: 12%;
+    margin-left: 0;
+    float: left;
+    text-align: left;
+    top: 0;
+    position:fixed;
+    height: 100%;
+    background-color: #222;
+}
+
+.menu-ceph ul {padding: 35px 10px;}
+.menu-ceph li {padding: 5px;}
+
+.main-ceph {
+    position: absolute;
+    top: 3%;
+    margin-bottom: 3%;
+    margin-left: 15%;
+    margin-right: 2%;
+    width: 83%;
+    text-align: center;
+}
+
+.data-ceph {
+    visibility: hidden;
+    display:none;
+    position: absolute;
+    top: 3%;
+}
+
+/*tables*/
+/*general settings*/
+td {padding: 6px;}
+
+table.zebra-table tr:nth-child(even) {background-color: #E0E0FF;}
+table th {background: #e0e0e0;}
+
+.table-line-bg {background-color: #E0E0FF;}
 
 .table_lr th {text-align: center;}
 .table_lr td {text-align: right;}
@@ -38,50 +72,8 @@ td { padding: 6px; }
 .table_lc td {text-align: center;}
 .table_lc tr td:first-child {text-align: left;}
 
-.menu-ceph {
-    width: 10%;
-    margin-left: 0;
-    float: left;
-    text-align: left;
-    top: 0;
-    position:fixed;
-    font-size: 16px;
-    color: #c2c7c8;
-    height: 100%;
-    background-color: #222;
-}
-
-.menu-ceph ul {
-    padding: 35px 40px;
-}
-
-.menu-ceph li {
-    padding: 5px 10px;
-}
-
-.menu-ceph a:hover {
-    cursor: pointer;
-    color: #f1f100;
-    background-color: #666;
-}
-
-.main-ceph {
-    position: absolute;
-    top: 3%;
-    margin-bottom: 3%;
-    margin-left: 12%;
-    margin-right: 2%;
-    width: 86%;
-    text-align: center;
-}
-
-.data-ceph {
-    visibility: hidden;
-    display:none;
-    position: absolute;
-    top: 3%;
-}
-
+/* tables by id. Should, probably, be class as well,
+   as there should be no table with class and id below at the same time */
 #table-summary {width: 40%;}
 #table-osd-summary {width: 40%;}
 #table-io-summary {width: 40%;}
@@ -107,22 +99,46 @@ td { padding: 6px; }
 #table-cluster-nets-wide {width: 80%;}
 #table-errors-summary {width: 30%;}
 
+/* tables by class */
 .table-net-load {width: 80%;}
-
-a.link {
-    color: #0000EE;
-    border-bottom: 1px solid black;
-    padding-bottom: 0;
-}
-
-a.link:visited {color: #551A8B;}
-a.link:hover {cursor: pointer; color: #a1a1ff;}
-
 .hostinfo-net {width: 80%;}
 .hostinfo-disks {width: 80%;}
 .io_load_in_color {width: 100%;}
 .hostinfo-mountable {width: 80%;}
 .hostinfo-mountable tr td:first-child {text-align: left;}
+
+/* links */
+/* main menu items */
+
+span.menulink.selected {font-weight: bold;}
+span.menulink {
+    font-size: 16px;
+    color: #c2c7c8;
+}
+
+span.menulink:hover {
+    cursor: pointer;
+    color: #a1a1ff;
+    background-color: #666;
+}
+
+/* object links in report body */
+span.objlink, span.crushlink {
+    color: #0000EE;
+    border-bottom: 1px solid black;
+    padding-bottom: 0;
+}
+
+span.objlink:visited, span.crushlink:visited {color: #551A8B;}
+
+span.objlink:hover, span.crushlink:hover {
+    cursor: pointer;
+    color: #a1a1ff;
+}
+
+span.crushlink.selected {color: lightseagreen;}
+
+/* tree-like structures in tables */
 
 .disk-children-0 {}
 .disk-children-1 {padding-left: 10%;}

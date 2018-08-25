@@ -57,7 +57,7 @@ def parse_pg_dump(data: Dict[str, Any]) -> PGDump:
 
     def process_status(status: str) -> Set[PGState]:
         try:
-            return {getattr(PGState, status) for status in status.split("+")}
+            return {getattr(PGState, status.replace("-", "_")) for status in status.split("+")}
         except AttributeError:
             raise ValueError(f"Unknown status {status}")
 

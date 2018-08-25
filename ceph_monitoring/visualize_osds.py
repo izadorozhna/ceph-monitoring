@@ -107,7 +107,7 @@ class OSDLoadTableAgg(Table):
     pgs = ident("PG's", dont_sort=True)
     open_files = ident("open<br>files")
     ip_conn = ident("ip<br>conn")
-    threads = ident("thr")
+    threads = ident("Thread<br>count")
     rss = ident("RSS")
     vmm = ident("VMM")
     cpu_used = ident("CPU<br>Used, s")
@@ -227,11 +227,11 @@ def show_osd_info(ceph: CephInfo) -> html.HTMLTable:
         storage_type = ident("Type")
         storage_dev = ident("Storage<br>dev type")
         storage_total = bytes_sz("Storage<br>total")
-        journal_or_wal_collocated = yes_or_no("Journal<br>or wal<br>colocated", true_fine=False)
+        journal_or_wal_collocated = ident("Journal<br>or wal<br>colocated")
         journal_or_wal_type = ident("Journal<br>or wal<br>dev type")
         journal_or_wal_size = ident("Journal<br>or wal<br>size")
         journal_on_file = yes_or_no("Journal<br>on file", true_fine=False)
-        db_collocated = yes_or_no("DB<br>colocated", true_fine=False)
+        db_collocated = ident("DB<br>colocated")
         db_type = ident("DB<br>dev type")
         db_size = ident("DB<br>size")
 
@@ -283,7 +283,8 @@ def show_osd_info(ceph: CephInfo) -> html.HTMLTable:
 
         data_drive_color_fn = (html.ok if osd.storage_info.data.dev_info.tp in fast_drives  # type: ignore
                                else lambda x: x)  # type: ignore
-        row.storage_dev = data_drive_color_fn(osd.storage_info.data.dev_info.tp.name)
+        row.storage_dev = data_drive_color_fn(osd.storage_info.data.dev_info.tp.name), \
+            osd.storage_info.data.dev_info.tp.name
 
         # color = "red" if osd.free_perc < 20 else ( "yellow" if osd.free_perc < 40 else "green")
         # avail_perc_str = H.font(osd.free_perc, color=color)
@@ -304,7 +305,15 @@ def show_osd_info(ceph: CephInfo) -> html.HTMLTable:
             jinfo = osd.storage_info.wal
             min_size = 512 * 1024 * 1024
 
-        row.journal_or_wal_collocated = jinfo.dev_info.dev_path == data_dev_path
+        if jinfo.dev_info.dev_path == data_dev_path:
+            if jinfo.dev_info.tp in (DiskType.nvme, DiskType.sata_ssd, DiskType.sas_ssd):
+                vl = "yes"
+            else:
+                vl = html.fail("yes"), "yes"
+        else:
+            vl = "no"
+        row.journal_or_wal_collocated = vl
+
         color = html.ok if jinfo.dev_info.tp in fast_drives else html.fail
         row.journal_or_wal_type = color(jinfo.dev_info.tp.name), jinfo.dev_info.tp.name
         size_s = b2ssize(osd_info.journal_or_wal_size)
@@ -312,7 +321,8 @@ def show_osd_info(ceph: CephInfo) -> html.HTMLTable:
             osd_info.journal_or_wal_size
 
         if isinstance(osd.storage_info, FileStoreInfo):
-            row.journal_on_file = osd.storage_info.journal.partition_name == osd.storage_info.data.partition_name
+            jonfile = osd.storage_info.journal.partition_name == osd.storage_info.data.partition_name
+            row.journal_on_file = (html.fail("yes"), "yes") if jonfile else "no"
 
         if isinstance(osd.storage_info, BlueStoreInfo):
             if osd.storage_info.db.dev_info.size is not None:
@@ -321,7 +331,16 @@ def show_osd_info(ceph: CephInfo) -> html.HTMLTable:
                 min_db_size = 0
 
             info = osd.storage_info.db.dev_info
-            row.db_collocated = info.dev_path == data_dev_path
+
+            if info.dev_path == data_dev_path:
+                if info.tp in (DiskType.nvme, DiskType.sata_ssd, DiskType.sas_ssd):
+                    vl = "yes"
+                else:
+                    vl = html.fail("yes"), "yes"
+            else:
+                vl = "no"
+
+            row.db_collocated = vl
             color = html.ok if info.tp in fast_drives else html.fail
             row.db_type = color(info.tp.name), info.tp.name
             size_s = b2ssize(osd_info.db_size)

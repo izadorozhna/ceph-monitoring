@@ -1,8 +1,10 @@
+import json
 import logging
 import warnings
 import subprocess
 from io import BytesIO
-from typing import Callable, Any, AnyStr, Optional, Tuple, List, Iterator
+from typing import Callable, Any, AnyStr, Optional, Tuple, Dict, Iterator, Set, Union
+from dataclasses import dataclass
 
 import distutils.spawn
 from typing_extensions import Protocol
@@ -16,10 +18,9 @@ with warnings.catch_warnings():
     import seaborn
 
 from cephlib.plot import plot_histo, hmap_from_2d, plot_hmap_with_histo
-from cephlib.crush import Node
+from cephlib.crush import Node, Rule
 
 
-from .cluster import Cluster
 from .ceph_loader import NO_VALUE, CephInfo
 # from .osd_ops import calc_stages_time, iter_ceph_ops, ALL_STAGES
 # from .perf_parser import STAGES_PRINTABLE_NAMES
@@ -207,34 +208,232 @@ def get_kde_img(vals: numpy.ndarray) -> str:
 #     return "nodes", get_img(pyplot)
 
 
+colormap_host = (numpy.array([(0.5274894271434064, 0.304959630911188, 0.03729334871203383),
+                             (0.7098039215686275, 0.46897347174163784, 0.14955786236063054),
+                             (0.8376009227220299, 0.6858131487889272, 0.39792387543252583),
+                             (0.9328719723183391, 0.8572087658592848, 0.6678200692041522),
+                             (0.9625528642829682, 0.9377931564782775, 0.8723567858515955),
+                             (0.8794309880815072, 0.9413302575932334, 0.932487504805844),
+                             (0.6821222606689737, 0.8775086505190313, 0.8482122260668975),
+                             (0.415455594002307, 0.7416378316032297, 0.6991926182237602),
+                             (0.16785851595540177, 0.554479046520569, 0.5231064975009612),
+                             (0.003537101114955786, 0.3838523644752019, 0.35094194540561324)]
+                             ) * 256).astype(numpy.uint8)
+
+
+colormap_repl = (numpy.array([(0.11864667435601693, 0.37923875432525955, 0.6456747404844292),
+                              (0.2366013071895425, 0.5418685121107266, 0.7470203767781622),
+                              (0.481430219146482, 0.714878892733564, 0.8394463667820069),
+                              (0.7324106113033448, 0.8537485582468282, 0.9162629757785467),
+                              (0.9014225297962322, 0.9367935409457901, 0.9562475970780469),
+                              (0.9792387543252595, 0.9191080353710112, 0.8837370242214534),
+                              (0.9797001153402538, 0.7840830449826992, 0.6848904267589392),
+                              (0.9222606689734718, 0.5674740484429068, 0.4486735870818917),
+                              (0.8115340253748559, 0.32110726643598614, 0.27581699346405225),
+                              (0.6692041522491349, 0.08489042675893888, 0.16401384083044984)]
+                             ) * 256).astype(numpy.uint8)
+
+
+def get_color(w: float, cmap: numpy.ndarray, min_w:float, max_w: float) -> Tuple[int, int, int]:
+    if abs(w - max_w) < 1e-5:
+        return tuple(cmap[-1])  # type: ignore
+
+    idx = (w - min_w) / (max_w - min_w) * (len(cmap) - 1)
+    lidx = int(idx)
+    c1 = 1.0 - (idx - lidx)
+    return (c1 * cmap[lidx] + (1.0 - c1) * cmap[lidx + 1]).astype(numpy.uint8)
+
+
+def to_dot_name(name: str) -> str:
+    return name.replace("-", "_").replace('.', '_')
+
+
+# def make_dot(node: Node, cmaps: Dict[str, numpy.ndarray]) -> Iterator[str]:
+#     if node.type == 'host':
+#         r, g, b = get_color(node.weight, True)
+#         a = 160
+#     elif node.type == rule.replicated_on:
+#         r, g, b = get_color(node.weight, False)
+#         a = 160
+#     else:
+#         r = g = b = a = 256
+#
+#     bgcolor = f"#{r:02X}{g:02X}{b:02X}{a:02X}"
+#
+#
+#     yield f'{to_dot_name(node.name)} [label="{node.name}\\n{node.weight:.2f}"' + \
+#           f' fillcolor="{bgcolor}" style=filled];'
+#
+#     for ch in node.childs:
+#         if ch.type != 'osd':
+#             yield from make_dot(ch, rule)
+#             yield f"{to_dot_name(node.name)} -> {to_dot_name(ch.name)};"
+#
+#             cm = colormap_host if is_host else colormap_repl
+#             max_w = max_host_w if is_host else max_repr_w
+#             min_w = min_host_w if is_host else min_repr_w
+#
+#             max_host_w = max(node.weight for node in root_node.iter_nodes('host'))
+#             min_host_w = min(min(node.weight for node in root_node.iter_nodes('host')), max_host_w * 0.6)
+#             max_repr_w = max(node.weight for node in root_node.iter_nodes(rule.replicated_on))
+#             min_repr_w = min(min(node.weight for node in root_node.iter_nodes(rule.replicated_on)), max_repr_w * 0.6)
+
+
+@dataclass
+class ValsSummary:
+    max: float
+    min: float
+    values: Dict[str, float]
+
+
+def do_get_values(node: Node,
+                  ceph: CephInfo,
+                  types: Set[str],
+                  getval: Callable[[Node, CephInfo], float],
+                  res: Dict[str, ValsSummary]):
+    if node.type in types:
+        vs = res.get(node.type)
+        if vs:
+            assert node.name not in vs.values
+        else:
+            vs = res[node.type] = ValsSummary(-1, -1, {})
+        vs.values[node.name] = getval(node, ceph)
+
+    for ch in node.childs:
+        do_get_values(ch, ceph, types, getval, res)
+
+
+def get_values(node: Node, ceph: CephInfo, types: Set[str], getval: Callable[[Node, CephInfo], float]) \
+        -> Dict[str, ValsSummary]:
+    res: Dict[str, ValsSummary] = {}
+    do_get_values(node, ceph, types, getval, res)
+    for vs in res.values():
+        vs.max = max(vs.values.values())
+        vs.min = min(vs.values.values())
+
+    return res
+
+
+def calc_min_max(levels: Set[str], summaries: Dict[str, ValsSummary],
+                 minmax_coef: Union[float, Dict[str, float]]) -> Dict[str, Tuple[float, float]]:
+
+    sett: Dict[str, Tuple[float, float]] = {}
+    for level in levels:
+        if isinstance(minmax_coef, float):
+            min_v = min(summaries[level].min, minmax_coef * summaries[level].max)
+        elif level not in minmax_coef:
+            min_v = summaries[level].min
+        else:
+            min_v = min(summaries[level].min, minmax_coef[level] * summaries[level].max)
+
+        sett[level] = (min_v, summaries[level].max)
+
+    return sett
+
+
+def get_weight_colors(root_node: Node, ceph: CephInfo, rule: Rule, cmaps: Dict[str, numpy.ndarray]) -> Dict[str, str]:
+    def get_weight(node: Node, ceph: CephInfo) -> float:
+        return node.weight
+
+    types = {"host", rule.replicated_on}
+    weights = get_values(root_node, ceph, types=types, getval=get_weight)
+    sett = calc_min_max(types, weights, 0.6 )
+    return val2colors(weights, sett, cmaps)
+
+
+def get_data_size_colors(root_node: Node, ceph: CephInfo, rule: Rule,
+                         cmaps: Dict[str, numpy.ndarray]) -> Dict[str, str]:
+    sizes: Dict[str, float] = {}
+
+    def set_data_size(node: Node) -> float:
+        if node.name not in sizes:
+            if node.type == 'osd':
+                sizes[node.name] = ceph.osds[node.id].used_space
+            else:
+                sizes[node.name] = sum(map(set_data_size, node.childs))
+        return sizes[node.name]
+
+    def get_data_size(node: Node, ceph: CephInfo) -> float:
+        return sizes[node.name]
+
+    set_data_size(root_node)
+
+    types = {"host", rule.replicated_on}
+    data_size = get_values(root_node, ceph, types=types, getval=get_data_size)
+    return val2colors(data_size, calc_min_max(types, data_size, 0.6), cmaps)
+
+
+def get_free_space_colors(root_node: Node, ceph: CephInfo, rule: Rule,
+                          cmaps: Dict[str, numpy.ndarray]) -> Dict[str, str]:
+    free_space: Dict[str, float] = {}
+
+    def set_free_space(node: Node) -> float:
+        if node.name not in free_space:
+            if node.type == 'osd':
+                free_space[node.name] = ceph.osds[node.id].free_space
+            else:
+                free_space[node.name] = sum(map(set_free_space, node.childs))
+        return free_space[node.name]
+
+    def get_free_space(node: Node, ceph: CephInfo) -> float:
+        return free_space[node.name]
+
+    set_free_space(root_node)
+
+    types = {"host", rule.replicated_on}
+    free_summ = get_values(root_node, ceph, types=types, getval=get_free_space)
+    return val2colors(free_summ, calc_min_max(types, free_summ, 0.6), cmaps)
+
+
+def get_free_perc_colors(root_node: Node, ceph: CephInfo, rule: Rule,
+                          cmaps: Dict[str, numpy.ndarray]) -> Dict[str, str]:
+    free_perc: Dict[str, float] = {}
+    def set_free_perc(node: Node) -> float:
+        if node.name not in free_perc:
+            if node.type == 'osd':
+                free_perc[node.name] = ceph.osds[node.id].free_perc
+            else:
+                free_perc[node.name] = min(map(set_free_perc, node.childs))
+        return free_perc[node.name]
+
+    def get_free_perc(node: Node, ceph: CephInfo) -> float:
+        return free_perc[node.name]
+
+    set_free_perc(root_node)
+
+    types = {"host", rule.replicated_on}
+    free_summ = get_values(root_node, ceph, types=types, getval=get_free_perc)
+    return val2colors(free_summ, calc_min_max(types, free_summ, 0.6), cmaps)
+
+
+def val2colors(vals: Dict[str, ValsSummary],
+               sett: Dict[str, Tuple[float, float]],
+               cmaps: Dict[str, numpy.ndarray]) -> Dict[str, str]:
+    res: Dict[str, str] = {}
+    a = 160
+    for key, (max_v, min_v) in sett.items():
+        for name, val in vals[key].values.items():
+            r, g, b = get_color(val, cmaps[key], min_v, max_v)
+            assert name not in res
+            res[name] = f"#{r:02X}{g:02X}{b:02X}{a:02X}"
+    return res
+
+
+def make_dot(node: Node, idmap: Dict[str, str], id_prefix: str = "") -> Iterator[str]:
+    dname = to_dot_name(node.name)
+    htmlid = id_prefix + dname
+    yield f'{dname} [label="{node.name}\\n{node.weight:.2f}", id="{htmlid}"]'
+    assert node.name not in idmap
+    idmap[node.name] = htmlid
+    for ch in node.childs:
+        if ch.type != 'osd':
+            yield from make_dot(ch, idmap, id_prefix)
+            yield f"{dname} -> {to_dot_name(ch.name)};"
+
+
 @plot
 def plot_crush_rules(ceph: CephInfo, report: Report):
     neato_path = distutils.spawn.find_executable('neato')
-
-    colormap_host = (numpy.array([(0.5274894271434064, 0.304959630911188, 0.03729334871203383),
-                                 (0.7098039215686275, 0.46897347174163784, 0.14955786236063054),
-                                 (0.8376009227220299, 0.6858131487889272, 0.39792387543252583),
-                                 (0.9328719723183391, 0.8572087658592848, 0.6678200692041522),
-                                 (0.9625528642829682, 0.9377931564782775, 0.8723567858515955),
-                                 (0.8794309880815072, 0.9413302575932334, 0.932487504805844),
-                                 (0.6821222606689737, 0.8775086505190313, 0.8482122260668975),
-                                 (0.415455594002307, 0.7416378316032297, 0.6991926182237602),
-                                 (0.16785851595540177, 0.554479046520569, 0.5231064975009612),
-                                 (0.003537101114955786, 0.3838523644752019, 0.35094194540561324)]
-                                 ) * 256).astype(numpy.uint8)
-
-    colormap_repl = (numpy.array([(0.11864667435601693, 0.37923875432525955, 0.6456747404844292),
-                                  (0.2366013071895425, 0.5418685121107266, 0.7470203767781622),
-                                  (0.481430219146482, 0.714878892733564, 0.8394463667820069),
-                                  (0.7324106113033448, 0.8537485582468282, 0.9162629757785467),
-                                  (0.9014225297962322, 0.9367935409457901, 0.9562475970780469),
-                                  (0.9792387543252595, 0.9191080353710112, 0.8837370242214534),
-                                  (0.9797001153402538, 0.7840830449826992, 0.6848904267589392),
-                                  (0.9222606689734718, 0.5674740484429068, 0.4486735870818917),
-                                  (0.8115340253748559, 0.32110726643598614, 0.27581699346405225),
-                                  (0.6692041522491349, 0.08489042675893888, 0.16401384083044984)]
-                                 ) * 256).astype(numpy.uint8)
-
 
     if not neato_path:
         logger.warning("Neato tool not found, probably graphviz package is not installed. " +
@@ -245,50 +444,38 @@ def plot_crush_rules(ceph: CephInfo, report: Report):
             if not root_node:
                 continue
 
-            max_host_w = max(node.weight for node in root_node.iter_nodes('host'))
-            min_host_w = min(min(node.weight for node in root_node.iter_nodes('host')), max_host_w * 0.6)
-            max_repr_w = max(node.weight for node in root_node.iter_nodes(rule.replicated_on))
-            min_repr_w = min(min(node.weight for node in root_node.iter_nodes(rule.replicated_on)), max_repr_w * 0.6)
+            cmaps = {"host": colormap_host}
+            if rule.replicated_on != "host":
+                cmaps[rule.replicated_on] = colormap_repl
 
-            def get_color(w: float, is_host: bool) -> Tuple[int, int, int]:
-                cm = colormap_host if is_host else colormap_repl
-                max_w = max_host_w if is_host else max_repr_w
-                min_w = min_host_w if is_host else min_repr_w
-
-                if abs(w - max_w) < 1e-5:
-                    return tuple(cm[-1])  # type: ignore
-
-                idx = (w - min_w) / (max_w - min_w) * (len(cm) - 1)
-                lidx = int(idx)
-                c1 = 1.0 - (idx - lidx)
-                return (c1 * cm[lidx] + (1.0 - c1) * cm[lidx + 1]).astype(numpy.uint8)
-
-            # make dot
-            def make_dot(node: Node) -> Iterator[str]:
-                if node.type == 'host':
-                    r, g, b = get_color(node.weight, True)
-                    a = 160
-                elif node.type == rule.replicated_on:
-                    r, g, b = get_color(node.weight, False)
-                    a = 160
-                else:
-                    r = g = b = a = 256
-
-                bgcolor = f"#{r:02X}{g:02X}{b:02X}{a:02X}"
-
-                def to_dot_name(name: str) -> str:
-                    return name.replace("-", "_").replace('.', '_')
-
-                yield f'{to_dot_name(node.name)} [label="{node.name}\\n{node.weight:.2f}"' + \
-                      f' fillcolor="{bgcolor}" style=filled];'
-
-                for ch in node.childs:
-                    if ch.type != 'osd':
-                        yield from make_dot(ch)
-                        yield f"{to_dot_name(node.name)} -> {to_dot_name(ch.name)};"
+            # maps crush node id to html node id
+            idmap: Dict[str, str] = {}
 
             dot = f"digraph {rule.name} {{\n    overlap = scale;\n    "
-            dot += "\n    ".join(make_dot(root_node)) + "\n}"
+            dot += "\n    ".join(make_dot(root_node, idmap, id_prefix=rule.name + "_")) + "\n}"
             svg = subprocess.check_output("neato -Tsvg", shell=True, input=dot.encode('utf8')).decode("utf8")
             svg = svg[svg.index("<svg "):]
-            report.add_block(f"crush_svg_{rule.name}", None, svg, f"Tree for '{rule.name}'")
+
+            targets = []
+            div_id = f'div_{rule.name}'
+            for func, name in [(get_weight_colors, 'weight'),
+                               (get_data_size_colors, 'size'),
+                               (get_free_space_colors, 'freespace'),
+                               (get_free_perc_colors, 'free_perc')]:
+
+                colors = func(root_node, ceph, rule, cmaps)
+                colors_js = {idmap[name]: v for name, v in colors.items()}
+                varname = f"colors_{rule.name}_{name}"
+                report.scripts.append(f"{varname} = {json.dumps(colors_js)}")
+
+                linkid = f'ptr_crush_{rule.name}_{name}'
+                targets.append(
+                    f'''<span class="crushlink" onclick="setColors({varname}, '{div_id}', '{linkid}')" 
+                    id="{linkid}">{name}</span>''')
+
+            report.onload.append(f"setColors(colors_{rule.name}_weight, '{div_id}', 'ptr_crush_{rule.name}_weight')")
+            targets = ',&nbsp;&nbsp;&nbsp;'.join(targets)
+            report.add_block(f"crush_svg_{rule.name}",
+                             None,
+                             f'''<div id="{div_id}"><center>{targets}</center></div><br>\n{svg}''',
+                             f"Tree for '{rule.name}'")

@@ -590,6 +590,22 @@ class PGState(Enum):
     backfill_wait = 6
     recovering = 7
     backfilling = 8
+    creating = 9
+    activating = 10
+    down = 11
+    inconsistent = 12
+    repair = 13
+    forced_recovery = 14
+    recovery_toofull = 16
+    recovery_unfound = 16
+    forced_backfill = 17
+    backfill_toofull = 18
+    backfill_unfound = 19
+    incomplete = 20
+    stale = 21
+    undersized = 22
+    peered = 23
+    snaptrim_error = 24
 
 
 @dataclass

@@ -18,6 +18,7 @@ class Report:
         self.script_links: List[str] = []
         self.scripts: List[str] = []
         self.divs: List[Tuple[str, Optional[str], Optional[str], str]] = []
+        self.onload: List[str] = ["onHashChanged()"]
 
     def add_block(self, name: str, header: Optional[str], block_obj: Any, menu_item: str = None):
         if menu_item is None:
@@ -81,19 +82,29 @@ class Report:
                 for url in js_links:
                     doc.script(type="text/javascript", src=url)
 
-                for script in self.scripts:
-                    doc.script(script, type="text/javascript")
+                onload = "    " + ";\n    ".join(self.onload)
+                self.scripts.append(f'function onload(){{\n{onload};\n}}')
+                code = ";\n".join(self.scripts)
 
-            with doc.body(onload="onHashChanged()"):
+                if embed:
+                    doc.script(code, type="text/javascript")
+                else:
+                    (output_dir / "onload.js").open("w").write(code)
+                    doc.script(type="text/javascript", src="onload.js")
+
+            with doc.body(onload="onload()"):
                 with doc.div(_class="menu-ceph"):
                     with doc.ul():
-                        for div in self.divs:
+                        for idx, div in enumerate(self.divs):
                             if div is not None:
                                 name, _, menu, _ = div
                                 if menu:
                                     if menu.endswith(":"):
                                         menu = menu[:-1]
-                                    doc.li.a(menu, onclick=f"clicked('{name}')")
+                                    doc.li.span(menu,
+                                                _class="menulink",
+                                                onclick=f"clicked('{name}')",
+                                                id=f"ptr_{name}")
 
                 for div in self.divs:
                     doc("\n")

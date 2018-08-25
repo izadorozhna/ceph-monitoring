@@ -35,8 +35,8 @@ from .visualize_cluster import show_cluster_summary, show_issues_table, show_pri
                                show_cluster_err_warn_summary
 from .visualize_pools_pgs import show_pools_info, show_pg_state, show_pg_size_kde, show_pools_lifetime_load, \
                                  show_pools_curr_load
-from .visualize_hosts import show_hosts_config, show_host_io_load_in_color, show_host_network_load_in_color, \
-                             host_info, show_hosts_status, show_hosts_pg_info
+from .visualize_hosts import show_hosts_config, host_info, show_hosts_status, show_hosts_pg_info
+from .visualize_host_load import show_host_io_load_in_color, show_host_network_load_in_color
 from .visualize_osds import show_osd_state, show_osd_info, show_osd_perf_info, show_osd_pool_pg_distribution, \
                             show_osd_pool_agg_pg_distribution, show_osd_proc_info, show_osd_proc_info_agg
 from .plot_data import plot_crush_rules, show_osd_used_space_histo

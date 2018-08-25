@@ -113,17 +113,22 @@ def parse_diskstats(data: str) -> Dict[str, BlockUsage]:
             write_bytes = int(vals[sectors_written]) * SECTOR_SIZE
             read_iops = int(vals[reads_completed])
             write_iops = int(vals[writes_completed])
+            io_time_v = int(vals[io_time])
+            w_io_time = int(vals[weighted_io_time])
+            iops = read_iops + write_iops
+            qd = w_io_time / io_time if io_time > 1000 else None
+            lat = w_io_time / iops if iops > 100 else None
 
             res[name] = BlockUsage(read_bytes=read_bytes,
                                    write_bytes=write_bytes,
                                    total_bytes=read_bytes + write_bytes,
                                    read_iops=read_iops,
                                    write_iops=write_iops,
-                                   iops=read_iops + write_iops,
-                                   io_time=int(vals[io_time]),
-                                   w_io_time=int(vals[weighted_io_time]),
-                                   queue_depth=int(vals[weighted_io_time]),
-                                   lat=None)
+                                   iops=iops,
+                                   io_time=io_time_v,
+                                   w_io_time=w_io_time,
+                                   lat=lat,
+                                   queue_depth=qd)
 
     return res
 
@@ -150,6 +155,12 @@ def parse_lsblkjs(data: List[Dict[str, Any]],
                 tp = 'nvme'
             elif disk_js['subsystems'] == 'block:virtio:pci':
                 tp = 'virtio'
+
+        # raid controllers often don't report ssd drives correctly
+        # only SSD has 4k phy sec size
+        phy_sec = int(disk_js["phy-sec"])
+        if phy_sec == 4096:
+            disk_js["rota"] = '0'
 
         stor_tp = {
             ('sata', '1'): DiskType.sata_hdd,
@@ -183,7 +194,7 @@ def parse_lsblkjs(data: List[Dict[str, Any]],
                    extra=disk_js,
                    hw_model=HWModel(vendor=disk_js['vendor'], model=disk_js['model'], serial=disk_js['serial']),
                    rq_size=int(disk_js["rq-size"]),
-                   phy_sec=int(disk_js["phy-sec"]),
+                   phy_sec=phy_sec,
                    min_io=int(disk_js["min-io"]),
                    tp=stor_tp)
 
@@ -487,17 +498,25 @@ def fill_usage(cluster: Cluster, cluster_old: Cluster, ceph: CephInfo, ceph_old:
         for dev_name, dev in host.logic_block_devs.items():
             dev_old = host_old.logic_block_devs[dev_name]
             assert not dev.d_usage
+
+            dio_time = dev.usage.io_time - dev_old.usage.io_time
+            dwio_time = dev.usage.w_io_time - dev_old.usage.w_io_time
+            d_iops = dev.usage.iops - dev_old.usage.iops
+
+            if host_name == 'ceph34' and dev_name == 'sda':
+                x = 1
+
             dev.d_usage = BlockUsage(
                 read_bytes=(dev.usage.read_bytes - dev_old.usage.read_bytes) / dtime,
                 write_bytes=(dev.usage.write_bytes - dev_old.usage.write_bytes) / dtime,
                 total_bytes=(dev.usage.total_bytes - dev_old.usage.total_bytes) / dtime,
                 read_iops=(dev.usage.read_iops - dev_old.usage.read_iops) / dtime,
                 write_iops=(dev.usage.write_iops - dev_old.usage.write_iops) / dtime,
-                io_time=(dev.usage.io_time - dev_old.usage.io_time) / dtime,
-                w_io_time=(dev.usage.w_io_time - dev_old.usage.w_io_time) / dtime,
-                iops=(dev.usage.iops - dev_old.usage.iops) / dtime,
-                queue_depth=None,
-                lat=None)
+                io_time=dio_time / dtime,
+                w_io_time=dwio_time / dtime,
+                iops=d_iops / dtime,
+                queue_depth=dwio_time / dio_time if dio_time > 1000 else None,
+                lat=dio_time / d_iops if d_iops > 100 else None)
 
         for dev_name, netdev in host.net_adapters.items():
             netdev_old = host_old.net_adapters[dev_name]
