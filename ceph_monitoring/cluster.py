@@ -503,9 +503,6 @@ def fill_usage(cluster: Cluster, cluster_old: Cluster, ceph: CephInfo, ceph_old:
             dwio_time = dev.usage.w_io_time - dev_old.usage.w_io_time
             d_iops = dev.usage.iops - dev_old.usage.iops
 
-            if host_name == 'ceph34' and dev_name == 'sda':
-                x = 1
-
             dev.d_usage = BlockUsage(
                 read_bytes=(dev.usage.read_bytes - dev_old.usage.read_bytes) / dtime,
                 write_bytes=(dev.usage.write_bytes - dev_old.usage.write_bytes) / dtime,

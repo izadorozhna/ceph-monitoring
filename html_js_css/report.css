@@ -79,8 +79,8 @@ table th {background: #e0e0e0;}
 #table-io-summary {width: 40%;}
 #table-mon-info {width: 60%;}
 #table-hosts-info {width: 80%;}
-#table-hosts-run-info {width: 60%;}
-#table-osd-curr-load {width: 80%;}
+#table-hosts-run-info {width: 80%;}
+#table-osd-dev-uptime-load {width: 95%;}
 #table-hosts-pg-info-long {width: 60%;}
 #table-hosts-pg-info {width: 45%;}
 #table-osds-state {width: 80%;}
@@ -89,12 +89,13 @@ table th {background: #e0e0e0;}
 #table-pg-per-osd {width: 100%;}
 #table-pg-per-osd-agg {width: 60%;}
 #table-osd-info {width: 100%;}
-#table-osd-process-info {width: 80%;}
+#table-osd-process-info {width: 60%;}
 #table-osd-process-info-agg {width: 90%;}
 #table-issues {width: 80%;}
-#table-rules {width: 100%;}
+#table-rules {width: 80%;}
 #table-settings {width: 60%;}
-#table-pools-io {width: 60%;}
+#table-pools-io {width: 80%;}
+#table-pools-io-uptime {width: 70%;}
 #table-cluster-nets {width: 60%;}
 #table-cluster-nets-wide {width: 80%;}
 #table-errors-summary {width: 30%;}

@@ -225,6 +225,16 @@ class DiskType(Enum):
     virtio = 5
     unknown = 6
 
+    @property
+    def short_name(self) -> str:
+        return {DiskType.nvme: 'nvme',
+                DiskType.sata_ssd: 'ssd',
+                DiskType.sas_ssd: 'ssd',
+                DiskType.sata_hdd: 'hdd',
+                DiskType.sas_hdd: 'hdd',
+                DiskType.virtio: 'hdd',
+                DiskType.unknown: 'hdd'}[DiskType(self.value)]
+
 
 @dataclass
 class BlockUsage:

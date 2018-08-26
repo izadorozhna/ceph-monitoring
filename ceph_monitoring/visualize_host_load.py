@@ -35,11 +35,7 @@ def make_storage_devs_load_table(hosts: Sequence[Host],
             DiskType.unknown: DiskType.sata_hdd,
         }
 
-        tp_names: Dict[DiskType, str] = {
-            DiskType.nvme: 'nvme',
-            DiskType.sata_ssd: 'ssd',
-            DiskType.sata_hdd: 'hdd'
-        }
+        tp_remapper_vls = set(tp_remapper.values())
 
         all_devs_by_type: Dict[DiskType, Set[str]] = collections.defaultdict(set)
         for host in hosts:
@@ -60,7 +56,9 @@ def make_storage_devs_load_table(hosts: Sequence[Host],
                 disk_counts_per_host[-1][remapped_tp] += 1
             vals[host.name] = hvals
 
-        max_disks_per_tp = {tp: max(per_host.get(tp, 0) for per_host in disk_counts_per_host) for tp in tp_names}
+        max_disks_per_tp: Dict[DiskType, int] = {tp: max(per_host.get(tp, 0)
+                                                         for per_host in disk_counts_per_host)
+                                                 for tp in tp_remapper_vls}
 
         max_per_tp: Dict[DiskType, float] = {}
         for tp, tp_vals in vals_per_type.items():
@@ -69,8 +67,8 @@ def make_storage_devs_load_table(hosts: Sequence[Host],
             else:
                 max_per_tp[tp] = max(min_max_val[tp], max(i for i in tp_vals if i is not None))
 
-        header_names = sum([[f"{tp_names[name]}{cnt}" for cnt in range(mcount)]
-                           for name, mcount in max_disks_per_tp.items()], [])
+        header_names = sum([[f"{tp.short_name}{cnt}" for cnt in range(mcount)]
+                           for tp, mcount in max_disks_per_tp.items()], [])
 
         table = html.HTMLTable(headers=['host'] + header_names, zebra=False, extra_cls=["io_load_in_color"])
         for host in hosts:

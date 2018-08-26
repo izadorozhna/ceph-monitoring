@@ -34,6 +34,7 @@ from cephlib.units import b2ssize
 # check for unused devices on osd node, the same as used for ceph
 # check that all osd of same crush node has the same ip in osdmap
 # check gaps in osd map
+# network/storage devices with no load
 
 
 class Severity(Enum):

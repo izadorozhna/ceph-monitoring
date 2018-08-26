@@ -122,11 +122,11 @@ def show_hosts_config(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
 class HostRunInfo(Table):
     name = ident()
     services = ident(dont_sort=True)
-    ram_total = bytes_sz("RAM<br>total")
-    ram_free = bytes_sz("RAM<br>free")
-    swap = bytes_sz("Swap<br>used")
+    ram_total = exact_count("RAM<br>total, GiB")
+    ram_free = exact_count("RAM<br>free, GiB")
+    swap = exact_count("Swap<br>used, GiB")
     cores = exact_count("CPU<br>cores")
-    load = float_vl("Load avg<br>5m")
+    load = ident("Load avg<br>5m")
     ip_conn = ident("Conn<br>tcp/udp")
     ips = idents_list("IP's")
     scrub_err = exact_count("Total<br>scrub<br>errors")
@@ -164,13 +164,13 @@ def show_hosts_status(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
                 srv_strs.append((osd_link(osd_id).link, len(str(osd_id))))
 
         row.services = (mon_str + "<br>" if mon_str else "") + '''<font color="#c77405">OSD's</font>: ''' + \
-                        "<br>".join(", ".join(chunk) for chunk in partition_by_len(srv_strs, 70, 1))  # type: ignore
+                        "<br>".join(", ".join(chunk) for chunk in partition_by_len(srv_strs, 40, 1))  # type: ignore
 
-        row.ram_total = host.mem_total
-        row.ram_free = host.mem_free
-        row.swap = host.swap_total - host.swap_free
+        row.ram_total = host.mem_total // 2 ** 30
+        row.ram_free = host.mem_free // 2 ** 30
+        row.swap = (host.swap_total - host.swap_free) // 2 ** 30
         row.cores = host.cpu_cores
-        row.load = host.load_5m
+        row.load = f"{host.load_5m:.1f}"
         row.ip_conn = f"{host.open_tcp_sock}/{host.open_udp_sock}", host.open_tcp_sock + host.open_udp_sock
 
         all_ip = flatten(adapter.ips for adapter in host.net_adapters.values())
@@ -417,11 +417,11 @@ def host_info(host: Host, ceph: CephInfo) -> str:
 def show_hosts_pg_info(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
     header_row = ["Name",
                   "PGs",
-                  "User data",
-                  "Reads",
-                  "Read B",
-                  "Writes",
-                  "Write B"]
+                  "User data TiB",
+                  "Reads Miop",
+                  "Read TiB",
+                  "Writes Miop",
+                  "Write TibB"]
 
     if cluster.has_second_report:
         header_row.extend(["User data<br>store rate", "Read<br>iops", "Read Bps", "Write<br>iops", "Write Bps"])
@@ -430,11 +430,11 @@ def show_hosts_pg_info(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
                            header_row, align=html.TableAlign.center_right)
 
     def add_pg_stats(stats: OSDPGStats):
-        table.add_cell_b2ssize(stats.bytes)
-        table.add_cell_b2ssize_10(stats.reads)
-        table.add_cell_b2ssize(stats.read_b)
-        table.add_cell_b2ssize_10(stats.writes)
-        table.add_cell_b2ssize(stats.write_b)
+        table.add_cell(str(stats.bytes // 2 ** 40))
+        table.add_cell(str(stats.reads // 10 ** 6))
+        table.add_cell(str(stats.read_b // 2 ** 40))
+        table.add_cell(str(stats.writes // 10 ** 6))
+        table.add_cell(str(stats.write_b // 2 ** 40))
 
     for host in sorted(cluster.hosts.values(), key=lambda x: x.name):
         if host.name in ceph.nodes_pg_info:

@@ -10,7 +10,7 @@ from cephlib.units import b2ssize, b2ssize_10
 from . import html
 from .cluster_classes import CephInfo, OSDStatus, DiskType, CephVersion, BlueStoreInfo, FileStoreInfo, LogicBlockDev, \
                              Disk, CephOSD
-from .visualize_utils import tab, partition_by_len, to_html_histo, plot, perf_info_required
+from .visualize_utils import tab, partition_by_len, to_html_histo, plot, perf_info_required, seconds_to_str_simple
 from .obj_links import osd_link, host_link
 from .checks import expected_wr_speed
 from .plot_data import get_histo_img
@@ -161,19 +161,20 @@ def show_osd_proc_info_agg(ceph: CephInfo) -> html.HTMLTable:
 class OSDLoadTable(Table):
     id = ident()
     node = ident()
-    class_and_rules = ident("Class<br>rules")
+    class_ = ident("Class")
+    rules = ident("rules")
     pgs = exact_count("PG's")
     open_files = exact_count("open<br>files")
     ip_conn = ident("ip<br>conn")
     threads = exact_count("thr")
-    rss = bytes_sz("RSS")
-    vmm = bytes_sz("VMM")
-    cpu_used = seconds("CPU<br>Used, s")
-    data = bytes_sz("Total<br>data")
-    read_ops = count("Read<br>ops<br>uptime")
-    read = bytes_sz("Read<br>uptime")
-    write_ops = count("Write<br>ops<br>uptime")
-    write = bytes_sz("Write<br>uptime")
+    rss = ident("RSS<br>GiB")
+    vmm = ident("VMM<br>GiB")
+    cpu_used = ident("CPU Used<br>per 1h uptime")
+    data = ident("Total<br>data, GiB")
+    write_ops = ident("Write<br>Mops<br>total")
+    write = ident("Write<br>total, TiB")
+    read_ops = ident("Read<br>Mops<br>total")
+    read = ident("Read<br>total, TiB")
 
 
 @tab("OSD process info")
@@ -184,25 +185,32 @@ def show_osd_proc_info(ceph: CephInfo) -> html.HTMLTable:
         row.id = osd_link(osd.id).link, osd.id
         row.node = host_link(osd.host.name).link, osd.host.name
         row.pgs = osd.pg_count
-        rule_names = '<br>'.join("rule: " + ceph.crush.rules[rule_id].name for rule_id in osd.crush_rules_weights)
-        row.class_and_rules = f"cls: {osd.class_name}<br>{rule_names}", osd.class_name
+        row.class_ = osd.class_name
+        row.rules = ', '.join(ceph.crush.rules[rule_id].name for rule_id in osd.crush_rules_weights)
+
+        def tostr(v: float) -> str:
+            if v > 10:
+                return f"{int(v)}"
+            if v < 0.1:
+                return "0"
+            return f"{v:.1f}"
 
         #  RUN INFO - FD COUNT, TCP CONN, THREADS
         if osd.run_info:
             row.open_files = osd.run_info.fd_count
             row.ip_conn = str(osd.run_info.opened_socks)
             row.threads = osd.run_info.th_count
-            row.rss = osd.run_info.vm_rss
-            row.vmm = osd.run_info.vm_size
-            row.cpu_used = int(osd.run_info.cpu_usage)
+            row.rss = tostr(osd.run_info.vm_rss / 2 ** 30)
+            row.vmm = tostr(osd.run_info.vm_size / 2 ** 30)
+            row.cpu_used = seconds_to_str_simple(osd.run_info.cpu_usage * 3600 // osd.host.uptime)
 
         assert osd.pg_stats
 
-        row.data = osd.pg_stats.bytes
-        row.read_ops = osd.pg_stats.reads
-        row.read = osd.pg_stats.read_b
-        row.write_ops = osd.pg_stats.writes
-        row.write = osd.pg_stats.write_b
+        row.data = tostr(osd.pg_stats.bytes / 2 ** 30)
+        row.read_ops = tostr(osd.pg_stats.reads / 10 ** 6)
+        row.read = tostr(osd.pg_stats.read_b / 2 ** 40)
+        row.write_ops = tostr(osd.pg_stats.writes / 10 ** 6)
+        row.write = tostr(osd.pg_stats.write_b / 2 ** 40)
     return table.html(id="table-osd-process-info", align=html.TableAlign.left_right)
 
 
@@ -350,53 +358,55 @@ def show_osd_info(ceph: CephInfo) -> html.HTMLTable:
     return table.html(id="table-osd-info", align=html.TableAlign.left_right)
 
 
-@perf_info_required
-@tab("OSD's current load")
+@tab("OSD's dev uptime average load")
 def show_osd_perf_info(ceph: CephInfo) -> html.HTMLTable:
     class Tbl(Table):
         osd = ident()
+        cls = ident("Class")
         node = ident()
         apply_lat = ident("apply<br>lat")
         commit_lat = ident("commit<br>lat")
         journal_lat = ident("journal<br>lat")
         xx = ident("ms<br>avg/osd perf")
         data_dev = ident("Data<br>dev")
-        data_read = ident("Data read<br>Bps/ops")
-        data_write = ident("Data write<br>Bps/OPS")
+        data_read = ident("Data read<br>MiBps/iops")
+        data_write = ident("Data write<br>MiBps/iops")
         data_lat = ident("Data lat<br>ms")
-        data_io_time = to_str("D IO<br>time")
+        data_io_time = to_str("Data<br>IO time<br>ms per s")
         j_dev = ident("J dev")
-        j_write = ident("J write<br>Bps/OPS")
+        j_write = ident("J write<br>MiBps/iops")
         j_lat = ident("J lat<br>ms")
-        j_io_time = to_str("J IO<br>time")
+        j_io_time = to_str("J<br>IO time<br>ms per s")
         wal_dev = ident("WAL dev")
-        wal_write = ident("WAL write<br>Bps/OPS")
+        wal_write = ident("WAL write<br>MiBps/iops")
         wal_lat = ident("WAL lat<br>ms")
-        wal_io_time = to_str("WAL IO<br>time")
+        wal_io_time = to_str("WAL<br>IO time<br>ms per s")
         db_dev = ident("DB dev")
-        db_read = ident("DB read<br>Bps/OPS")
-        db_write = ident("DB write<br>Bps/OPS")
+        db_read = ident("DB read<br>MiBps/iops")
+        db_write = ident("DB write<br>MiBps/iops")
         db_lat = ident("DB lat<br>ms")
-        db_io_time = to_str("DB IO<br>time")
+        db_io_time = to_str("DB IO<br>time<br>ms per s")
 
-    def add_dev_info(row: Any, dev: Union[Disk, LogicBlockDev], attr: str, with_read: bool = True):
+    def add_dev_info(row: Any, dev: Union[Disk, LogicBlockDev], attr: str, uptime: float, with_read: bool = True):
 
-        setattr(row, attr + '_dev', dev.name)
-
+        setattr(row, attr + '_dev', dev.name if dev.tp == DiskType.nvme else f"{dev.name} ({dev.tp.short_name})")
+        MBupt = 2 ** 20 * int(uptime)
         if with_read:
-            setattr(row, attr + '_read', (f"{b2ssize(dev.usage.read_bytes)} / {b2ssize(dev.usage.read_iops)}",
-                                          str(dev.usage.read_bytes)))
+            setattr(row, attr + '_read', (f"{dev.usage.read_bytes // MBupt} / {int(dev.usage.read_iops / uptime)}",
+                                          dev.usage.read_iops / uptime))
 
-        setattr(row, attr + '_write', (f"{b2ssize(dev.usage.write_bytes)} / {b2ssize(dev.usage.write_iops)}",
-                                       str(dev.usage.write_bytes)))
+        setattr(row, attr + '_write', (f"{dev.usage.write_bytes // MBupt} / {int(dev.usage.write_iops / uptime)}",
+                                       dev.usage.write_iops / uptime))
 
         if dev.usage.lat is None:
             setattr(row, attr + '_lat', ('-', 0))
         else:
             setattr(row, attr + '_lat',
-                ((f"{dev.usage.lat:.1f}s" if dev.usage.lat > 1 else f"{int(dev.usage.lat * 1000)}ms"), dev.usage.lat))
+                ((f"{dev.usage.lat / 1000:.1f}s"
+                  if dev.usage.lat > 1000
+                  else f"{int(dev.usage.lat)}ms"), dev.usage.lat))
 
-        setattr(row, attr + '_io_time', (int(dev.usage.io_time * 100), dev.usage.io_time))
+        setattr(row, attr + '_io_time', int(dev.usage.io_time // uptime))
 
     def get_lat_val(osd: CephOSD, lat_name: str) -> Optional[str]:
         if lat_name in osd.osd_perf_dump:
@@ -415,6 +425,7 @@ def show_osd_perf_info(ceph: CephInfo) -> html.HTMLTable:
         row = table.next_row()
 
         row.osd = osd_link(osd.id).link, osd.id
+        row.cls = osd.class_name
         row.node = host_link(osd.host.name).link, osd.host.name
         row.apply_lat = get_lat_val(osd, "apply_latency")
 
@@ -428,14 +439,14 @@ def show_osd_perf_info(ceph: CephInfo) -> html.HTMLTable:
         if jlat is not None:
             row.journal_lat = jlat
 
-        add_dev_info(row, osd.storage_info.data.dev_info, "data")
+        add_dev_info(row, osd.storage_info.data.dev_info, "data", osd.host.uptime)
         if isinstance(osd.storage_info, FileStoreInfo):
-            add_dev_info(row, osd.storage_info.journal.dev_info, "j", with_read=False)
+            add_dev_info(row, osd.storage_info.journal.dev_info, "j", osd.host.uptime, with_read=False)
         else:
-            add_dev_info(row, osd.storage_info.wal.dev_info, "wal", with_read=False)
-            add_dev_info(row, osd.storage_info.db.dev_info, "db")
+            add_dev_info(row, osd.storage_info.wal.dev_info, "wal", osd.host.uptime, with_read=False)
+            add_dev_info(row, osd.storage_info.db.dev_info, "db", osd.host.uptime)
 
-    return table.html("table-osd-curr-load")
+    return table.html("table-osd-dev-uptime-load")
 
 
 @tab("PG copy per OSD")

@@ -257,27 +257,21 @@ class ValsSummary:
     values: Dict[str, float]
 
 
-def do_get_values(node: Node,
-                  ceph: CephInfo,
-                  types: Set[str],
-                  getval: Callable[[Node, CephInfo], float],
-                  res: Dict[str, ValsSummary]):
-    if node.type in types:
-        vs = res.get(node.type)
-        if vs:
-            assert node.name not in vs.values
-        else:
-            vs = res[node.type] = ValsSummary(-1, -1, {})
-        vs.values[node.name] = getval(node, ceph)
+def do_get_values(node: Node, vals: Dict[str, float], res: Dict[str, ValsSummary]):
+    vs = res.get(node.type)
+    if vs:
+        assert node.name not in vs.values
+    else:
+        vs = res[node.type] = ValsSummary(-1, -1, {})
+    vs.values[node.name] = vals[node.name]
 
     for ch in node.childs:
-        do_get_values(ch, ceph, types, getval, res)
+        do_get_values(ch, vals, res)
 
 
-def get_values(node: Node, ceph: CephInfo, types: Set[str], getval: Callable[[Node, CephInfo], float]) \
-        -> Dict[str, ValsSummary]:
+def get_values(node: Node, vals: Dict[str, float]) -> Dict[str, ValsSummary]:
     res: Dict[str, ValsSummary] = {}
-    do_get_values(node, ceph, types, getval, res)
+    do_get_values(node, vals, res)
     for vs in res.values():
         vs.max = max(vs.values.values())
         vs.min = min(vs.values.values())
@@ -285,58 +279,74 @@ def get_values(node: Node, ceph: CephInfo, types: Set[str], getval: Callable[[No
     return res
 
 
-def calc_min_max(levels: Set[str], summaries: Dict[str, ValsSummary],
+def calc_min_max(summaries: Dict[str, ValsSummary],
                  minmax_coef: Union[float, Dict[str, float]]) -> Dict[str, Tuple[float, float]]:
 
     sett: Dict[str, Tuple[float, float]] = {}
-    for level in levels:
+    for level, vl in summaries.items():
         if isinstance(minmax_coef, float):
-            min_v = min(summaries[level].min, minmax_coef * summaries[level].max)
+            min_v = min(vl.min, minmax_coef * vl.max)
         elif level not in minmax_coef:
-            min_v = summaries[level].min
+            min_v = vl.min
         else:
-            min_v = min(summaries[level].min, minmax_coef[level] * summaries[level].max)
+            min_v = min(vl.min, minmax_coef[level] * vl.max)
 
-        sett[level] = (min_v, summaries[level].max)
+        sett[level] = (min_v, vl.max)
 
     return sett
 
 
-def get_weight_colors(root_node: Node, ceph: CephInfo, rule: Rule,
+def get_weight_colors(root_node: Node, ceph: CephInfo,
                       cmaps: Dict[str, numpy.ndarray]) -> Dict[str, Tuple[str, str]]:
 
-    def get_weight(node: Node, ceph: CephInfo) -> float:
-        return node.weight
+    nodes_weights: Dict[str, float] = {}
 
-    types = {"host", rule.replicated_on}
-    weights = get_values(root_node, ceph, types=types, getval=get_weight)
-    sett = calc_min_max(types, weights, 0.6 )
+    def copy_weight(node: Node):
+        nodes_weights[node.name] = node.weight
+        for ch in node.childs:
+            copy_weight(ch)
+
+    copy_weight(root_node)
+    weights = get_values(root_node, nodes_weights)
+    sett = calc_min_max(weights, 0.6)
     return val2colors(weights, sett, cmaps, lambda x: f"{x:.2f}")
 
 
-def get_data_size_colors(root_node: Node, ceph: CephInfo, rule: Rule,
+def get_used_space_colors(root_node: Node, ceph: CephInfo,
+                          cmaps: Dict[str, numpy.ndarray]) -> Dict[str, Tuple[str, str]]:
+    used: Dict[str, float] = {}
+
+    def set_used_space(node: Node) -> float:
+        if node.name not in used:
+            if node.type == 'osd':
+                used[node.name] = ceph.osds[node.id].used_space
+            else:
+                used[node.name] = sum(map(set_used_space, node.childs))
+        return used[node.name]
+
+    set_used_space(root_node)
+    used_space = get_values(root_node, used)
+    return val2colors(used_space, calc_min_max(used_space, 0.6), cmaps, b2ssize)
+
+
+def get_data_size_colors(root_node: Node, ceph: CephInfo,
                          cmaps: Dict[str, numpy.ndarray]) -> Dict[str, Tuple[str, str]]:
     sizes: Dict[str, float] = {}
 
     def set_data_size(node: Node) -> float:
         if node.name not in sizes:
             if node.type == 'osd':
-                sizes[node.name] = ceph.osds[node.id].used_space
+                sizes[node.name] = ceph.osds[node.id].pg_stats.bytes
             else:
                 sizes[node.name] = sum(map(set_data_size, node.childs))
         return sizes[node.name]
 
-    def get_data_size(node: Node, ceph: CephInfo) -> float:
-        return sizes[node.name]
-
     set_data_size(root_node)
-
-    types = {"host", rule.replicated_on}
-    data_size = get_values(root_node, ceph, types=types, getval=get_data_size)
-    return val2colors(data_size, calc_min_max(types, data_size, 0.6), cmaps, b2ssize)
+    data_size = get_values(root_node, sizes)
+    return val2colors(data_size, calc_min_max(data_size, 0.6), cmaps, b2ssize)
 
 
-def get_free_space_colors(root_node: Node, ceph: CephInfo, rule: Rule,
+def get_free_space_colors(root_node: Node, ceph: CephInfo,
                           cmaps: Dict[str, numpy.ndarray]) -> Dict[str, Tuple[str, str]]:
     free_space: Dict[str, float] = {}
 
@@ -348,17 +358,12 @@ def get_free_space_colors(root_node: Node, ceph: CephInfo, rule: Rule,
                 free_space[node.name] = sum(map(set_free_space, node.childs))
         return free_space[node.name]
 
-    def get_free_space(node: Node, ceph: CephInfo) -> float:
-        return free_space[node.name]
-
     set_free_space(root_node)
-
-    types = {"host", rule.replicated_on}
-    free_summ = get_values(root_node, ceph, types=types, getval=get_free_space)
-    return val2colors(free_summ, calc_min_max(types, free_summ, 0.6), cmaps, b2ssize)
+    free_summ = get_values(root_node, free_space)
+    return val2colors(free_summ, calc_min_max(free_summ, 0.6), cmaps, b2ssize)
 
 
-def get_free_perc_colors(root_node: Node, ceph: CephInfo, rule: Rule,
+def get_free_perc_colors(root_node: Node, ceph: CephInfo,
                          cmaps: Dict[str, numpy.ndarray]) -> Dict[str, Tuple[str, str]]:
     free_perc: Dict[str, float] = {}
 
@@ -370,14 +375,9 @@ def get_free_perc_colors(root_node: Node, ceph: CephInfo, rule: Rule,
                 free_perc[node.name] = min(map(set_free_perc, node.childs))
         return free_perc[node.name]
 
-    def get_free_perc(node: Node, ceph: CephInfo) -> float:
-        return free_perc[node.name]
-
     set_free_perc(root_node)
-
-    types = {"host", rule.replicated_on}
-    free_summ = get_values(root_node, ceph, types=types, getval=get_free_perc)
-    return val2colors(free_summ, calc_min_max(types, free_summ, 0.6), cmaps, lambda x: f"{int(x)}%")
+    free_summ = get_values(root_node, free_perc)
+    return val2colors(free_summ, calc_min_max(free_summ, 0.6), cmaps, lambda x: f"{int(x)}%")
 
 
 def val2colors(vals: Dict[str, ValsSummary],
@@ -388,7 +388,10 @@ def val2colors(vals: Dict[str, ValsSummary],
     a = 160
     for key, (max_v, min_v) in sett.items():
         for name, val in vals[key].values.items():
-            r, g, b = get_color(val, cmaps[key], min_v, max_v)
+            if key in cmaps:
+                r, g, b = get_color(val, cmaps[key], min_v, max_v)
+            else:
+                r = g = b = 255
             assert name not in res
             res[name] = f"#{r:02X}{g:02X}{b:02X}{a:02X}", tostr(val)
     return res
@@ -436,12 +439,13 @@ def plot_crush_rules(ceph: CephInfo, report: Report):
             targets = []
             div_id = f'div_{rule.name}'
             for func, name in [(get_weight_colors, 'weight'),
+                               (get_used_space_colors, 'used_space'),
                                (get_data_size_colors, 'data_size'),
-                               (get_free_space_colors, 'freespace'),
+                               (get_free_space_colors, 'free_space'),
                                (get_free_perc_colors, 'free_perc')]:
 
-                colors = func(root_node, ceph, rule, cmaps)
-                colors_js = {idmap[name]: v for name, v in colors.items()}
+                colors = func(root_node, ceph, cmaps)
+                colors_js = {idmap[name]: v for name, v in colors.items() if not name.startswith("osd.")}
                 varname = f"colors_{rule.name}_{name}"
                 report.scripts.append(f"const {varname} = {json.dumps(colors_js)}")
 

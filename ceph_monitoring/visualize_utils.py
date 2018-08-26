@@ -4,7 +4,7 @@ from typing import Union, Iterable, Dict, Callable, Sequence, Tuple, List, TypeV
 
 import numpy
 
-from .cluster_classes import  CephOSD, CephMonitor, CephVersion
+from .cluster_classes import CephOSD, CephMonitor, CephVersion
 
 
 class StopError(Exception):
@@ -35,6 +35,11 @@ def seconds_to_str(seconds: Union[int, float]) -> str:
         data.append(f"{s}s")
 
     return " ".join(data)
+
+
+def seconds_to_str_simple(seconds: Union[int, float]) -> str:
+    seconds = int(seconds)
+    return f"{seconds // 3600}:{(seconds // 60) % 60:<02d}:{seconds % 60:<02d}"
 
 
 def get_all_versions(services: Iterable[Union[CephOSD, CephMonitor]]) -> Dict[CephVersion, int]:

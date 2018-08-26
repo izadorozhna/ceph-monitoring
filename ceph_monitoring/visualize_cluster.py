@@ -288,13 +288,13 @@ class RulesetsTable(Table):
     pools = idents_list(help="Pools, this rule is used for")
     osd_class = ident(help='OSD class used int his rule')
     replication_level = ident("Replication<br>level", help='Level on which this rule doing replication')
-    pg = exact_count("PG", help='Total PG count, managed by this rule')
-    pg_per_osd = exact_count("PG/OSD", help='Average PG per OSD for this rule')
+    pg = ident("PG", help='Total PG count, managed by this rule')
+    pg_per_osd = exact_count("PG copy/OSD", help='Average PG copy per OSD for this rule')
     num_osd = exact_count("# OSD", help="OSD count, this rule put data to")
-    size = bytes_sz(help="Total space osd all OSD's used by this rule")
+    total_size = bytes_sz(help="Total space osd all OSD's used by this rule")
     free_size = to_str(help="Free space on OSD's, managed by this rule (not counting replication)")
-    data = bytes_sz(help="User data size, managed by this rule (without replication)")
-    objs = count(help="Object count managed by this rule")
+    data = ident("Data size<br>TiB", help="User data size, managed by this rule (without replication)")
+    objs = ident("Total<br>Kobjects", help="Object count managed by this rule")
     data_disk_sizes = ident(help="Disk sizes, used to store data for this rule on OSD's")
     disk_types = idents_list(delim='<br>', help="Disk types, used to store data for this rule on OSD's")
     data_disk_models = idents_list(help="Disk models, used to store data for this rule on OSD's")
@@ -313,6 +313,10 @@ def show_ruleset_info(ceph: CephInfo) -> html.HTMLTable:
 
     table = RulesetsTable()
 
+    cluster_pg = sum(pool.pg for pool in ceph.pools.values())
+    cluster_bytes = sum(pool.df.size_bytes for pool in ceph.pools.values())
+    cluster_objects = sum(pool.df.num_objects for pool in ceph.pools.values())
+
     for rule in ceph.crush.rules.values():
         row = table.next_row()
         row.rule = rule.name
@@ -326,14 +330,21 @@ def show_ruleset_info(ceph: CephInfo) -> html.HTMLTable:
         osds = ceph.osds4rule[rule.id]
         row.num_osd = len(osds)
         total_sz = sum(osd.free_space + osd.used_space for osd in osds)
-        row.size = total_sz
+        row.total_size = total_sz
         total_free = sum(osd.free_space for osd in osds)
         row.free_size = f"{b2ssize(total_free)} ({total_free * 100 // total_sz}%)", total_free
-        row.data = sum(pool.df.size_bytes for pool in pools.get(rule.id, []))
-        row.objs = sum(pool.df.num_objects for pool in pools.get(rule.id, []))
+
+        total_data = sum(pool.df.size_bytes for pool in pools.get(rule.id, []))
+        row.data = f"{total_data // 2 ** 40} ({total_data * 100 // cluster_bytes}%)"
+
+        total_objs = sum(pool.df.num_objects for pool in pools.get(rule.id, []))
+        row.objs = f"{total_objs // 10 ** 3} ({total_objs * 100 // cluster_objects}%)"
+
         total_pg = sum(pool.pg for pool in pools.get(rule.id, []))
-        row.pg = total_pg
-        row.pg_per_osd = total_pg // len(osds)
+        row.pg = f"{total_pg} ({total_pg * 100 // cluster_pg}%)", total_pg
+
+        total_pg_copy = sum(pool.pg * pool.size for pool in pools.get(rule.id, []))
+        row.pg_per_osd = total_pg_copy // len(osds)
 
         storage_disks_types = set()
         journal_disks_types = set()

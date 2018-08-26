@@ -13,30 +13,67 @@ from .plot_data import get_histo_img
 from .table import Table, count, bytes_sz, ident, idents_list, exact_count
 
 
-@tab("Pool's lifetime load")
-def show_pools_lifetime_load(ceph: CephInfo) -> html.HTMLTable:
-    class PoolLoadAvgTable(Table):
-        pool = ident()
-        read_b = bytes_sz("Read B")
-        write_b = bytes_sz("Write B")
-        read_ops = count()
-        write_ops = count()
-        read_per_pg = count("Rd/PG")
-        write_per_pg = count("Wr/PG")
+def get_pools_load_table(tid: str, ceph: CephInfo, uptime: bool) -> html.HTMLTable:
+    class PoolLoadTable(Table):
+        pool = ident("Name")
+        data = exact_count("Data TiB")
+        objs = exact_count("MObj")
+        total_data_per_pg = exact_count("Data per PG<br>GiB")
+        kobj_per_pg = exact_count("Kobj per PG")
 
-    table = PoolLoadAvgTable()
+        if not uptime:
+             new_data = exact_count("New data<br>MiBps")
+             new_objs = exact_count("New objs<br>ps")
+
+        write_ops = exact_count("Write<br>Mops" if uptime else "Write<br>IOPS")
+        write_b = exact_count("Write TiB" if uptime else "Write<br>MiBps")
+        write_per_pg = exact_count("Write Kops<br>per PG" if uptime else "Writes<br>per PG")
+        avg_write_size = exact_count("Avg. write<br>size, KiB")
+
+        read_ops = exact_count("Read Mops" if uptime else "Read<br>IOPS")
+        read_b = exact_count("Read TiB" if uptime else "Read<br>MiBps")
+        read_per_pg = exact_count("Read Kops<br>per PG" if uptime else "Reads<br>per PG")
+        avg_read_size = exact_count("Avg. read<br>size, KiB")
+
+    table = PoolLoadTable()
 
     for pool in ceph.pools.values():
+        df = pool.df if uptime else pool.d_df
+
         row = table.next_row()
         row.pool = pool.name
-        row.read_b = pool.df.read_bytes
-        row.write_b = pool.df.write_bytes
-        row.read_ops = pool.df.read_ops
-        row.write_ops = pool.df.write_ops
-        row.read_per_pg = pool.df.read_ops // pool.pg
-        row.write_per_pg = pool.df.write_ops // pool.pg
+        row.data = pool.df.size_bytes // 2 ** 40
+        row.objs = pool.df.num_objects // 10 ** 6
 
-    return table.html(id="table-pools-io", align=html.TableAlign.left_right)
+        if not uptime:
+            row.new_objs = pool.d_df.num_objects
+            row.new_data = pool.d_df.size_bytes // 2 ** 20
+
+        row.total_data_per_pg = pool.df.size_bytes // pool.pg // 2 ** 30
+        row.kobj_per_pg = pool.df.num_objects // pool.pg // 1000
+
+        sz_coef = 2 ** 40 if uptime else 2 ** 20
+        ops_coef = 10 ** 6 if uptime else 1
+        per_pg_coef = 1000 if uptime else 1
+
+        row.write_ops = df.write_ops // ops_coef
+        row.write_b = df.write_bytes // sz_coef
+        row.write_per_pg = df.write_ops // pool.pg // per_pg_coef
+        if df.write_ops > 10:
+            row.avg_write_size = df.write_bytes // df.write_ops // 2 ** 10
+
+        row.read_ops = df.read_ops // ops_coef
+        row.read_b = df.read_bytes // sz_coef
+        row.read_per_pg = df.read_ops // pool.pg // per_pg_coef
+        if df.read_ops > 10:
+            row.avg_read_size = df.read_bytes // df.read_ops // 2 ** 10
+
+    return table.html(id=tid, align=html.TableAlign.left_right)
+
+
+@tab("Pool's lifetime load")
+def show_pools_lifetime_load(ceph: CephInfo) -> html.HTMLTable:
+    return get_pools_load_table("table-pools-io-uptime", ceph, True)
 
 
 @tab("Pool's curr load")
@@ -44,31 +81,7 @@ def show_pools_curr_load(ceph: CephInfo) -> Optional[html.HTMLTable]:
     if all(pool.d_df is None for pool in ceph.pools.values()):
         return None
 
-    class PoolLoadCurrTable(Table):
-        pool = ident()
-        new_data = bytes_sz("New data")
-        read_b = bytes_sz("Read Bps")
-        write_b = bytes_sz("Write Bps")
-        read_ops = count("Read IOPS")
-        write_ops = count("Write IOPS")
-        read_per_pg = count("Rd/PG")
-        write_per_pg = count("Wr/PG")
-
-    table = PoolLoadCurrTable()
-
-    for pool in ceph.pools.values():
-        if pool.d_df:
-            row = table.next_row()
-            row.pool = pool.name
-            row.new_data = pool.d_df.size_bytes
-            row.read_b = pool.d_df.read_bytes
-            row.write_b = pool.d_df.write_bytes
-            row.read_ops = pool.d_df.read_ops
-            row.write_ops = pool.d_df.write_ops
-            row.read_per_pg = pool.d_df.read_ops // pool.pg
-            row.write_per_pg = pool.d_df.write_ops // pool.pg
-
-    return table.html(id="table-pools-io", align=html.TableAlign.left_right)
+    return get_pools_load_table("table-pools-io", ceph, False)
 
 
 @tab("Pool's stats")
