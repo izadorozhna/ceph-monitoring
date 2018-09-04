@@ -28,6 +28,7 @@ from cephlib.storage import make_storage, TypedStorage
 from .cluster import load_all, fill_usage, fill_cluster_nets_roles
 from .obj_links import host_link
 from .report import Report
+from . import table
 
 from .visualize_utils import StopError
 from .visualize_cluster import show_cluster_summary, show_issues_table, show_primary_settings, show_ruleset_info, \
@@ -69,6 +70,7 @@ def parse_args(argv):
     p.add_argument("-p", "--pretty-html", help="Prettify index.html", action="store_true")
     p.add_argument("--profile", help="Profile report creation", action="store_true")
     p.add_argument("-e", "--embed", action='store_true', help="Embed js/css files into report to make it stand-alone")
+    p.add_argument("--encrypt", help="Encrypt file, only work with --embed")
     p.add_argument("path", help="Folder with data, or .tar.gz archive")
     p.add_argument("old_path", nargs='?', help="Older folder with data, or .tar.gz archive to calculate load")
     return p.parse_args(argv[1:])
@@ -178,12 +180,18 @@ def main(argv: List[str]):
 
             if new_block:
                 assert 'report' not in sig.parameters
-                report.add_block(reporter.__name__.replace("show_", ""), reporter.report_name, new_block)
+                rname = reporter.__name__.replace("show_", "")
+                if isinstance(new_block, table.Table):
+                    html_id = reporter.html_id if hasattr(reporter, 'html_id') else None
+                    new_block_html = new_block.html(html_id)
+                else:
+                    new_block_html = new_block
+                report.add_block(rname, reporter.report_name, new_block_html)
 
         for _, host in sorted(cluster.hosts.items()):
             report.add_block(host_link(host.name).id, None, host_info(host, ceph))
 
-        report.save_to(Path(opts.out), opts.pretty_html, embed=opts.embed)
+        report.save_to(Path(opts.out), opts.pretty_html, embed=opts.embed, encrypt=opts.encrypt)
         logger.info("Report successfully stored to %r", index_path)
     except StopError:
         pass

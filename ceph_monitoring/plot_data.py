@@ -273,8 +273,12 @@ def get_values(node: Node, vals: Dict[str, float]) -> Dict[str, ValsSummary]:
     res: Dict[str, ValsSummary] = {}
     do_get_values(node, vals, res)
     for vs in res.values():
-        vs.max = max(vs.values.values())
-        vs.min = min(vs.values.values())
+        not_none = [vl for vl in vs.values.values() if vl is not None]
+        if not_none:
+            vs.max = max(not_none)
+            vs.min = min(not_none)
+        else:
+            vs.max = vs.min = None
 
     return res
 
@@ -367,17 +371,19 @@ def get_free_perc_colors(root_node: Node, ceph: CephInfo,
                          cmaps: Dict[str, numpy.ndarray]) -> Dict[str, Tuple[str, str]]:
     free_perc: Dict[str, float] = {}
 
-    def set_free_perc(node: Node) -> float:
+    def set_free_perc(node: Node) -> Optional[float]:
         if node.name not in free_perc:
             if node.type == 'osd':
                 free_perc[node.name] = ceph.osds[node.id].free_perc
             else:
-                free_perc[node.name] = min(map(set_free_perc, node.childs))
+                free_prc = [set_free_perc(ch) for ch in node.childs]
+                free_prc = [i for i in free_prc if i is not None]
+                free_perc[node.name] = None if len(free_prc) == 0 else min(free_prc)
         return free_perc[node.name]
 
     set_free_perc(root_node)
     free_summ = get_values(root_node, free_perc)
-    return val2colors(free_summ, calc_min_max(free_summ, 0.6), cmaps, lambda x: f"{int(x)}%")
+    return val2colors(free_summ, calc_min_max(free_summ, 0.6), cmaps, lambda x: f"{int(x)}%" if x is not None else "?")
 
 
 def val2colors(vals: Dict[str, ValsSummary],
@@ -388,7 +394,7 @@ def val2colors(vals: Dict[str, ValsSummary],
     a = 160
     for key, (max_v, min_v) in sett.items():
         for name, val in vals[key].values.items():
-            if key in cmaps:
+            if key in cmaps and val is not None:
                 r, g, b = get_color(val, cmaps[key], min_v, max_v)
             else:
                 r = g = b = 255

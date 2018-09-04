@@ -92,7 +92,7 @@ def show_osd_state(ceph: CephInfo) -> html.HTMLTable:
 
     table = html.HTMLTable("table-osds-state", ["Status", "Count", "ID's"])
 
-    for status, osds in sorted(statuses.items()):
+    for status, osds in sorted(statuses.items(), key=lambda x: str(x)):
         table.add_row([html.ok(status.name) if status == OSDStatus.up else html.fail(status.name),
                        str(len(osds)),
                       "<br>".join(", ".join(grp) for grp in partition_by_len(osds, 120, 1))])
@@ -246,7 +246,7 @@ def show_osd_info(ceph: CephInfo) -> html.HTMLTable:
     all_versions = [osd.version for osd in ceph.osds.values()]
     all_versions += [mon.version for mon in ceph.mons.values()]
     all_versions_set = set(all_versions)
-    largest_ver = max(all_versions_set)
+    largest_ver = max(ver for ver in all_versions_set if ver is not None)
 
     fast_drives = {DiskType.nvme, DiskType.sata_ssd, DiskType.sas_ssd}
 

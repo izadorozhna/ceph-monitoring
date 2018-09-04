@@ -9,6 +9,7 @@ logger = logging.getLogger('report')
 
 from . import html
 
+
 class Report:
     def __init__(self, cluster_name: str, output_file_name: str) -> None:
         self.cluster_name = cluster_name
@@ -25,45 +26,49 @@ class Report:
             menu_item = header
         self.divs.append((name, header, menu_item, str(block_obj)))
 
-    def save_to(self, output_dir: Path, pretty_html: bool = False,
-                embed: bool = False):
-
-        self.style_links.append("bootstrap.min.css")
-        self.style_links.append("report.css")
-        self.script_links.append("report.js")
-        self.script_links.append("sorttable_utf.js")
-
-        links: List[str] = []
-        static_files_dir = Path(__file__).absolute().parent.parent / "html_js_css"
-
+    def insert_js_css(self, link: str, embed: bool, static_files_dir: Path, output_dir: Path) -> Tuple[bool, str]:
         def get_path(link: str) -> Tuple[bool, str]:
             if link.startswith("http://") or link.startswith("https://"):
                 return False, link
             fname = link.rsplit('/', 1)[-1]
             return True, str(static_files_dir / fname)
 
+        local, fname = get_path(link)
+        data = None
+
+        if local:
+            if embed:
+                data = open(fname, 'rb').read().decode("utf8")
+            else:
+                shutil.copyfile(fname, output_dir / Path(fname).name)
+        else:
+            try:
+                data = urllib.request.urlopen(fname, timeout=10).read().decode("utf8")
+            except (TimeoutError, URLError):
+                logger.warning(f"Can't retrieve {fname}")
+
+        if data is not None:
+            return True, data
+        else:
+            return False, link
+
+    def make_body(self, embed: bool, output_dir: Path, static_files_dir) -> html.Doc:
+        self.style_links.append("bootstrap.min.css")
+        self.style_links.append("report.css")
+        self.script_links.append("report.js")
+        self.script_links.append("sorttable_utf.js")
+
+        links: List[str] = []
+
         for link in self.style_links + self.script_links:
-            local, fname = get_path(link)
-            data = None
-
-            if local:
-                if embed:
-                    data = open(fname, 'rb').read().decode("utf8")
-                else:
-                    shutil.copyfile(fname, output_dir / Path(fname).name)
-            else:
-                try:
-                    data = urllib.request.urlopen(fname, timeout=10).read().decode("utf8")
-                except (TimeoutError, URLError):
-                    logger.warning(f"Can't retrieve {fname}")
-
-            if data is not None:
+            is_data, link_or_data = self.insert_js_css(link, embed, static_files_dir, output_dir)
+            if is_data:
                 if link in self.style_links:
-                    self.style.append(data)
+                    self.style.append(link_or_data)
                 else:
-                    self.scripts.append(data)
+                    self.scripts.append(link_or_data)
             else:
-                links.append(link)
+                links.append(link_or_data)
 
         css_links = links[:len(self.style_links)]
         js_links = links[len(self.style_links):]
@@ -91,7 +96,6 @@ class Report:
                 else:
                     (output_dir / "onload.js").open("w").write(code)
                     doc.script(type="text/javascript", src="onload.js")
-
             with doc.body(onload="onload()"):
                 with doc.div(_class="menu-ceph"):
                     with doc.ul():
@@ -119,16 +123,63 @@ class Report:
 
                                 if block != "":
                                     doc.center(block)
+        return doc
+
+    def save_to(self, output_dir: Path, pretty_html: bool = False,
+                embed: bool = False, encrypt: str = None):
+
+        static_files_dir = Path(__file__).absolute().parent.parent / "html_js_css"
+        doc = self.make_body(embed, output_dir, static_files_dir)
+
+        if encrypt:
+            assert embed
+            body_s = str(doc) + " "
+            if len(body_s) % 32:
+                body_s += " " * (32 - len(body_s) % 32)
+
+            import os
+            import base64
+            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+            from cryptography.hazmat.backends import default_backend
+
+            backend = default_backend()
+            iv = os.urandom(16)
+            cipher = Cipher(algorithms.AES(encrypt), modes.CBC(iv), backend=backend)
+            encryptor = cipher.encryptor()
+            encrypted_body = iv + encryptor.update(body_s.encode("utf8")) + encryptor.finalize()
+            encrypted_body_base64 = base64.b64encode(encrypted_body)
+
+            step = 128
+            header = 'encrypted = "'
+            idx = step - len(header)
+            header += encrypted_body_base64[0: idx] + '"'
+            parts = [header]
+            while idx < len(encrypted_body_base64):
+                parts.append(' + "' + encrypted_body_base64[idx: idx + step] + '"')
+                idx += step
+
+            enc_code = " \\\n      ".join(parts)
+            doc = html.Doc()
+            _, link_or_data = self.insert_js_css("aesjs.js", embed, static_files_dir, output_dir)
+
+            with doc.head:
+                doc.script(type="text/javascript", src=link_or_data)
+                doc.script(type="text/javascript")(enc_code)
+
+            with doc.body.center:
+                doc('Report encrypted, to encrypt enter password and press "decrypt": ')
+                doc.input(type="password", id="password")
+                doc.input(type="button",
+                          onclick="decode(document.getElementById('password').value)",
+                          value="Decrypt")
 
         index = f"<!doctype html>{doc}"
         index_path = output_dir / self.output_file_name
-
         try:
             if pretty_html:
                 from bs4 import BeautifulSoup
                 index = BeautifulSoup.BeautifulSoup(index).prettify()
         except:
             pass
-
         index_path.open("w").write(index)
 

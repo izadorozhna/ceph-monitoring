@@ -6,26 +6,30 @@ import numpy
 from cephlib.units import b2ssize_10, b2ssize
 
 from . import html
-from .visualize_utils import tab, plot
+from .visualize_utils import tab, plot, table_id, perf_info_required
 from .cluster_classes import CephInfo
 from .obj_links import pool_link, rule_link
 from .plot_data import get_histo_img
 from .table import Table, count, bytes_sz, ident, idents_list, exact_count
 
 
-def get_pools_load_table(tid: str, ceph: CephInfo, uptime: bool) -> html.HTMLTable:
+def get_pools_load_table(ceph: CephInfo, uptime: bool) -> Table:
     class PoolLoadTable(Table):
+        class html_params:
+            align = html.TableAlign.left_right
+
         pool = ident("Name")
-        data = exact_count("Data TiB")
-        objs = exact_count("MObj")
-        total_data_per_pg = exact_count("Data per PG<br>GiB")
-        kobj_per_pg = exact_count("Kobj per PG")
+        data = exact_count("Data TiB", help="Pool total data in Tebibytes")
+        objs = exact_count("MObj", help="Millions of objects in pool")
+        total_data_per_pg = exact_count("Data per PG<br>GiB", help="Average data per PG in Gibibytes")
+        kobj_per_pg = exact_count("Kobj per PG", help="Average object per PG in thousands")
 
         if not uptime:
-             new_data = exact_count("New data<br>MiBps")
-             new_objs = exact_count("New objs<br>ps")
+             new_data = exact_count("New data<br>MiBps", help="Customer new data rate in Mibibytes per second")
+             new_objs = exact_count("New objs<br>ps", help="Customer new objects per second")
 
-        write_ops = exact_count("Write<br>Mops" if uptime else "Write<br>IOPS")
+        write_ops = exact_count("Write<br>Mops" if uptime else "Write<br>IOPS",
+                                help="Average data write speed in Mibibytes per second")
         write_b = exact_count("Write TiB" if uptime else "Write<br>MiBps")
         write_per_pg = exact_count("Write Kops<br>per PG" if uptime else "Writes<br>per PG")
         avg_write_size = exact_count("Avg. write<br>size, KiB")
@@ -68,25 +72,28 @@ def get_pools_load_table(tid: str, ceph: CephInfo, uptime: bool) -> html.HTMLTab
         if df.read_ops > 10:
             row.avg_read_size = df.read_bytes // df.read_ops // 2 ** 10
 
-    return table.html(id=tid, align=html.TableAlign.left_right)
+    return table
 
 
 @tab("Pool's lifetime load")
-def show_pools_lifetime_load(ceph: CephInfo) -> html.HTMLTable:
-    return get_pools_load_table("table-pools-io-uptime", ceph, True)
+@table_id("table-pools-io-uptime")
+def show_pools_lifetime_load(ceph: CephInfo) -> Table:
+    return get_pools_load_table(ceph, True)
 
 
 @tab("Pool's curr load")
-def show_pools_curr_load(ceph: CephInfo) -> Optional[html.HTMLTable]:
-    if all(pool.d_df is None for pool in ceph.pools.values()):
-        return None
-
-    return get_pools_load_table("table-pools-io", ceph, False)
+@table_id("table-pools-io")
+@perf_info_required
+def show_pools_curr_load(ceph: CephInfo) -> Table:
+    return get_pools_load_table(ceph, False)
 
 
 @tab("Pool's stats")
-def show_pools_info(ceph: CephInfo) -> html.HTMLTable:
+@table_id("table-pools")
+def show_pools_info(ceph: CephInfo) -> Table:
     class PoolsTable(Table):
+        class html_params:
+            align = html.TableAlign.left_right
         pool = ident()
         id = count()
         size = ident()
@@ -164,7 +171,7 @@ def show_pools_info(ceph: CephInfo) -> html.HTMLTable:
             osds_pgs = []
 
             for osd in osds:
-                osds_pgs.append(ceph.osd_pool_pg_2d[osd.id].get(pool.name, 0))
+                osds_pgs.append(ceph.osd_pool_pg_2d.get(osd.id, {}).get(pool.name, 0))
 
             avg = float(sum(osds_pgs)) / len(osds_pgs)
             if len(osds_pgs) < 2:
@@ -180,7 +187,7 @@ def show_pools_info(ceph: CephInfo) -> html.HTMLTable:
 
                 row.pg_count_deviation = f"{avg:.1f} ~ {dev_perc}%", int(avg * 1000)
 
-    return table.html(id="table-pools", align=html.TableAlign.left_right)
+    return table
 
 
 @tab("PG's status")

@@ -129,10 +129,11 @@ version_rr = re.compile(r'ceph version\s+(?P<version>[^ ]*)\s+\((?P<hash>[^)]*?)
 
 
 def parse_ceph_versions(data: str) -> Dict[str, CephVersion]:
+    osd_ver_rr = re.compile(r"(osd\.\d+|mon\.[a-z0-9A-Z-]+):\s+{")
     vers: Dict[str, CephVersion] = {}
     for line in data.split("\n"):
         line = line.strip()
-        if line:
+        if osd_ver_rr.match(line):
             name, data_js = line.split(":", 1)
             rr = version_rr.match(json.loads(data_js)["version"])
             if not rr:
@@ -158,7 +159,7 @@ def load_monitors(storage: TypedStorage, ver: CephVersions, hosts: Dict[str, Hos
                           status=None if ver >= CephVersions.luminous else srv["health"],
                           host=hosts[srv["name"]],
                           role=MonRole.unknown,
-                          version=vers["mon." + srv["name"]])
+                          version=vers.get("mon." + srv["name"]))
 
         if ver < CephVersions.luminous:
             mon.kb_avail = srv["kb_avail"]
@@ -467,15 +468,20 @@ class CephLoader:
             osd_id = osd_data['osd']
             osd_df_data = osd_df_map[osd_id]
             used_space = osd_df_data['kb_used'] * 1024
-            free_space = osd_df_data['kb_avail']  * 1024
+            free_space = osd_df_data['kb_avail'] * 1024
             cluster_ip = osd_data['cluster_addr'].split(":", 1)[0]
 
             try:
                 cfg_txt = self.storage.txt.osd[str(osd_id)].config
             except AttributeError:
-                config = AttredDict(**self.storage.json.osd[str(osd_id)].config)
+                try:
+                    cfg = self.storage.json.osd[str(osd_id)].config
+                except AttributeError:
+                    cfg = None
             else:
-                config = AttredDict(**parse_txt_ceph_config(cfg_txt))
+                cfg = parse_txt_ceph_config(cfg_txt)
+
+            config = AttredDict(**cfg) if cfg is not None else None
 
             try:
                 host = self.ip2host[cluster_ip]
@@ -510,22 +516,28 @@ class CephLoader:
             historic_ops_storage_path = None if self.osd_historic_ops_paths is None \
                                         else self.osd_historic_ops_paths.get(osd_id)
             perf_cntrs = None if self.osd_perf_counters_dump is None else self.osd_perf_counters_dump.get(osd_id)
+
+            if free_space + used_space < 1:
+                free_perc = None
+            else:
+                free_perc = int((free_space * 100.0) / (free_space + used_space) + 0.5)
+
             osds[osd_id] = CephOSD(id=osd_id,
+                                   status=status,
                                    config=config,
                                    cluster_ip=cluster_ip,
                                    public_ip=osd_data['public_addr'].split(":", 1)[0],
                                    reweight=osd_rw_dict[osd_id],
-                                   version=osd_versions[osd_id],
+                                   version=osd_versions.get(osd_id),
                                    pg_count=None if sum_per_osd is None else sum_per_osd.get(osd_id, 0),
                                    used_space=used_space,
                                    free_space=free_space,
-                                   free_perc=int((free_space * 100.0) / (free_space + used_space) + 0.5),
+                                   free_perc=free_perc,
                                    host=host,
                                    storage_info=storage_info,
                                    run_info=self.load_osd_procinfo(osd_id) if status != OSDStatus.down else None,
                                    expected_weights=storage_info.data.dev_info.size / (1024 ** 4),
                                    crush_rules_weights=crush_rules_weights,
-                                   status=status,
                                    total_space=storage_info.data.dev_info.size,
                                    pgs=osd_pgs,
                                    pg_stats=pg_stats,

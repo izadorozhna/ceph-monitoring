@@ -11,7 +11,7 @@ from cephlib.units import b2ssize_10, b2ssize
 from . import table
 from . import html
 from .cluster_classes import CephInfo, Cluster, FileStoreInfo, BlueStoreInfo, MonRole, Pool
-from .visualize_utils import tab, seconds_to_str, get_all_versions, partition_by_len
+from .visualize_utils import tab, seconds_to_str, get_all_versions, partition_by_len, table_id
 from .checks import run_all_checks, CheckMessage
 from .report import Report
 from .obj_links import err_link, mon_link, pool_link
@@ -34,19 +34,22 @@ def show_cluster_summary(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
     t.add_row("PG count", ceph.status.num_pgs)
     t.add_row("Pool count", len(ceph.pools))
     t.add_row("Used", b2ssize(ceph.status.bytes_used))
-    t.add_row("Avail", b2ssize(ceph.status.bytes_avail))
-    t.add_row("Data", b2ssize(ceph.status.data_bytes))
+    t.add_row("Free space", b2ssize(ceph.status.bytes_avail))
+    t.add_row("Data size", b2ssize(ceph.status.data_bytes))
 
     avail_perc = ceph.status.bytes_avail * 100 / ceph.status.bytes_total
     t.add_row("Free %", int(avail_perc))
-    t.add_row("Mon count", len(ceph.mons))
-    t.add_row("OSD count", len(ceph.osds))
+    t.add_row("Monitors count", len(ceph.mons))
+    t.add_row("OSD's count", len(ceph.osds))
 
     mon_vers = get_all_versions(ceph.mons.values())
-    t.add_row("Mon version", ", ".join(map(str, sorted(mon_vers))))
+    t.add_row("Monitor versions", ", ".join(map(str, sorted(mon_vers))))
 
     osd_vers = get_all_versions(ceph.osds.values())
-    t.add_row("OSD version", ", ".join(map(str, sorted(osd_vers))))
+    vers = [str(ver) for ver in sorted(ver for ver in osd_vers if ver)]
+    if None in osd_vers:
+        vers.append("Unknown")
+    t.add_row("OSD's versions", ", ".join(vers))
 
     if ceph.has_fs and ceph.has_bs:
         stor_types = "filestore & bluestore"
@@ -57,7 +60,7 @@ def show_cluster_summary(cluster: Cluster, ceph: CephInfo) -> html.HTMLTable:
     else:
         assert False
 
-    t.add_row("Storage types",  stor_types)
+    t.add_row("OSD storage types",  stor_types)
 
     t.add_row("Monmap version", ceph.status.monmap_stat['epoch'])
     mon_tm = time.mktime(time.strptime(ceph.status.monmap_stat['modified'], "%Y-%m-%d %H:%M:%S.%f"))
@@ -134,7 +137,8 @@ class MonitorInfoTable(Table):
 
 
 @tab("Monitors info")
-def show_mons_info(ceph: CephInfo) -> html.HTMLTable:
+@table_id("table-mon-info")
+def show_mons_info(ceph: CephInfo) -> Table:
     """
     Monitors info
     {MonitorInfoTable.help()}
@@ -171,7 +175,7 @@ def show_mons_info(ceph: CephInfo) -> html.HTMLTable:
         row.free = perc, sort_by
         row.db_size = mon.database_size
 
-    return table.html("table-mon-info")
+    return table
 
 
 @tab("Settings")
@@ -300,8 +304,9 @@ class RulesetsTable(Table):
     data_disk_models = idents_list(help="Disk models, used to store data for this rule on OSD's")
 
 
+@table_id("table-rules")
 @tab("Crush rulesets")
-def show_ruleset_info(ceph: CephInfo) -> html.HTMLTable:
+def show_ruleset_info(ceph: CephInfo) -> Table:
     f"""
     Crush ruleset info
     {RulesetsTable.help()}
@@ -369,7 +374,7 @@ def show_ruleset_info(ceph: CephInfo) -> html.HTMLTable:
         row.disk_types = ["data: " + ", ".join(storage_disks_types), "wal/db/j: " + ", ".join(journal_disks_types)]
         row.data_disk_models = sorted(disks_info)
 
-    return table.html(id="table-rules")
+    return table
 
 
 @tab("Cluster err/warn")

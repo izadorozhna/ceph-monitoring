@@ -172,3 +172,10 @@ def partition_by_len(items: Iterable[Union[T, Tuple[T, int]]],
     if curr:
         yield curr
 
+
+def table_id(tid: str) -> Callable[[Callable], Callable]:
+    def closure(func):
+        func.html_id = tid
+        return func
+    return closure
+

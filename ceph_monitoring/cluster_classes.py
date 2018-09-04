@@ -542,7 +542,7 @@ class CephMonitor:
     status: Optional[str]
     host: Host
     role: MonRole
-    version: CephVersion
+    version: Optional[CephVersion]
     database_size: Optional[int] = None
     kb_avail: Optional[int] = None
     avail_percent: Optional[int] = None
@@ -791,9 +791,9 @@ class NodePGStats:
 class CephOSD:
     id: int
     host: Host
-    version: CephVersion
+    version: Optional[CephVersion]
     status: OSDStatus
-    config: Dict[str, str]
+    config: Optional[Dict[str, str]]
 
     cluster_ip: str
     public_ip: str
@@ -801,7 +801,7 @@ class CephOSD:
     reweight: float
     class_name: Optional[str]
 
-    free_perc: int
+    free_perc: Optional[int]
     used_space: int
     free_space: int
     total_space: int

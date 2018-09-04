@@ -163,6 +163,7 @@ class Row:
 
 
 class Table:
+
     def __init__(self) -> None:
         self.rows: List[Union[Type[Separator], Dict[str, Any]]] = []
         self.all_names = [name for name, _, _ in self.all_fields()]
@@ -215,8 +216,11 @@ class Table:
     def html(self, id=None, **kwargs) -> HTMLTable:
         headers, header_names, types = self.all_headers()
 
-        sortable = kwargs.get('sortable', True)
+        for name, val in getattr(getattr(self, 'html_params', None), '__dict__', {}).items():
+            if not name.startswith("__") and name not in kwargs:
+                kwargs[name] = val
 
+        sortable = kwargs.get('sortable', True)
         table = HTMLTable(id, headers=header_names, **kwargs)
 
         for row in self.rows:

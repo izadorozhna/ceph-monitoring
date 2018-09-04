@@ -8,3 +8,4 @@ beautifulsoup4
 seaborn
 matplotlib
 PyYAML
+cryptography

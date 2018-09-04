@@ -19,6 +19,7 @@ import functools
 import contextlib
 import subprocess
 import logging.config
+from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor, Executor
 from typing import Dict, Any, List, Tuple, Set, Callable, Optional, Union, Type, Iterator, NamedTuple, cast, Iterable
 
@@ -162,13 +163,6 @@ class Local(INode):
 
 
 # ------------ HELPER FUNCTIONS: GENERAL -------------------------------------------------------------------------------
-
-
-def get_allowed_paths_checker(disabled_patterns: Optional[List[str]]) -> Callable[[str], bool]:
-    if not disabled_patterns:
-        return lambda path: True
-    disabled = [re.compile(pattern) for pattern in disabled_patterns]
-    return lambda path: not any(pattern.search(path) for pattern in disabled)
 
 
 def ip_and_hostname(ip_or_hostname: str) -> Tuple[str, Optional[str]]:
@@ -346,18 +340,18 @@ def iter_extra_host(opts: Any) -> Iterator[str]:
 #  ---------------  COLLECTORS -----------------------------------------------------------------------------------------
 
 
+CMDRes = namedtuple("CMDRes", ["stdout", "code"])
+
 class Collector:
     """Base class for data collectors. Can collect data for only one node."""
     name = None  # type: str
     collect_roles = []  # type: List[str]
 
     def __init__(self,
-                 allowed_path: Callable[[str], bool],
                  storage: IStorageNNP,
                  opts: Any,
                  node: INode,
                  pretty_json: bool = False) -> None:
-        self.allowed_path = allowed_path
         self.storage = storage
         self.opts = opts
         self.node = node
@@ -377,12 +371,8 @@ class Collector:
         self.storage.put_raw(data, path)
 
     def save(self, path: str, frmt: str, code: int, data: Union[str, bytes, array.array],
-             check: bool = True, extra: List[str] = None) -> Optional[str]:
+             extra: List[str] = None) -> str:
         """Save results into storage"""
-        if check and not self.allowed_path(path):
-            logger.debug("Skipped saving %s bytes of data to path %r", len(data), path)
-            return None
-
         if code == 0 and frmt == 'json':
             assert isinstance(data, (str, bytes))
             data = json.dumps(json.loads(data), indent=4, sort_keys=True)
@@ -400,15 +390,10 @@ class Collector:
         else:
             raise TypeError("Can't save value of type {!r} (to {!r})".format(type(data), rpath))
 
-        return data if code == 0 else None  # type: ignore
+        return data
 
-    def save_file(self, path: str, file_path: str, frmt: str = 'txt', check: bool = True,
-                  compress: bool = True) -> Optional[bytes]:
+    def save_file(self, path: str, file_path: str, frmt: str = 'txt', compress: bool = True) -> bytes:
         """Download file from node and save it into storage"""
-        if check and not self.allowed_path(path):
-            logger.debug("Skipped file %r as result path %r is disabled", file_path, path)
-            return None
-
         try:
             content = self.node.get_file(file_path, compress=compress)
             code = 0
@@ -417,23 +402,19 @@ class Collector:
             content = str(exc)  # type: ignore
             code = 1
 
-        self.save(path, frmt, code, content, check=False)
+        self.save(path, frmt, code, content)
         return content if code == 0 else None  # type: ignore
 
-    def save_output(self, path: str, cmd: str, frmt: str = 'txt', check: bool = True) -> Optional[Tuple[int, str]]:
+    def save_output(self, path: str, cmd: str, frmt: str = 'txt') -> CMDRes:
         """Run command on node and store result into storage"""
-        if check and not self.allowed_path(path):
-            logger.debug("Skipped cmd %r as result path %r is disabled", cmd, path)
-            return None
-
         code, _, out = self.node.run(cmd)
 
         if code != 0:
             logger.warning("Cmd %s failed %s with code %s", cmd, self.node, code)
             frmt = 'err'
 
-        self.save(path, frmt, code, out, check=False)
-        return code, out
+        self.save(path, frmt, code, out)
+        return CMDRes(code=code, stdout=out)
 
     @abc.abstractmethod
     def collect(self, collect_roles_restriction: List[str]):
@@ -496,9 +477,7 @@ class CephDataCollector(Collector):
             self.save_output("mon_versions", self.ceph_cmd + "tell 'mon.*' version", "txt")
 
             self.save("collected_at", 'txt', 0, curr_data)
-            _, out = self.save_output("status", self.ceph_cmd + "status", 'json')  # type: ignore
-            assert out, "{!r} failed".format(self.ceph_cmd + "status")
-            status = json.loads(out)
+            status = json.loads(self.save_output("status", self.ceph_cmd + "status", 'json').stdout)
 
             health = status['health']
             status_str = health['status'] if 'status' in health else health['overall_status']
@@ -515,7 +494,7 @@ class CephDataCollector(Collector):
             ceph_health["blocked"] = "unknown"
 
             ceph_health_js = json.dumps(ceph_health)
-            self.save("ceph_health_dict", "js", 0, ceph_health_js, check=False)
+            self.save("ceph_health_dict", "js", 0, ceph_health_js)
 
             self.__class__.num_pgs = status['pgmap']['num_pgs']  # type: ignore
 
@@ -540,10 +519,15 @@ class CephDataCollector(Collector):
                          'osd lspools',
                          'osd perf',
                          'osd df',
-                         'health detail'])
+                         'health detail',
+                         "osd crush dump",
+                         "node_ls",
+                         "features",
+                         "report",
+                         "time-sync-status"])
 
             for cmd in cmds:
-                self.save_output(cmd.replace(" ", "_"), self.ceph_cmd + cmd, 'json')
+                self.save_output(cmd.replace(" ", "_").replace("-", '_'), self.ceph_cmd + cmd, 'json')
 
             osd_dump = self.save_output('osd_dump', self.ceph_cmd + "osd dump", 'json')
 
@@ -563,20 +547,18 @@ class CephDataCollector(Collector):
                     cmd = cmd.format('-' * 60, self.rbd_cmd)
                     self.save_output("rbd_images_{}".format(pool), cmd, "txt")
 
-            self.save_output("default_config", self.ceph_cmd_txt + "--show-config", 'txt')
             self.save_output("rados_df", self.rados_cmd + "df", 'json')
             self.save_output("rados_df", self.rados_cmd_txt + "df", 'txt')
-            self.save_output("ceph_s", self.ceph_cmd_txt + "-s", 'txt')
-            self.save_output("ceph_osd_dump", self.ceph_cmd_txt + "osd dump", 'txt')
-            self.save_output("time_sync_status", self.ceph_cmd_txt + 'time-sync-status', 'json')
-            self.save_output("report", self.ceph_cmd_txt + 'report', 'json')
-            self.save_output("osd_utilization", self.ceph_cmd_txt + 'osd utilization', 'txt')
-            self.save_output("osd_blocked_by", self.ceph_cmd_txt + "osd blocked_by", "txt")
-            self.save_output("node_ls", self.ceph_cmd_txt + "node ls", "json")
-            self.save_output("features", self.ceph_cmd_txt + "features", 'json')
+
             self.save_output("realm_list", self.radosgw_admin_cmd + "realm list", "txt")
             self.save_output("zonegroup_list", self.radosgw_admin_cmd + "zonegroup list", "txt")
             self.save_output("zone_list", self.radosgw_admin_cmd + "zone list", "txt")
+
+            self.save_output("default_config", self.ceph_cmd_txt + "--show-config", 'txt')
+            self.save_output("ceph_s", self.ceph_cmd_txt + "-s", 'txt')
+            self.save_output("ceph_osd_dump", self.ceph_cmd_txt + "osd dump", 'txt')
+            self.save_output("osd_utilization", self.ceph_cmd_txt + 'osd utilization', 'txt')
+            self.save_output("osd_blocked_by", self.ceph_cmd_txt + "osd blocked-by", "txt")
             self.save_output("osd dump", self.ceph_cmd_txt + "osd dump", "txt")
 
             temp_fl = "%08X" % random.randint(0, 2 << 64)
@@ -614,17 +596,16 @@ class CephDataCollector(Collector):
         for osd_id in unexpected_osds:
             logger.warning("Unexpected osd-{} in node {}.".format(osd_id, self.node))
 
-        cephdisk_js = self.node.run_exc("ceph-disk list --format=json").decode("utf8")
-        cephdisk_ls = self.node.run_exc("ceph-disk list").decode("utf8")
-        lsblk_js = self.node.run_exc("lsblk -a --json").decode("utf8")
-        cephdisk_dct = json.loads(cephdisk_js)
-        dev_tree = parse_devices_tree(json.loads(lsblk_js))
-
         with self.chdir('hosts/' + self.node.name):
-            self.save("cephdisk", 'txt', 0, cephdisk_ls)
-            self.save("cephdisk", 'json', 0, cephdisk_js)
+            self.save_output("cephdisk", "ceph-disk list")
+            cephdisklist_js = self.save_output("cephdisk", "ceph-disk list --format=json", "json").stdout
+            lsblk_js = self.save_output("lsblk", "lsblk -a --json", "json").stdout
+            self.save_output("lsblk", "lsblk -a")
 
+        cephdisk_dct = json.loads(cephdisklist_js)
+        dev_tree = parse_devices_tree(json.loads(lsblk_js))
         devs_for_osd = {}  # type: Dict[int, Dict[str, str]]
+
         for dev_info in cephdisk_dct:
             for part_info in dev_info.get('partitions', []):
                 if "cluster" in part_info and part_info.get('type') == 'data':
@@ -633,68 +614,64 @@ class CephDataCollector(Collector):
                                             for attr in ("block_dev", "journal_dev", "path",
                                                          "block.db_dev", "block.wal_dev")
                                             if attr in part_info}
+                    devs_for_osd[osd_id]['store_type'] = 'filestore' if "journal_dev" in part_info else 'bluestore'
 
         for osd in self.node.osds:
             with self.chdir('osd/{}'.format(osd.id)):
                 cmd = "tail -n {} /var/log/ceph/ceph-osd.{}.log".format(self.opts.ceph_log_max_lines, osd.id)
                 self.save_output("log", cmd)
 
-                self.save_output("perf_dump",
-                                 "ceph --admin-daemon /var/run/ceph/ceph-osd.{}.asok perf dump".format(osd.id))
+                osd_daemon_cmd = "ceph --admin-daemon /var/run/ceph/ceph-osd.{}.asok".format(osd.id)
+                self.save_output("perf_dump", osd_daemon_cmd + " perf dump")
+                self.save_output("perf_hist_dump", osd_daemon_cmd + " perf histogram dump".format(osd.id))
 
                 # TODO: much of this can be done even id osd is down for filestore
                 if osd.id in running_osds:
                     if not osd.config:
-                        code, osd.config = self.save_output("config",
-                                                            "ceph daemon osd.{} config show".format(osd.id),
-                                                            "json")
+                        config, code = self.save_output("config",
+                                                        "ceph daemon osd.{} config show".format(osd.id),
+                                                        "json")
                         assert code == 0
-                        jcfg = json.loads(osd.config)
-                        dir_path = jcfg["osd_data"]
+                        self.save("config", "json", 0, config)
                     else:
-                        dir_path = re.search("osd_data = (?P<dir_path>.*?)\n", osd.config).group("dir_path")
                         self.save("config", "txt", 0, osd.config)
-
-                    stor_type = self.node.get_file(os.path.join(dir_path, 'type'))
-                    stor_type = stor_type.decode('utf8').strip()
-                    assert stor_type in ('filestore', 'bluestore')
-                    devs_for_osd[osd.id]['store_type'] = stor_type
-
-                    if stor_type == 'filestore':
-                        cmd = "ls -1 '{0}'".format(os.path.join(osd.storage, 'current'))
-                        code, _, res = self.node.run(cmd)
-
-                        if code == 0:
-                            pgs = [name.split("_")[0] for name in res.split() if "_head" in name]
-                            res = "\n".join(pgs)
-
-                        self.save("pgs", "txt", code, res)
-
-                    if stor_type == 'filestore':
-                        data_dev = devs_for_osd[osd.id]["path"]
-                        j_dev = devs_for_osd[osd.id]["journal_dev"]
-                        osd_dev_conf = {'data': data_dev,
-                                        'journal': j_dev,
-                                        'r_data': dev_tree[data_dev],
-                                        'r_journal': dev_tree[j_dev],
-                                        'type': stor_type}
-                    else:
-                        assert stor_type == 'bluestore'
-                        data_dev = devs_for_osd[osd.id]["block_dev"]
-                        db_dev = devs_for_osd[osd.id].get('block.db_dev', data_dev)
-                        wal_dev = devs_for_osd[osd.id].get('block.wal_dev', db_dev)
-                        osd_dev_conf = {'data': data_dev,
-                                        'wal': wal_dev,
-                                        'db': db_dev,
-                                        'r_data': dev_tree[data_dev],
-                                        'r_wal': dev_tree[wal_dev],
-                                        'r_db': dev_tree[db_dev],
-                                        'type': stor_type}
-
-                    self.save('devs_cfg', 'json', 0, json.dumps(osd_dev_conf))
                 else:
-                    logger.warning("osd-{} in node {} is down.".format(osd.id, self.node.name) +
-                                   " No config available, will use default data and journal path")
+                    logger.warning("osd-{} in node {} is down. No config available".format(osd.id, self.node.name))
+
+                stor_type = devs_for_osd[osd.id]['store_type']
+
+                if stor_type == 'filestore':
+                    cmd = "ls -1 '{0}'".format(os.path.join(osd.storage, 'current'))
+                    code, _, res = self.node.run(cmd)
+
+                    if code == 0:
+                        pgs = [name.split("_")[0] for name in res.split() if "_head" in name]
+                        res = "\n".join(pgs)
+
+                    self.save("pgs", "txt", code, res)
+
+                if stor_type == 'filestore':
+                    data_dev = devs_for_osd[osd.id]["path"]
+                    j_dev = devs_for_osd[osd.id]["journal_dev"]
+                    osd_dev_conf = {'data': data_dev,
+                                    'journal': j_dev,
+                                    'r_data': dev_tree[data_dev],
+                                    'r_journal': dev_tree[j_dev],
+                                    'type': stor_type}
+                else:
+                    assert stor_type == 'bluestore'
+                    data_dev = devs_for_osd[osd.id]["block_dev"]
+                    db_dev = devs_for_osd[osd.id].get('block.db_dev', data_dev)
+                    wal_dev = devs_for_osd[osd.id].get('block.wal_dev', db_dev)
+                    osd_dev_conf = {'data': data_dev,
+                                    'wal': wal_dev,
+                                    'db': db_dev,
+                                    'r_data': dev_tree[data_dev],
+                                    'r_wal': dev_tree[wal_dev],
+                                    'r_db': dev_tree[db_dev],
+                                    'type': stor_type}
+
+                self.save('devs_cfg', 'json', 0, json.dumps(osd_dev_conf))
 
         pids = self.node.rpc.sensors.find_pids_for_cmd('ceph-osd')
         logger.debug("Found next pids for OSD's on node %s: %r", self.node.name, pids)
@@ -779,11 +756,11 @@ class CephDataCollector(Collector):
             self.save_output("ceph_log", tail_ln + " /var/log/ceph/ceph.log")
 
             log_issues = self.node.rpc.sensors.find_issues_in_ceph_log(self.opts.ceph_log_max_lines)
-            self.save("ceph_log_wrn_err", "txt", 0, log_issues, check=False)
+            self.save("ceph_log_wrn_err", "txt", 0, log_issues)
 
             issues_count, regions = self.node.rpc.sensors.analyze_ceph_logs_for_issues()
-            self.save("log_issues_count", "json", 0, json.dumps(issues_count), check=False)
-            self.save("status_regions", "json", 0, json.dumps(regions), check=False)
+            self.save("log_issues_count", "json", 0, json.dumps(issues_count))
+            self.save("status_regions", "json", 0, json.dumps(regions))
 
             self.save_output("ceph_audit", tail_ln + " /var/log/ceph/ceph.audit.log")
             self.save_output("config", self.ceph_cmd + "daemon mon.{} config show".format(self.node.mon),
@@ -792,7 +769,7 @@ class CephDataCollector(Collector):
             self.save_output("ceph_var_dirs_size", "du -s /var/lib/ceph/m*")
 
             log_issues = self.node.rpc.sensors.find_issues_in_ceph_log(self.opts.ceph_log_max_lines)
-            self.save("ceph_log_wrn_err", "txt", 0, log_issues, check=False)
+            self.save("ceph_log_wrn_err", "txt", 0, log_issues)
 
 
 class NodeCollector(Collector):
@@ -925,7 +902,7 @@ class NodeCollector(Collector):
                     ver = 0
 
             if ver < 1.0:
-                logger.warning("Nvme tool too old %s, at least 1.0 version is required", version)
+                logger.warning("Nvme tool too old %s, at least 1.0 version is required", ver)
             else:
                 out_t = self.save_output('nvme_list', 'nvme list -o json', frmt='json')
                 if out_t is not None:
@@ -1053,7 +1030,6 @@ class CollectorCoordinator:
         self.ceph_master_node = None  # type: Optional[INode]
         self.nodes = []  # type: List[Node]
         self.collect_load_data_at = 0
-        self.allowed_path_checker = get_allowed_paths_checker(self.opts.disable)
         self.allowed_collectors = self.opts.collectors.split(',')
         self.load_collectors = []  # type: List[LoadCollector]
 
@@ -1148,8 +1124,7 @@ class CollectorCoordinator:
     def start_load_collectors(self) -> Iterator[Callable]:
         if LoadCollector.name in self.allowed_collectors:
             for node in self.nodes:
-                collector = LoadCollector(self.allowed_path_checker,
-                                          self.storage,
+                collector = LoadCollector(self.storage,
                                           self.opts,
                                           node,
                                           pretty_json=not self.opts.no_pretty_json)
@@ -1174,8 +1149,7 @@ class CollectorCoordinator:
     def collect_ceph_data(self) -> Iterator[Callable]:
         if CephDataCollector.name in self.allowed_collectors:
             assert self.ceph_master_node is not None
-            collector = CephDataCollector(self.allowed_path_checker,
-                                          self.storage,
+            collector = CephDataCollector(self.storage,
                                           self.opts,
                                           self.ceph_master_node,
                                           pretty_json=not self.opts.no_pretty_json)
@@ -1183,8 +1157,7 @@ class CollectorCoordinator:
 
             if not self.opts.ceph_master_only:
                 for node in self.nodes:
-                    collector = CephDataCollector(self.allowed_path_checker,
-                                                  self.storage,
+                    collector = CephDataCollector(self.storage,
                                                   self.opts,
                                                   node,
                                                   pretty_json=not self.opts.no_pretty_json)
@@ -1199,8 +1172,7 @@ class CollectorCoordinator:
             if collector_name not in (LoadCollector.name, CephDataCollector.name):
                 for node in self.nodes:
                     collector_cls = ALL_COLLECTORS_MAP[collector_name]
-                    collector = collector_cls(self.allowed_path_checker,
-                                              self.storage,
+                    collector = collector_cls(self.storage,
                                               self.opts,
                                               node,
                                               pretty_json=not self.opts.no_pretty_json)
@@ -1288,11 +1260,10 @@ def parse_args(argv: List[str]) -> Any:
                    help="Comma separated list of collectors. Select from : " +
                    ",".join(coll.name for coll in ALL_COLLECTORS))
     p.add_argument("--ceph-master", metavar="NODE", help="Run all ceph cluster commands from NODE")
-    p.add_argument("--no-rbd-info", action='store_true', help="Con't collect info for rbd volumes")
+    p.add_argument("--no-rbd-info", action='store_true', help="Don't collect info for rbd volumes")
     p.add_argument("--ceph-master-only", action="store_true", help="Run only ceph master data collection, " +
                    "no info from osd/monitors would be collected")
     p.add_argument("-C", "--ceph-extra", default="", help="Extra opts to pass to 'ceph' command")
-    p.add_argument("-d", "--disable", metavar="PATTERN", default=[], nargs='*', help="Disable collect pattern")
     p.add_argument("-D", "--detect-only", action="store_true", help="Don't collect any data, only detect cluster nodes")
     p.add_argument("-g", "--save-to-git", metavar="DIR", help="Absolute path to git repo, where to commit output")
     p.add_argument("--git-push", action='store_true',

@@ -438,7 +438,8 @@ def osd_of_same_size_has_close_data_size(config: CheckConfig, cluster: Cluster, 
     data_per_osd: Dict[int, List[float]] = collections.defaultdict(list)
     for osd in ceph.osds.values():
         total_space = osd.used_space + osd.free_space
-        data_per_osd[total_space].append(osd.free_space / total_space)
+        if total_space != 0:
+            data_per_osd[total_space].append(osd.free_space / total_space)
 
     failed = False
     max_used_space_diff = config.get("max_used_space_diff", 0.2)
