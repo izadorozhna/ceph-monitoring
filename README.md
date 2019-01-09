@@ -16,11 +16,11 @@ How to collect data:
 * If SSH daemons didn't listen on ceph client network - you need provide inventory file, which have IP's or names
   of all ceph nodes, usable for ssh. Inventory must be in format one IP_or_name per line.
 * root or user with passwordless sudo need to used. In second case pass `-u USER_NAME --sudo` options.
-* Run `curl -o ceph_report.sh 'https://raw.githubusercontent.com/Mirantis/ceph-monitoring/master/binary/ceph_report.sh`
+* Run `curl -o ceph_report.sh 'https://raw.githubusercontent.com/Mirantis/ceph-monitoring/master/binary/ceph_report.sh'`
 
 * Collect cluster info:
 
-  `bash ceph_report.sh -c node,ceph.load -l DEBUG -O OUTPUT_FOLDER ADDITIONAL_OPTIONS`
+  `bash ceph_report.sh -c node,ceph,load -l DEBUG -O OUTPUT_FOLDER ADDITIONAL_OPTIONS`
 
 Additional options (in most cases you will need them all):
 - For passing inventory `--inventory INV_FILE`. Path to inventory MUST be absolute.
